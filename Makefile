@@ -2,12 +2,22 @@
 # fakeos - Makefile
 # ==============================================================================
 
-# Toolchain configuration
-FCC       := fakecc
-NASM      := nasm
-LD        := x86_64-elf-ld
-OBJCOPY   := x86_64-elf-objcopy
-QEMU      := qemu-system-x86_64
+# Toolchain configuration (Auto-detect cross-compiler or native Linux/macOS tools)
+FCC       ?= $(shell which fakecc 2>/dev/null || echo fakecc)
+NASM      ?= $(shell which nasm 2>/dev/null || echo nasm)
+QEMU      ?= $(shell which qemu-system-x86_64 2>/dev/null || echo qemu-system-x86_64)
+
+ifeq ($(origin LD),default)
+LD        := $(shell which x86_64-elf-ld 2>/dev/null || which x86_64-linux-gnu-ld 2>/dev/null || echo ld)
+else
+LD        ?= $(shell which x86_64-elf-ld 2>/dev/null || which x86_64-linux-gnu-ld 2>/dev/null || echo ld)
+endif
+
+ifeq ($(origin OBJCOPY),default)
+OBJCOPY   := $(shell which x86_64-elf-objcopy 2>/dev/null || which x86_64-linux-gnu-objcopy 2>/dev/null || echo objcopy)
+else
+OBJCOPY   ?= $(shell which x86_64-elf-objcopy 2>/dev/null || which x86_64-linux-gnu-objcopy 2>/dev/null || echo objcopy)
+endif
 
 # Project directories
 BUILD_DIR := build

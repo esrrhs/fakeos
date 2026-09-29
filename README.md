@@ -1,5 +1,6 @@
 # fakeos
 
+[![CI](https://github.com/esrrhs/fakeos/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakeos/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 基于自研 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 从零构建的现代教学与实验性 64 位操作系统（x86-64）。

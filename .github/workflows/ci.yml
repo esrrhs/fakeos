@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    name: Build & Test (Ubuntu x86-64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fakeos repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            nasm \
+            qemu-system-x86 \
+            binutils-x86-64-linux-gnu \
+            build-essential \
+            cmake \
+            python3
+
+      - name: Build and install fakecc toolchain
+        run: |
+          git clone --depth 1 https://github.com/esrrhs/fakecc.git /tmp/fakecc
+          cmake -S /tmp/fakecc -B /tmp/fakecc/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/fakecc/build --target fakecc --parallel
+          sudo cp /tmp/fakecc/build/fakecc /usr/local/bin/fakecc
+          fakecc || true
+
+      - name: Build fakeos kernel
+        run: |
+          make clean
+          make build
+
+      - name: Run automated QEMU regression tests
+        run: |
+          make test
+
+      - name: Upload kernel binary artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fakeos-kernel-artifacts
+          path: |
+            build/fakeos.elf
+            build/fakeos64.elf
