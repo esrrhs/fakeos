@@ -7,19 +7,38 @@
 
 ---
 
-## 📖 项目愿景与设计定位
+## 📖 项目愿景与现代化设计准则
 
-`fakeos` 是一套完全基于自主研发的独立 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 重构的原生现代 64 位操作系统内核。
+`fakeos` 是一套完全基于自主研发的独立 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 重构的原生现代 64 位操作系统内核（x86-64）。
 
-本项目旨在摆脱传统类 Unix/Linux 历史遗留的技术包袱与陈旧设计，以现代操作系统理念从零构建干净、精简、模块化且全栈自洽的现代 OS 架构。
+本项目彻底摒弃传统操作系统几十年来积累的历史兼容包袱（如 16 位实模式、慢速软中断、8259A PIC、C 预处理器文本拼接与宏灾难等），以现代操作系统技术标准从零全新实现。
 
-### 核心亮点
-1. **编译器与内核全栈深度自洽**：
-   - 传统操作系统内核开发普遍依赖外部复杂的 GNU/LLVM 工具链（GCC/Clang/Binutils）。`fakeos` 深度整合 `fakecc` 现代化模块（Package）体系、SSA 优化流水线及内嵌 ELF 链接能力，实现内核从模块化 C 源码到二进制机器码的全链条完全自主可控。
-2. **纯净无外部标准库依赖（Freestanding）**：
-   - 内核直接基于裸机环境运行，充分利用 `fakecc` 的零依赖 `-nostdlib` 模式与内建 GCC 内置函数（如溢出算术、栈帧与位运算支持）。
-3. **闭环生态自举终极目标**：
-   - 在 `fakeos` 完成用户态与基础 POSIX 系统调用子集后，将 `fakecc` 移植至 `fakeos` 用户空间，达成 **"fakeos 运行 fakecc 编译 fakeos 内核与用户态程序"** 的完全自举闭环。
+### 🌟 现代化操作系统核心技术准则
+
+1. **原生 64 位长模式与硬件标准对齐（Native x86-64 Long Mode）**：
+   - 彻底告别 16 位实模式与古旧 BIOS 中断，系统从引导阶段立即切入 64 位长模式。
+   - 严格遵循 SysV AMD64 ABI 调用规范；引导期全面激活 `CR4.OSFXSR` / `CR4.OSXMMEXCPT` 与 SSE/AVX 向量扩展，保证寄存器保护机制与 ABI 严格契合。
+
+2. **工业级高半核内存布局（Higher-Half Kernel Architecture）**：
+   - 内核物理加载在 `0x00100000` (1MB)，虚拟基地址统一映射至负空间 `0xFFFFFFFF80000000` (-2GB 空间)，遵循 `-mcmodel=kernel` 内存规范。
+   - 完整的下半部 128TB 巨量虚拟空间全部独立预留给用户空间，实现内核空间与用户态空间的严密物理/虚拟隔离。
+
+3. **现代内存管理与分页模型（Modern Memory Management）**：
+   - 全面启用 4 级分页（PML4，并预留 5 级分页 PML5 扩展能力），支持 4KB 标准页与 2MB/1GB 大页。
+   - 构建物理内存直接映射区（HHDM: Higher-Half Direct Map），支持无锁/高效物理地址与虚拟地址转换。
+   - 物理内存管理采用伙伴系统（Buddy System），内核堆对象分配采用 Slab/Slub 分配器。
+
+4. **现代化异常与中断机制（Modern Exception & APIC Infrastructure）**：
+   - 彻底淘汰过时的 8259A PIC 芯片，全面基于 Local APIC 与 I/O APIC 构建现代化中断路由与多核调度基础设施。
+   - 基于 64 位中断描述符表（IDT），配置 TSS 与独立的 IST（Interrupt Stack Table）异常中断栈，即便在内核发生栈溢出（Stack Overflow）或双重错误（Double Fault）时也能安全捕获并打印全量寄存器快照 Dump。
+
+5. **高效特权级隔离与原生快速系统调用（Hardware-Native Isolation & Fast Syscalls）**：
+   - 彻底废弃慢速过时的 `int 0x80` 软中断陷入机制。
+   - 全面采用 x86-64 硬件原生提供的 `SYSCALL` / `SYSRET` 机制，配合 `MSR_LSTAR` 与 `MSR_SFMASK` 实现纳秒级特权级上下文切换。
+
+6. **全栈编译器与内核自洽闭环（fakecc Package Ecosystem）**：
+   - 彻底摒弃 C 语言脆弱且容易命名污染的头文件（`#include`）与宏定义（`#define`），以现代类似 Go 的 Package 模块体系驱动内核。
+   - 依托 `fakecc` 优秀的 SSA 中端优化与内嵌 ELF 目标生成能力，打通“C 源码 -> 内核机器码 -> 运行测试 -> 自举重编译”全链路。
 
 ---
 
@@ -35,67 +54,24 @@
 +===================================================================+
 |                     fakeos Kernel (x86-64)                        |
 |  +-------------------------------------------------------------+  |
-|  | Syscall Dispatcher (syscall / sysret)                       |  |
+|  | Fast Syscall Dispatcher (SYSCALL / SYSRET / MSR_LSTAR)      |  |
 |  +-------------------------------------------------------------+  |
-|  | Process & Scheduler (PCB / Context Switch / Preemption)     |  |
+|  | Process & Preemptive Scheduler (PCB / TCB / Context Switch) |  |
 |  +-------------------------------------------------------------+  |
-|  | Virtual Memory (PML4 / Kernel Space / User Page Tables)     |  |
+|  | Virtual Memory Manager (PML4 / HHDM / VMA / Demand Paging)  |  |
 |  +-------------------------------------------------------------+  |
-|  | Memory Allocator (Physical Page Frame / Buddy / Slab / Kmalloc) |
+|  | Memory Allocators (Physical Buddy Allocator / Slab / Slub)  |  |
 |  +-------------------------------------------------------------+  |
-|  | VFS & File Systems (Rootfs / Ramfs / Ext2)                  |  |
+|  | VFS & File Systems (VFS Core / Ramfs / Ext2)                |  |
 |  +-------------------------------------------------------------+  |
-|  | Device Drivers (UART 16550 / VGA / Keyboard / VirtIO / IDE) |  |
+|  | Modern Device Drivers (UART 16550 / Framebuffer / VirtIO)   |  |
 |  +-------------------------------------------------------------+  |
-|  | Architecture Support (IDT / GDT / TSS / APIC / PIT / DWARF) |  |
+|  | Architecture Support (64-bit IDT / TSS IST / APIC / HPET)   |  |
 +===================================================================+
 |                     Hardware / Hypervisor                         |
-|                    x86-64 (QEMU / Bochs / Baremetal)              |
+|                    x86-64 (QEMU / KVM / Baremetal)                |
 +-------------------------------------------------------------------+
 ```
-
----
-
-## 🗺️ 模块划分与详细设计
-
-### 1. 引导与体系结构初始化 (`boot/`, `arch/x86_64/`)
-- **Bootloader 协议**：采用 Multiboot2 / Limine 引导协议，快速进入 64 位长模式（Long Mode）。
-- **描述符表**：构建全局描述符表（GDT）与任务状态段（TSS），为特权级切换与中断栈准备上下文。
-- **中断与异常管理**：
-  - 构建中断描述符表（IDT），实现 0-31 号 CPU 异常捕获（如 Page Fault、General Protection Fault 等）并打印寄存器快照。
-  - 硬件中断控制器：配置 8259A PIC 与 Local APIC / IO-APIC。
-  - 时钟源：PIT / HPET / APIC Timer 提供系统时钟节拍（Tick）。
-
-### 2. 内存管理子系统 (`kernel/mm/`)
-- **物理内存管理（PMM）**：解析 Bootloader 提供的物理内存图（Memory Map），实现位图（Bitmap）及伙伴系统（Buddy System）管理物理页帧（4KB Page Frames）。
-- **虚拟内存管理（VMM）**：
-  - 启用 4 级分页机制（PML4 / PDPT / PD / PT），构建内核高端地址映射（Direct-Mapping / Higher-Half Kernel）。
-  - 虚存区域管理（VMA）：支持用户态地址空间分配、惰性分配（Demand Paging）、写时复制（COW）。
-- **内核对象分配器**：实现基于连续物理页的 `kmalloc` / `kfree`，结合 Slab / Slub 分配机制优化内核结构体分配。
-
-### 3. 进程与调度子系统 (`kernel/sched/`)
-- **执行实体抽象**：定义进程控制块（PCB）与线程控制块（TCB），保存寄存器上下文、内核栈、页表基地址（CR3）与打开文件描述符。
-- **上下文切换**：基于汇编编写高效上下文保存与恢复函数。
-- **调度算法**：初期支持多级时间片轮转（RR）调度，逐步演进至优先级及抢占式调度机制。
-- **进程同步原语**：实现 Spinlock、Mutex 与条件变量。
-
-### 4. 系统调用接口 (`kernel/syscall/`)
-- 启用 x86-64 原生 `SYSCALL` / `SYSRET` 快速系统调用指令。
-- 建立系统调用派发表，逐步提供兼容 POSIX 标准的系统调用子集（`fork`, `execve`, `exit`, `waitpid`, `read`, `write`, `open`, `close`, `mmap`, `brk` 等）。
-
-### 5. 文件系统与虚拟文件系统 (`kernel/fs/`)
-- **虚拟文件系统（VFS）**：抽象 `inode`、`dentry`、`file` 与 `file_operations` 接口。
-- **根文件系统**：支持内置 `Initramfs` / `Ramfs` 内存文件系统；后续扩展持久化只读/读写块文件系统（如 Ext2）。
-
-### 6. 字符与输入输出驱动 (`drivers/`)
-- **串口驱动（UART 16550）**：提供早期内核启动日志输出（Early Printk / Console）。
-- **显示驱动**：VGA 文本模式 / 帧缓冲区（Framebuffer）控制台输出。
-- **键盘驱动**：PS/2 键盘控制器中断驱动与字符映射。
-- **块设备驱动**：IDE / AHCI / VirtIO-Block 设备抽象。
-
-### 7. 工具链与 fakecc 深度协同 (`toolchain/`)
-- 利用 fakecc 的 `-nostdlib` 编译生成纯独立无依赖的内核 ELF64 二进制。
-- 配合 fakecc 生成 DWARF 调试符号，支持 QEMU + GDB 源码级逐行单步调试。
 
 ---
 
@@ -103,43 +79,51 @@
 
 ```mermaid
 flowchart TD
-    M1["阶段一：裸机脚手架与调试基础设施"] --> M2["阶段二：内存管理子系统"]
-    M2 --> M3["阶段三：进程抽象、调度与系统调用"]
-    M3 --> M4["阶段四：VFS、驱动与用户空间"]
-    M4 --> M5["阶段五：fakecc 自举与生态闭环"]
+    M1["阶段一：裸机脚手架与调试基础设施<br/>(进行中 · 核心骨架已跑通)"] --> M2["阶段二：现代内存管理子系统<br/>(PMM / VMM / HHDM / Slab)"]
+    M2 --> M3["阶段三：进程抽象、抢占调度与快速系统调用<br/>(PCB / TCB / SYSCALL)"]
+    M3 --> M4["阶段四：VFS 虚拟文件系统与用户态空间<br/>(Ring 3 / Ramfs / libc)"]
+    M4 --> M5["阶段五：fakecc 自举与生态全闭环<br/>(自举编译内核)"]
 ```
 
-### 阶段一：裸机脚手架与调试基础设施（Milestone 1）
-- [ ] 确定引导方案（Multiboot2），配置最小内核链接脚本（Linker Script，Higher-Half Kernel 映射）。
-- [ ] 配置基于 [fakecc](https://github.com/esrrhs/fakecc) 的独立编译与构建脚本（Makefile / CMake）。
-- [ ] 实现串口输出（UART 16550）及内核格式化日志函数（`kprintf`）。
-- [ ] 完成 64 位 GDT、TSS 与 IDT 初始化，实现通用异常捕获与寄存器 Dump。
-- [ ] 配置 QEMU 自动化运行与 GDB 远程调试脚本。
+### 阶段一：裸机脚手架与调试基础设施（Milestone 1 · 核心骨架已就绪）
+- [x] **引导方案确定与链接脚本**：实现 Multiboot 1/2 双兼容头，配置高半核链接脚本（LMA `0x100000`, VMA `0xFFFFFFFF80000000`）。
+- [x] **fakecc 现代化编译流水线**：建立跨平台（macOS/Linux）构建系统（Makefile），实现包依赖自动解析与无外部头文件独立编译。
+- [x] **64 位长模式切换与初始分页**：实现 32 位到 64 位长模式跳转，开启 PAE、Paging 与 SSE 向量支持，搭建初始 4 级页表。
+- [x] **基础控制台输出驱动**：实现 UART 16550 串口驱动（COM1 115200 8N1）与 VGA 80x25 文本显存控制台驱动（支持硬件光标与平滑滚屏）。
+- [x] **内核格式化日志系统**：实现内核级双通道格式化日志函数 `kprintf`（同步输出至串口终端与屏幕）。
+- [x] **自动化测试与 CI 流水线**：编写无头 QEMU 自动化回归测试脚本（`make test`），接入 GitHub Actions 持续集成。
+- [ ] **64 位 IDT 中断描述符表**：构建 64 位中断门与陷阱门描述符结构，实现统一中断入口派发表。
+- [ ] **CPU 异常捕获与寄存器 Dump**：实现 0~31 号硬件异常（重点覆盖 Page Fault `#PF` 与 General Protection Fault `#GP`）的汇编上下文保存桩（Stubs）与全景寄存器快照 Dump。
+- [ ] **TSS 与 IST 独立异常栈**：初始化 64 位任务状态段（TSS），配置 Interrupt Stack Table，防护内核栈溢出与 Double Fault。
+- [ ] **Local APIC 定时器初始化**：配置 APIC Timer 提供稳定的高精度系统时钟节拍（Tick）。
 
-### 阶段二：内存管理子系统（Milestone 2）
-- [ ] 解析 Bootloader 内存分布元数据，建立物理页帧管理器（Bitmap / Buddy Allocator）。
-- [ ] 实现 4 级分页管理（Page Table Helper），支持虚拟地址映射、解映射与保护属性设置。
-- [ ] 划分内核地址空间与直接映射区（Direct Physical Mapping）。
-- [ ] 实现内核动态堆内存分配器（`kmalloc` / `kfree`）。
+### 阶段二：现代内存管理子系统（Milestone 2）
+- [ ] **物理内存管理器（PMM）**：解析 Multiboot 提供的内存映射图，实现基于位图（Bitmap）及伙伴系统（Buddy System）的 4KB 物理页分配与释放。
+- [ ] **高端物理直接映射（HHDM）**：建立全量物理内存在高半空间的直接连续映射区，彻底解决内核访问物理页表的寻址问题。
+- [ ] **虚拟内存管理（VMM）**：实现 4 级页表增删查改工具链（PML4 / PDPT / PD / PT），支持页面属性细粒度控制（NX、Read-Only、User/Supervisor、Cache-Disable）。
+- [ ] **内核动态堆分配器（Kmalloc / Slab）**：基于伙伴系统物理页构建 Slab/Slub 对象缓存分配器，提供高效 `kmalloc` / `kfree`。
+- [ ] **虚存区间与按需分页（VMA & Demand Paging）**：抽象虚拟内存区域（VMA），支持缺页异常（Page Fault）处理、按需分配与写时复制（COW）。
 
-### 阶段三：进程抽象、调度与系统调用（Milestone 3）
-- [ ] 设计线程与进程控制块（TCB / PCB），分配独立内核栈与上下文保存结构。
-- [ ] 编写汇编级上下文切换（`switch_to`），实现协作式多任务。
-- [ ] 配置时钟中断（PIT / APIC Timer），实现基于时间片轮转的抢占式调度器。
-- [ ] 配置 `MSR_LSTAR` 与 `SYSCALL` / `SYSRET` 机制，实现用户态到内核态的快速陷入。
+### 阶段三：进程抽象、抢占调度与快速系统调用（Milestone 3）
+- [ ] **执行体抽象（PCB / TCB）**：定义进程与线程控制块，封装虚拟地址空间（CR3）、内核栈、用户栈及寄存器执行上下文。
+- [ ] **汇编级上下文切换（`switch_to`）**：编写纯汇编上下文保存与恢复原语，实现协作式与抢占式任务调度。
+- [ ] **抢占式调度器**：基于时钟中断实现时间片轮转（Round-Robin）调度，逐步演进至 CFS 动态优先级调度模型。
+- [ ] **内核同步原语**：实现自旋锁（Spinlock）、睡眠互斥锁（Mutex）与原子操作。
+- [ ] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_LSTAR`、`MSR_STAR` 与 `MSR_SFMASK`，打通微秒级用户态到内核态的快速陷入路径。
 
-### 阶段四：VFS、驱动与用户空间（Milestone 4）
-- [ ] 建立 VFS 抽象层与初始内存文件系统（Ramfs / Initramfs）。
-- [ ] 接入 PS/2 键盘驱动与 TTY 终端控制台。
-- [ ] 编写首个用户态进程（`init`），通过系统调用输出 Hello World。
-- [ ] 完善标准系统调用：`open`, `close`, `read`, `write`, `mmap`, `brk`, `fork`, `execve`。
-- [ ] 基于 fakecc 现有 `runtime/` 移植用户态 C 运行时库，运行交互式 Shell。
+### 阶段四：VFS、现代驱动模型与用户空间（Milestone 4）
+- [ ] **虚拟文件系统抽象（VFS）**：设计现代对象模型抽象（`inode`、`dentry`、`file`、`file_operations`、`mount`）。
+- [ ] **初始内存文件系统（Ramfs / Initramfs）**：实现内存文件系统挂载与文件读写。
+- [ ] **首个 Ring 3 用户态进程（`init`）**：通过 `sysret` 跳转至用户态空间，执行第一个用户空间程序并通过 `syscall` 打印信息。
+- [ ] **核心 POSIX 系统调用集**：实现文件及进程系统调用（`open`, `close`, `read`, `write`, `mmap`, `brk`, `fork`, `execve`, `exit`, `waitpid`）。
+- [ ] **输入与字符终端（TTY / Keyboard）**：接入 PS/2 键盘中断驱动与行缓冲终端 TTY。
+- [ ] **移植 fakecc 运行时（Runtime / Libc）**：基于 fakecc 零依赖运行时，构建用户态基础 C 库，运行交互式 Shell。
 
-### 阶段五：fakecc 自举与生态闭环（Milestone 5）
-- [ ] 补齐 `fakecc` 编译与运行所需的基本文件系统与系统调用支持。
-- [ ] 将 `fakecc` 交叉编译为 `fakeos` 用户态原生二进制文件。
-- [ ] 在 `fakeos` 系统内部运行 `fakecc` 编译用户级程序并成功执行。
-- [ ] 达成终极目标：在 `fakeos` 上使用 `fakecc` 重新编译 `fakeos` 内核。
+### 阶段五：fakecc 自举与生态全闭环（Milestone 5）
+- [ ] **文件系统与进程环境完备化**：补齐 `fakecc` 运行所需的文件 I/O 与动态内存系统调用。
+- [ ] **编译生成原生 fakecc**：将 `fakecc` 交叉编译为 `fakeos` 用户空间原生可执行 ELF64 文件。
+- [ ] **用户空间编译验证**：在 `fakeos` 终端中运行 `fakecc` 编译用户 C 程序并直接执行。
+- [ ] **达成终极目标（生态自举）**：在 `fakeos` 系统内部使用 `fakecc` 重新编译出与宿主机逐字节完全一致的 `fakeos` 内核。
 
 ---
 
