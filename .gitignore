@@ -1,0 +1,5 @@
+build/
+*.o
+*.elf
+*.bin
+.DS_Store
