@@ -3,19 +3,21 @@
 [![CI](https://github.com/esrrhs/fakeos/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakeos/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-基于自研 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 从零构建的现代教学与实验性 64 位操作系统（x86-64）。
+基于自研 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 从零全新构建的现代原生 64 位操作系统（x86-64）。
 
 ---
 
 ## 📖 项目愿景与设计定位
 
-`fakeos` 是一套完全基于自主研发的独立 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 构建的原生操作系统内核。
+`fakeos` 是一套完全基于自主研发的独立 C 编译器 [fakecc](https://github.com/esrrhs/fakecc) 重构的原生现代 64 位操作系统内核。
+
+本项目旨在摆脱传统类 Unix/Linux 历史遗留的技术包袱与陈旧设计，以现代操作系统理念从零构建干净、精简、模块化且全栈自洽的现代 OS 架构。
 
 ### 核心亮点
-1. **编译器级深度自洽与验证**：
-   - 传统教学操作系统普遍依赖外部 GNU 工具链（GCC/Clang/Binutils）。`fakeos` 深度整合 `fakecc` 编译器、SSA 优化流水线及内嵌 ELF64 链接能力，实现内核从 C 代码到机器码的全链条可控与自洽验证。
+1. **编译器与内核全栈深度自洽**：
+   - 传统操作系统内核开发普遍依赖外部复杂的 GNU/LLVM 工具链（GCC/Clang/Binutils）。`fakeos` 深度整合 `fakecc` 现代化模块（Package）体系、SSA 优化流水线及内嵌 ELF 链接能力，实现内核从模块化 C 源码到二进制机器码的全链条完全自主可控。
 2. **纯净无外部标准库依赖（Freestanding）**：
-   - 内核直接基于裸机环境运行，充分利用 `fakecc` 的 `-nostdlib` 模式与内建 GCC 内置函数（如溢出算术、栈帧与位运算支持）。
+   - 内核直接基于裸机环境运行，充分利用 `fakecc` 的零依赖 `-nostdlib` 模式与内建 GCC 内置函数（如溢出算术、栈帧与位运算支持）。
 3. **闭环生态自举终极目标**：
    - 在 `fakeos` 完成用户态与基础 POSIX 系统调用子集后，将 `fakecc` 移植至 `fakeos` 用户空间，达成 **"fakeos 运行 fakecc 编译 fakeos 内核与用户态程序"** 的完全自举闭环。
 
@@ -144,16 +146,19 @@ flowchart TD
 ## 🛠️ 构建与运行
 
 ### 依赖环境
-- [fakecc](https://github.com/esrrhs/fakecc)（建议加入环境变量 `PATH`）
-- `qemu-system-x86_64`
-- `xorriso` / `grub-mkrescue`（用于制作可引导 ISO 镜像）
-- `gdb`（可选，用于内核源码单步调试）
+- [fakecc](https://github.com/esrrhs/fakecc)（自主研发 C 编译器，建议加入环境变量 `PATH`）
+- `nasm`（汇编器）
+- `x86_64-elf-binutils`（或 Linux 系统原生 `ld` / `objcopy`）
+- `qemu-system-x86_64`（虚拟机与模拟器）
+- `python3`（用于自动化回归测试脚本）
 
-### 运行方式（规划中）
+### 常用命令
 ```bash
-make build    # 使用 fakecc 编译内核与制作镜像
-make qemu     # 在 QEMU 虚拟机中启动 fakeos
-make debug    # 启动 QEMU 并等待 GDB 调试连接
+make          # 编译 64 位高半核内核二进制镜像 (build/fakeos.elf)
+make test     # 在 QEMU 无头环境下执行自动化回归测试并校验输出
+make qemu     # 在当前终端中无头 (Headless) 启动 QEMU（串口控制台交互，按 Ctrl-A 然后按 X 退出）
+make qemu-gui # 启动带图形窗口的 QEMU（查看 VGA 80x25 文本控制台显示画面）
+make clean    # 清理所有构建中间文件与产物
 ```
 
 ---
