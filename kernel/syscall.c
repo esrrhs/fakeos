@@ -133,11 +133,13 @@ void proc_terminate(u64 code) {
     kprintf("[UPROC] pid %u exited (code %u)\n", (u64)pid, code);
     uproc_note_exit(pid, code);
 
-    /* Retain an exit record for the parent; orphans move under pid 1. */
+    /* Retain an exit record for the parent; orphans move under pid 1. The
+     * exit records are keyed by the *child's* ppid, so reparent records whose
+     * owner is the exiting pid (not by the parent of the exiting process). */
     proc_record_exit(pid, ppid, code);
     if (pid != 1) {
         sched_reparent_children(pid, 1);
-        proc_reparent_exits(ppid, 1);
+        proc_reparent_exits(pid, 1);
     }
 
     /* Close all open files, then leave the doomed address space before its

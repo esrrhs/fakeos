@@ -238,6 +238,59 @@ static void bad_exec_test(void) {
         return;
     }
     puts("[U][PASS] execve rejects missing image");
+    /* A regular text file from the rootfs is present but not an ELF. */
+    argv[0] = "/etc/motd";
+    if (u_execve("/etc/motd", argv, 0) != -1) {
+        puts("[U][FAIL] execve non-ELF file should fail");
+        return;
+    }
+    puts("[U][PASS] execve rejects non-ELF file");
+}
+
+/* Huge write lengths wrap the end pointer past the address space; the VMA
+ * range check must reject them instead of dereferencing kernel memory. */
+static void wrap_len_test(void) {
+    if (u_write(1, "x", 0xFFFFFFFFFFFFFF00UL) != -1) {
+        puts("[U][FAIL] wrapped write length should fail");
+        return;
+    }
+    puts("[U][PASS] huge write length rejected");
+}
+
+/* Grandchild orphaning: a middle child forks a grandchild and exits before it;
+ * the grandchild must be reparented to pid 1, whose wait4(-1) then reaps it
+ * with the original exit code 77. */
+static void orphan_test(void) {
+    long middle = u_fork();
+    if (middle == 0) {
+        long gc = u_fork();
+        if (gc == 0) {
+            volatile unsigned long z;
+            for (z = 0; z < 200; z++) {
+                u_yield();
+            }
+            u_exit(77);
+        }
+        /* Middle exits first while the grandchild is still running. */
+        u_exit(0);
+    }
+    {
+        long st = 0;
+        long st2 = 0;
+        long w;
+        long w2;
+        w = u_wait4(middle, &st, 0, 0);
+        if (w != middle) {
+            puts("[U][FAIL] orphan: reap middle child");
+            return;
+        }
+        w2 = u_wait4(-1, &st2, 0, 0);
+        if (w2 > 0 && (st2 >> 8) == 77) {
+            puts("[U][PASS] orphan reparented to pid 1");
+        } else {
+            puts("[U][FAIL] orphan reparented to pid 1");
+        }
+    }
 }
 
 int main(int argc, char **argv) {
@@ -263,6 +316,8 @@ int main(int argc, char **argv) {
     mmap_test();
     dirent_test();
     bad_exec_test();
+    wrap_len_test();
+    orphan_test();
 
     /* Replace this image with the interactive shell (same pid/fd/cwd). */
     sh_argv[0] = "/bin/sh";

@@ -17,6 +17,7 @@ typedef types.uint64_t u64;
 
 enum {
     PATH_KMAX  = 128,
+    CWD_LEN    = 64,
     IO_CHUNK   = 4096,
     DENT_CHUNK = 1920,             /* 40 x 48-byte dirent records */
     FD_BAD     = 0xFFFFFFFF,
@@ -350,6 +351,9 @@ u64 sys_chdir(u64 upath) {
     ino = fs.fs_lookup(path);
     if (fs.fs_ino_kind(ino) != INO_DIR_K) {
         return (u64)(-1);
+    }
+    if (kstr_len(path) >= CWD_LEN) {
+        return (u64)(-1);            /* would silently truncate the cwd */
     }
     sched_cwd_set(path);
     return 0;

@@ -874,17 +874,25 @@ void as_destroy_h(u64 handle) {
 }
 
 /* True when [va, va+len) is fully covered by one VMA of the space (used by
- * syscall argument validation before the kernel dereferences user memory). */
+ * syscall argument validation before the kernel dereferences user memory).
+ * Rejects va+len wrap-around so a huge crafted len cannot pass the check and
+ * reach back into kernel-mapped addresses. */
 int as_user_range_ok(u64 handle, u64 va, u64 len) {
     struct address_space *as = as_of(handle);
+    u64 end;
+    struct vma *vma;
     if (as == 0 || len == 0) {
         return 0;
     }
-    struct vma *vma = find_vma(as, va);
+    end = va + len;
+    if (end < va) {
+        return 0;                    /* address wrap */
+    }
+    vma = find_vma(as, va);
     if (vma == 0) {
         return 0;
     }
-    return (va + len) <= vma->end;
+    return end <= vma->end;
 }
 
 u64 as_pml4_of(u64 handle) {

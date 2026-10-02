@@ -505,6 +505,19 @@ u32 sched_has_live_child(u32 ppid) {
     return 0;
 }
 
+/* Exact-pid variant for wait4(pid): distinguishes "this specific child is
+ * still running" from "caller has some unrelated children". */
+u32 sched_is_live_child(u32 ppid, u32 pid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].pid == pid && threads[i].ppid == ppid
+            && threads[i].state != TCB_DEAD && threads[i].state != TCB_FREE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Release the DEAD slot of a successfully waited-for pid. The kernel stack
  * was already freed in kthread_exit; only the slot identity remains. */
 u32 sched_reap_dead(u32 pid) {

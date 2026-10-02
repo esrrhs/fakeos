@@ -85,9 +85,22 @@ u64 tty_console_read(u64 ubuf, u64 len) {
     u64 as = sched_current_as_h();
     u64 n;
     u64 i;
+    u64 pg;
     volatile char *u;
     if (as == 0 || len == 0) {
         return (u64)(-1);
+    }
+    /* Validate the full destination BEFORE blocking on a line, so a bad
+     * buffer cannot consume a line of input with nowhere to deliver it. */
+    if (ubuf + len < ubuf) {
+        return (u64)(-1);
+    }
+    pg = ubuf & ~0xFFFULL;
+    while (pg < ubuf + len) {
+        if (!mem.as_user_range_ok(as, pg, 4096)) {
+            return (u64)(-1);
+        }
+        pg += 4096;
     }
     if (tty_line_len == 0) {
         tty_recv_line();

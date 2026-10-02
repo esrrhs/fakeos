@@ -68,6 +68,7 @@ def main():
     commands = [
         "hello",            # external exec, exit code 42
         "echo $?",          # prints 42
+        "pid",              # builtin getpid -> 1
         "echo INPUT123",    # builtin echo
         "cat /etc/motd",    # file read through inherited fd 1
         "mkdir /home",      # builtin mkdir syscall
@@ -163,6 +164,9 @@ def main():
         "[U][PASS] anonymous mmap",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
+        "[U][PASS] execve rejects non-ELF file",
+        "[U][PASS] huge write length rejected",
+        "[U][PASS] orphan reparented to pid 1",
         # interactive shell session
         "fakeos shell - builtins",
         "hello from /bin/hello",
@@ -193,6 +197,8 @@ def main():
     contextual = [
         # echo $? right after hello must surface hello's 42 exit status
         ("$? status propagation", 'echo $?' in norm and "exited (code 42)" in norm),
+        # pid builtin reports that the shell kept pid 1 across execve
+        ("shell keeps pid 1", "pid\n1\n" in norm),
         # ls /bin lists all five programs
         ("ls /bin lists init",     "\ninit\n" in norm),
         ("ls /bin lists sh",       "\nsh\n" in norm),
@@ -200,7 +206,7 @@ def main():
         ("ls /bin lists cat",      "\ncat\n" in norm),
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
-        ("multiple shell prompts", norm.count("fakeos:~$") >= 10),
+        ("multiple shell prompts", norm.count("fakeos:~$") >= 12),
     ]
     for name, ok in contextual:
         if ok:

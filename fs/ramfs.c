@@ -86,7 +86,9 @@ struct open_file {
     u32 ino;
     u64 off;
     u32 refs;
+    u32 readable;
     u32 writable;
+    u32 append;                    /* O_APPEND: reposition to EOF on write */
     u32 permanent;                 /* never freed (console) */
 };
 
@@ -304,7 +306,9 @@ void fs_init(void) {
         opens[i].ino = 0;
         opens[i].off = 0;
         opens[i].refs = 0;
+        opens[i].readable = 0;
         opens[i].writable = 0;
+        opens[i].append = 0;
         opens[i].permanent = 0;
     }
 
@@ -321,6 +325,8 @@ void fs_init(void) {
     opens[CONSOLE_FH].ino = CONSOLE_INO;
     opens[CONSOLE_FH].permanent = 1;
     opens[CONSOLE_FH].refs = 1;
+    opens[CONSOLE_FH].readable = 1;
+    opens[CONSOLE_FH].writable = 1;
 }
 
 /* Publish a static (incbin-backed, read-only) file, creating intermediate
@@ -400,7 +406,7 @@ u32 fs_mkdir(const char *path) {
  * Open file table
  * ------------------------------------------------------------------------- */
 
-static u32 alloc_open(u32 ino, u32 writable, u64 off) {
+static u32 alloc_open(u32 ino, u32 readable, u32 writable, u32 append, u64 off) {
     u32 i;
     for (i = 2; i < MAX_OPEN_FILES; i++) {
         if (!opens[i].used) {
@@ -408,7 +414,9 @@ static u32 alloc_open(u32 ino, u32 writable, u64 off) {
             opens[i].ino = ino;
             opens[i].off = off;
             opens[i].refs = 1;
+            opens[i].readable = readable;
             opens[i].writable = writable;
+            opens[i].append = append;
             opens[i].permanent = 0;
             return i;
         }
@@ -445,6 +453,8 @@ void fs_file_retain(u32 fh) {
 
 u32 fs_file_open(const char *path, u32 flags) {
     u32 ino = walk_lookup(path);
+    u32 mode = flags & 3;
+    u32 readable = 0;
     u32 writable = 0;
     u64 off = 0;
 
@@ -461,11 +471,13 @@ u32 fs_file_open(const char *path, u32 flags) {
     if (inodes[ino].type == INO_CONSOLE) {
         return FH_BAD;                /* console is acquired by fixed fh only */
     }
-    if ((flags & 3) == O_WRONLY || (flags & 3) == O_RDWR) {
-        if (inodes[ino].ro) {
-            return FH_BAD;            /* static files are immutable */
-        }
-        writable = 1;
+    if (inodes[ino].type == INO_DIR && mode != O_RDONLY) {
+        return FH_BAD;                /* directories are opened read-only */
+    }
+    readable = (mode != O_WRONLY);
+    writable = (mode == O_WRONLY || mode == O_RDWR);
+    if (writable && inodes[ino].ro) {
+        return FH_BAD;                /* static files are immutable */
     }
     if ((flags & O_TRUNC) && writable) {
         inodes[ino].size = 0;
@@ -473,7 +485,7 @@ u32 fs_file_open(const char *path, u32 flags) {
     if (flags & O_APPEND) {
         off = inodes[ino].size;
     }
-    return alloc_open(ino, writable, off);
+    return alloc_open(ino, readable, writable, (flags & O_APPEND) != 0, off);
 }
 
 u32 fs_close(u32 fh) {
@@ -541,8 +553,8 @@ u64 fs_read_h(u32 fh, char *kbuf, u64 len) {
         return (u64)(-1);
     }
     ip = &inodes[opens[fh].ino];
-    if (ip->type != INO_FILE) {
-        return (u64)(-1);             /* directories/devices not read here */
+    if (ip->type != INO_FILE || !opens[fh].readable) {
+        return (u64)(-1);             /* unreadable descriptor / non-file */
     }
     if (opens[fh].off >= ip->size) {
         return 0;
@@ -569,6 +581,10 @@ u64 fs_write_h(u32 fh, const char *kbuf, u64 len) {
     ip = &inodes[opens[fh].ino];
     if (ip->type != INO_FILE || ip->ro || !opens[fh].writable) {
         return (u64)(-1);
+    }
+    /* O_APPEND forces every write to EOF, even after an intervening lseek. */
+    if (opens[fh].append) {
+        opens[fh].off = ip->size;
     }
     need = opens[fh].off + len;
     if (need < opens[fh].off || need > FILE_MAX) {
@@ -639,8 +655,11 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         return (u64)(-1);
     }
     dp = &inodes[opens[fh].ino];
-    if (dp->type != INO_DIR) {
+    if (dp->type != INO_DIR || !opens[fh].readable) {
         return (u64)(-1);
+    }
+    if (len < DENT_RECLEN) {
+        return (u64)(-1);             /* caller cannot distinguish from EOF */
     }
     idx = (u32)opens[fh].off;
     while (idx < dp->ndent && produced + DENT_RECLEN <= len) {

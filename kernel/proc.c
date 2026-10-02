@@ -40,6 +40,7 @@ extern u32 sched_current_ppid(void);
 extern u64 sched_current_as_h(void);
 extern void sched_yield(void);
 extern u32 sched_has_live_child(u32 ppid);
+extern u32 sched_is_live_child(u32 ppid, u32 pid);
 extern u32 sched_reap_dead(u32 pid);
 extern void sched_reparent_children(u32 old_ppid, u32 new_ppid);
 
@@ -84,6 +85,19 @@ static u32 take_exit(u32 want_pid, u32 ppid, u32 *out_pid, u32 *out_code) {
     return 0;
 }
 
+/* Non-consuming existence check for a matching exit record. */
+static u32 exit_exists(u32 want_pid, u32 ppid) {
+    u32 i;
+    for (i = 0; i < MAX_EXIT; i++) {
+        struct exit_record *r = &exit_table[i];
+        if (r->used && r->ppid == ppid
+            && (want_pid == (u32)(-1) || r->pid == want_pid)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* wait4(pid, &status, options, ruspace):
  *   pid > 0  wait that exact child
  *   pid == -1 wait any child
@@ -98,6 +112,13 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
     for (;;) {
         u32 got_pid = 0;
         u32 got_code = 0;
+        /* Exact wait for a pid that is neither a live child nor a pending
+         * record fails immediately instead of blocking forever, even if the
+         * caller happens to have other children. */
+        if (want != (u32)(-1) && !exit_exists(want, parent)
+            && !sched_is_live_child(parent, want)) {
+            return (u64)(-1);
+        }
         if (take_exit(want, parent, &got_pid, &got_code)) {
             if (status_u != 0 && mem.as_user_range_ok(as, status_u, 8)) {
                 volatile u64 *sp = (volatile u64 *)status_u;

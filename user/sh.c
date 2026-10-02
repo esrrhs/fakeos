@@ -14,6 +14,7 @@ extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
+extern long u_getpid(void);
 
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
@@ -114,8 +115,13 @@ int main(int argc, char **argv) {
             rc = 0;
             continue;
         }
+        if (eq(tokens[0], "pid")) {
+            printf("%d\n", (int)u_getpid());
+            rc = 0;
+            continue;
+        }
         if (eq(tokens[0], "help")) {
-            puts("builtins: echo [args|$?], cd [dir], mkdir [dir], pwd, exit [code], help");
+            puts("builtins: echo [args|$?], cd [dir], mkdir [dir], pwd, pid, exit [code], help");
             puts("programs: /bin/hello /bin/cat /bin/ls (PATH prefix auto)");
             rc = 0;
             continue;

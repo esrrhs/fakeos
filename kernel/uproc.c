@@ -39,6 +39,9 @@ enum {
     MONITOR_PHASE1_TICKS = 1500,        /* 15 s: COW children deadline  */
     MONITOR_PHASE2_TICKS = 3000,        /* 30 s: shell exit deadline    */
 
+    ELF_MAX_PHDR     = 16,              /* sanity cap on program headers */
+    ELF_MAX_SEGSZ    = 0x01000000,      /* 16 MiB per segment           */
+
     EXEC_MAX_ARGC    = 8,
     EXEC_ARG_SLOT    = 128,             /* fixed per-arg kernel slot  */
     EXEC_PATH_MAX    = 128,
@@ -81,6 +84,7 @@ static u64 load_elf_into(u64 as_h, u64 blob, u64 size) {
     u32 phnum;
     u32 i;
 
+    /* Header bounds and magic. */
     if (size < 64 || id[0] != 0x7F || id[1] != 'E' || id[2] != 'L'
         || id[3] != 'F' || id[4] != 2) {
         return 0;
@@ -88,6 +92,14 @@ static u64 load_elf_into(u64 as_h, u64 blob, u64 size) {
 
     phoff = elf_u64(blob, 32);
     phnum = elf_u32(blob, 56) & 0xFFFF;
+    if (phnum == 0 || phnum > ELF_MAX_PHDR) {
+        return 0;
+    }
+    /* The whole program-header table must lie inside the image. */
+    if (phoff + (u64)phnum * 56 < phoff
+        || phoff + (u64)phnum * 56 > size) {
+        return 0;
+    }
     for (i = 0; i < phnum; i++) {
         u64 ph = blob + phoff + i * 56;
         u32 flags;
@@ -104,6 +116,19 @@ static u64 load_elf_into(u64 as_h, u64 blob, u64 size) {
         vaddr = elf_u64(ph, 16);
         filesz = elf_u64(ph, 32);
         memsz = elf_u64(ph, 40);
+        /* Reject malformed segments before any mapping or copy: file bytes
+         * must live inside the image, memsz covers filesz, and sizes stay
+         * bounded. (VA/off page offsets need not match: the preload path
+         * copies bytes by linear offset, not via file-offset mmap.) */
+        if (filesz > memsz || memsz == 0 || memsz > ELF_MAX_SEGSZ) {
+            return 0;
+        }
+        if (off + filesz < off || off + filesz > size) {
+            return 0;
+        }
+        if (vaddr > 0x80000000ULL - memsz) {
+            return 0;                  /* keep images in the lower half */
+        }
         prot = 1;                       /* PROT_READ */
         if (flags & 2) {
             prot = prot | 2;
@@ -231,6 +256,16 @@ struct exec_frame {
     u64 usersp;
 };
 
+/* Read one user u64 with page-wise VMA validation (a vector can end inside a
+ * page that does not hold the full fixed-size window). */
+static u32 read_user_u64(u64 as, u64 uva, u64 *out) {
+    if (!mem.as_user_range_ok(as, uva & ~0xFFFULL, 4096)) {
+        return 0;
+    }
+    *out = *(volatile u64 *)uva;
+    return 1;
+}
+
 u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
     char path[EXEC_PATH_MAX];
     char argbuf[EXEC_MAX_ARGC * EXEC_ARG_SLOT];
@@ -251,20 +286,27 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
         return (u64)(-1);
     }
 
-    /* Parse argv: up to EXEC_MAX_ARGC pointers, each string <= 127 chars. */
-    if (argv_u == 0 || !mem.as_user_range_ok(as, argv_u, 8 * (EXEC_MAX_ARGC + 1))) {
+    /* Parse argv: up to EXEC_MAX_ARGC pointers, each string <= 127 chars.
+     * Vector slots are read one at a time with per-page validation. */
+    if (argv_u == 0) {
         return (u64)(-1);
     }
     {
-        volatile u64 *vp = (volatile u64 *)argv_u;
         for (i = 0; i <= EXEC_MAX_ARGC; i++) {
-            u64 p = vp[i];
+            u64 slot_uva = argv_u + (u64)i * 8;
+            u64 p = 0;
             char *dst;
+            if (slot_uva < argv_u) {
+                return (u64)(-1);           /* wrap */
+            }
+            if (!read_user_u64(as, slot_uva, &p)) {
+                return (u64)(-1);
+            }
             if (p == 0) {
-                break;                   /* argv terminator */
+                break;                      /* argv terminator */
             }
             if (i == EXEC_MAX_ARGC) {
-                return (u64)(-1);       /* too many arguments */
+                return (u64)(-1);           /* too many arguments */
             }
             dst = argbuf + (u64)argc * EXEC_ARG_SLOT;
             if (!copy_user_cstring(dst, p, EXEC_ARG_SLOT - 1)) {
@@ -276,10 +318,8 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
 
     /* Environment is not supported: envp must be NULL or an empty vector. */
     if (envp_u != 0) {
-        if (!mem.as_user_range_ok(as, envp_u, 8)) {
-            return (u64)(-1);
-        }
-        if (*(volatile u64 *)envp_u != 0) {
+        u64 e0 = 0;
+        if (!read_user_u64(as, envp_u, &e0) || e0 != 0) {
             return (u64)(-1);
         }
     }
