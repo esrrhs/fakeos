@@ -256,10 +256,10 @@ struct exec_frame {
     u64 usersp;
 };
 
-/* Read one user u64 with page-wise VMA validation (a vector can end inside a
- * page that does not hold the full fixed-size window). */
+/* Read one user u64 with exact 8-byte range validation (covers wrap-around
+ * and a crossing of the VMA end from a deliberately misaligned slot). */
 static u32 read_user_u64(u64 as, u64 uva, u64 *out) {
-    if (!mem.as_user_range_ok(as, uva & ~0xFFFULL, 4096)) {
+    if (!mem.as_user_range_ok(as, uva, 8)) {
         return 0;
     }
     *out = *(volatile u64 *)uva;

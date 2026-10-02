@@ -742,8 +742,11 @@ u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot) {
         return 0;
     }
     len = (len + 0xFFF) & ~0xFFFULL;
+    if (len == 0) {
+        return 0;                    /* rounding overflowed the address space */
+    }
     hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
-    if (hint + len > MMAP_LIMIT) {
+    if (hint + len < hint || hint + len > MMAP_LIMIT) {
         return 0;
     }
     if (!as_map_anon(as, hint, len, prot)) {

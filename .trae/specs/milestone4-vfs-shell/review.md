@@ -110,6 +110,52 @@
 - 语义：lseek 负偏移因 u64 模算恰好等价于减法且超界被 FILE_MAX 挡（目录无上限检查但 cast 后安全）；getdents offset 挂 open file、fork 后共享符合 POSIX；偏差为 FINDING-4/5/6/11。execve 失败路径在任何提交前返回，旧映像/fd/cwd 完整，nosuchcmd 实测证实。
 - 构建：多 ELF 模式规则（crt0+usys+libc+prog.o，依赖 user.ld）、blob.o 依赖 5 ELF+motd、内核 OBJS 含全部新文件；touch user/hello.c 实测传播链完整。
 
+## R2 Remediation Review (2026-10-02)
+
+- 评审对象：修复 commit `ceab2f9`（fix: harden stage-4 syscall/ELF/FS paths from independent review），基线 `1834d94`
+- 评审方式：fresh context；不信 commit message，逐条读修复后当前代码独立核实；另做 2 次 `make test`（74/74 全过、退出码 0）+ 1 次原始 QEMU 会话（362 行，无 FATAL/EXCEPTION/killed/FAIL，SUCCESS 正常），并用 python3 解析 5 个真实 ELF 头验证新校验不误伤。
+
+- FINDING-1: **fixed-verified** — [syscall.c:139-143](file:///Users/mingming/project/fakeos/kernel/syscall.c#L139-L143) 已改为 `proc_reparent_exits(pid, 1)`，注释正确说明 record 按“子的 ppid”挂账；顺序 record_exit→reparent TCB→reparent records 后，X 的死子 record/TCB 同批切到 pid 1，X 自己的 record（ppid=P）与 P 的兄弟记录均不再被误动。端到端实证：新增孤儿测试实跑通过，日志 `[UPROC] pid 4 exited (code 0)`（middle 先退）、`[UPROC] pid 5 exited (code 77)`（grandchild 被 pid 1 `wait4(-1)` 回收）、`[U][PASS] orphan reparented to pid 1`。R1 附加建议（reparent_children 跳过 DEAD 槽）未采纳，但 record 与 TCB 同步迁移、不变量成立，两步之间的抢占窗口只会短暂延迟可见性、不会丢记录，可接受。
+- FINDING-2: **fixed-verified**（含 1 条 suggestion 级残留，见 FINDING-R2-2）— [as.c:880-896](file:///Users/mingming/project/fakeos/mem/as.c#L880-L896) 增加 `end = va+len; if (end < va) return 0;`；console write 主可达路径 [sysfile.c:292](file:///Users/mingming/project/fakeos/kernel/sysfile.c#L292) 现在拒绝回绕 len，实跑 `[U][PASS] huge write length rejected`（init 用 0xFFFFFFFFFFFFFF00 实测 -1）。R1 顺带点名的 brk（加法为常量、无回绕）安全；mmap 极端 len 残留仅为语义瑕疵、内核不死，另列 R2-2。
+- FINDING-3: **fixed-verified** — [uproc.c:95-131](file:///Users/mingming/project/fakeos/kernel/uproc.c#L95-L131)：phnum 限定 1..16；`phoff+phnum*56` 带回绕检查且必须 ≤ size；每个 PT_LOAD 校验 `filesz<=memsz`、`1<=memsz<=16MiB`、`off+filesz<=size`（带回绕）、`vaddr+memsz<=0x80000000`，全部在任何 map/copy 之前返回 0，execve 失败回滚路径原本就干净。非 ELF 实测：`execve("/etc/motd")` → `[U][PASS] execve rejects non-ELF file`。**未误伤合法镜像**：python3 解析 5 个发布 ELF，phnum 均为 2、phoff=64、表均在文件内；cat/hello/ls/sh 均含一个 `filesz=0,memsz=0x10` 的 BSS 型 LOAD（新校验放行、as_map_preload 的 filesz=0 空拷贝循环正确），init 含 filesz=0x50/memsz=0x1010 段；最大段 22KB，远低于 16MiB；5 镜像全部实跑加载成功。备注（非新问题）：e_entry 未校验落在已映射段内，坏 entry 会 ring3 #PF 被猎杀，符合 NFR-4“-1 或进程被猎杀，内核不死机”。
+- FINDING-4: **fixed-verified** — [sysfile.c:355-357](file:///Users/mingming/project/fakeos/kernel/sysfile.c#L355-L357) 在规范化路径上 `kstr_len(path) >= 64 → -1`，与 [sched.c:41](file:///Users/mingming/project/fakeos/kernel/sched.c#L41) 的 `cwd[64]` 一致；被接受的路径最长 63 字符+NUL，[sched.c:150-157](file:///Users/mingming/project/fakeos/kernel/sched.c#L150-L157) 的截断复制对可达输入已成死路径，静默截断不再发生。
+- FINDING-5: **fixed-verified** — [ramfs.c:91](file:///Users/mingming/project/fakeos/fs/ramfs.c#L91) open_file 增存 `append`，[ramfs.c:585-588](file:///Users/mingming/project/fakeos/fs/ramfs.c#L585-L588) `fs_write_h` 在容量/溢出计算之前强制 `off=ip->size`；lseek 到中间再写不再产生覆盖，POSIX 每次写定位 EOF 语义成立。
+- FINDING-6: **fixed-verified** — [proc.c:88-99](file:///Users/mingming/project/fakeos/kernel/proc.c#L88-L99) 新增非消费式 `exit_exists`，[proc.c:118-121](file:///Users/mingming/project/fakeos/kernel/proc.c#L118-L121) 每轮对精确 want 先判“无 record 且非存活子 → 立即 -1”，判定用 [sched.c:510-519](file:///Users/mingming/project/fakeos/kernel/sched.c#L510-L519) 的 `sched_is_live_child`（精确 pid+ppid 且排除 DEAD/FREE），不再用“任意存活子”误阻塞；WNOHANG 分支同样改返回 -1；want==-1 路径与正常子阻塞/回收逻辑未变（实跑 pid 2-9 全部正常回收，hello 42、127、77、7 各码正确）。
+- FINDING-7: **fixed-verified** — [tty.c:93-104](file:///Users/mingming/project/fakeos/kernel/tty.c#L93-L104) 在 `tty_recv_line()` 阻塞前先做 ubuf+len 回绕检查与逐页 VMA 校验，坏缓冲不再赔进一行输入。对合法栈缓冲无误伤：sh 为 `read(0,line[256],255)`（[sh.c:34,51](file:///Users/mingming/project/fakeos/user/sh.c#L34-L51)），缓冲落在 16KiB 栈 VMA（[0x7ffc000,0x800000)，边界页对齐）内，实跑 13 条注入命令逐条得到响应、提示符计数 ≥12，读写正常。
+- FINDING-8: **fixed-verified**（修复引入 1 条 minor 硬化残留，见 FINDING-R2-1）— [uproc.c:261-267](file:///Users/mingming/project/fakeos/kernel/uproc.c#L261-L267) 新增按槽读取助手，[uproc.c:295-316](file:///Users/mingming/project/fakeos/kernel/uproc.c#L295-L316) argv 逐元素校验、遇 NULL 即停；`i==MAX_ARGC` 且槽非 NULL → -1；`argv_u+i*8` 回绕 → -1；envp 同路径。5 个镜像 execve 全部实跑成功，短向量不再要求 72B 连续窗口。
+- FINDING-9: **维持现状可接受（accepted-by-design）** — wait4 仍按 u64 写 status（[proc.c:123-125](file:///Users/mingming/project/fakeos/kernel/proc.c#L123-L125)）。全部 in-tree 调用方（init.c、sh.c）均声明 8 字节 `long status`，range 校验也是 8 字节，自洽无破坏；FR-7 只规定码值布局未规定宽度。建议阶段五引入外部 ABI 程序前加一行注释明确“status 为 8 字节小整数字”或改 u32；不阻塞本轮。
+- FINDING-10: **fixed-verified（采纳 R1 备选：修订文案）** — [spec.md FR-14](file:///Users/mingming/project/fakeos/.trae/specs/milestone4-vfs-shell/spec.md#L48) 改为“等首个提示符后逐条注入（约 0.5s 间隔）…注入会话总时长约 20s 内”，与脚本现状（8s 启动 + 13 条×0.5s + 3s 收尾 ≈ 17.5s 最坏）一致。顺带修正 FR-9 mmap 窗口描述为 0x10000000 起/1GiB 上限，与代码常量 [as.c:59-60](file:///Users/mingming/project/fakeos/mem/as.c#L59-L60) 对齐（旧文案 0x70000000 本就与代码不符，属既有文档漂移，本次顺手消除）。
+- FINDING-11: **fixed-verified** — [ramfs.c:456-477](file:///Users/mingming/project/fakeos/fs/ramfs.c#L456-L477) 由 `flags&3` 派生 readable/writable，目录强制 O_RDONLY，ro 文件写打开仍拒；[fs_read_h:556-558](file:///Users/mingming/project/fakeos/fs/ramfs.c#L556-L558) 与 [fs_getdents_h:658-663](file:///Users/mingming/project/fakeos/fs/ramfs.c#L658-L663) 均执行访问模式校验；console 固定句柄初始化为 r/w=1（[ramfs.c:328-329](file:///Users/mingming/project/fakeos/fs/ramfs.c#L328-L329)），且 console 分派在 sysfile 层先于模式检查，fd 0/1/2 不受影响；getdents `len<48 → -1`，不再与 EOF(0) 混淆。in-tree 用法审计：init 0x42(O_RDWR|O_CREAT) 写后读回 PASS、/etc/motd 以 O_RDWR 打开仍被 -1、cat/ls 全为 O_RDONLY、无 O_APPEND 用户；实跑 ls/cat/getdents 全绿。小偏差（可接受）：len<48 时即使空目录也返回 -1（R1 建议仅非空时拒），in-tree 缓冲均 1920B，影响面为零。
+
+### FINDING-R2-1: execve 向量槽按页校验对“跨页/跨 VMA 末端的非对齐 argv_u/envp_u”失效，可致 ring0 FATAL
+- Severity: minor
+- 位置: [uproc.c:261-267](file:///Users/mingming/project/fakeos/kernel/uproc.c#L261-L267)（read_user_u64），利用面 [uproc.c:295-324](file:///Users/mingming/project/fakeos/kernel/uproc.c#L295-L324)；故障路径 [isr.c:152-187](file:///Users/mingming/project/fakeos/kernel/isr.c#L152-L187)
+- 问题: 助手只校验槽地址**所在页**（`uva & ~0xFFF`, 4096）再直接做 8 字节读。若用户故意传非对齐 `argv_u=0x7FFFFFE`（16KiB 栈 VMA 为 [0x7ffc000,0x800000)）：页校验对 0x7fff000 页通过，但 `*(u64*)0x7fffffe` 跨到 0x800000（无 VMA）；该指令在 ring0 触发 #PF，as_handle_fault 找不到 VMA、CS 非 ring3，落入 `[FATAL] system halted`。属于 FR-5“非法指针不得内核态崩溃”字面违反；但 SysV ABI 保证 argv 8 对齐（页边界 4096 也是 8 的倍数），任何 ABI 合规程序（含本系统 crt0）都不可能产生非对齐槽指针，仅恶意/手工构造参数可达——且旧的精确 72B 窗口检查原本会拒绝此情形，属本次按页改造引入的窄回归。envp 单槽同理。
+- 建议: 改为精确 8 字节区间校验 `as_user_range_ok(as, uva, 8)`（其内部已含回绕检查）：既能拒绝跨 VMA 末端的 8 字节读，也同样允许槽落在末页末尾（如 uva=0x7FFFF8 的合法对齐情形），比按页更准。建议阶段五自举（会出现任意/模糊用户二进制）前修掉。
+
+### FINDING-R2-2: mmap 极大 len 向上取整回绕后可能返回“零长度 VMA”的成功指针
+- Severity: suggestion
+- 位置: [as.c:744-753](file:///Users/mingming/project/fakeos/mem/as.c#L744-L753)
+- 问题: 如 len=0xFFFFFFFFFFFFF000，`(len+0xFFF)&~0xFFF` 不变，`hint+len` 回绕成 0xFFFFFF0 < MMAP_LIMIT 通过检查；as_map_anon 插入 [0x10000000,0x10000000) 零长 VMA 并返回成功指针，且 mmap_next 被污染为非对齐值致后续 mmap 全部失败。用户态触碰该地址会 ring3 #PF 被猎杀（内核不死机、无挂死），故仅违反 FR-9“参数非法返回 -1”的字面语义。
+- 建议: 取整后判 `if (len < len_in) return 0;`，并对 `hint + len < hint` 回绕显式返回 0。
+
+- 回归检查：ELF 新校验 5 镜像实跑全加载（含 4 个 filesz=0 BSS 段）；access mode 改动对 console fd0/1/2 与 init/cat/ls 全部 open 用法零影响（实跑 PASS）；tty 预校验对 sh read(0,255) 栈缓冲无误伤（交互会话正常）；execve 按页读边界（i==8 非 NULL→-1、slot 回绕→-1、NULL 即停）逻辑正确；wait4 正常回收路径 9 个 pid 实跑无异常。
+- AC-13 复审分数: **5/5**（R1 扣分锚点 F-1/F-2/F-3 均已修复并有新增自动化/实跑证据，检查点 63→74；架构/包划分/资源回收评价维持且硬化程度净提升。残留 R2-1 为仅恶意非对齐参数可达的 minor，不改变本轮结论，但应在阶段五前关闭）
+- make test 结果: **74/74**，连跑 2 次均退出码 0；另 1 次独立 QEMU 会话无 FATAL/EXCEPTION/FAIL，SUCCESS banner 正常。
+
 ## Review History
 
 R1: Result **pass**（12 条 rule AC 全部 pass，rubric AC-13 = 4/5 达到阈值；make test 5 连跑全绿；128M/512M/2G 三档冒烟由评审员独立验证）。checkpoint 统计：13/13 通过（12 rule + 1 rubric）。发现问题 11 个：blocker 0、major 3（FINDING-1/2/3）、minor 3（FINDING-4/5/6）、suggestion 5（FINDING-7/8/9/10/11）。建议在阶段五自举前优先修 3 个 major（均为 FR-7/FR-5/NFR-4 的边界硬化，不影响当前演示与自动化回归）。
+
+R2: Result **pass**。FINDING-1..8、10、11 全部 fixed-verified（逐条读修复后代码 + make test 74/74 两跑 + 独立 QEMU/ELF 头实证，F-1 孤儿回收端到端跑通）；FINDING-9 维持 u64 status 的决定可接受（全部调用方 8 字节 long，建议补 ABI 注释）。新增 1 minor（FINDING-R2-1：非对齐 argv/envp 槽跨 VMA 末端可 ring0 FATAL，仅恶意参数可达，阶段五前修）+ 1 suggestion（FINDING-R2-2：mmap 极端 len 回绕返回零长 VMA，内核不死）。AC-13 复审 5/5。未发现修复引入的功能回归。
+
+## R2 follow-up hardening (commit after R2)
+
+- FINDING-R2-1 (minor): fixed — read_user_u64 now requires exact 8-byte coverage
+  via as_user_range_ok(as, uva, 8), rejecting misaligned slots that cross the VMA
+  end (kernel/uproc.c).
+- FINDING-R2-2 (suggestion): fixed — as_mmap_anon_h rejects rounded length zero
+  and hint+len wrap-around before reserving the VMA (mem/as.c).
+- FINDING-9 (u64 status): accepted as-is; all call sites pass an 8-byte long and
+  the kernel validates 8 bytes — internal ABI is self-consistent.
+- Verification after follow-up: make test 74/74 OK, additional rerun exit 0.
