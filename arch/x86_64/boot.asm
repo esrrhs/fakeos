@@ -57,25 +57,33 @@ _start:
 
     ; --------------------------------------------------------------------------
     ; Setup Early 4-Level Page Tables for 64-bit Long Mode
-    ; PML4 -> PDPT -> PD (2MB huge pages)
-    ; Maps both lower 16MB (identity) and higher-half 16MB (0xFFFFFFFF80000000)
+    ; PML4 -> PDPT -> PD (2MB huge pages, full 1 GiB coverage)
+    ;
+    ; The single boot_pd maps the first 1 GiB of physical memory and is shared
+    ; by three virtual windows through one PDPT:
+    ;   PML4[0]   -> boot_pdpt : temporary identity window (removed by the PMM
+    ;                             once all low-address accesses are gone)
+    ;   PML4[256] -> boot_pdpt : HHDM at 0xFFFF800000000000 (kernel-managed
+    ;                             direct map of all physical memory)
+    ;   PML4[511] -> boot_pdpt : higher-half kernel window 0xFFFFFFFF80000000
+    ;                             (uses PDPT slot 510, same PD)
     ; --------------------------------------------------------------------------
 
-    ; PML4[0]   -> boot_pdpt (Identity mapping for transition)
-    ; PML4[511] -> boot_pdpt (Higher-half kernel mapping for 0xFFFFFFFF80000000)
+    ; PML4 slot targets (physical frame address + Present | Writable)
     mov eax, boot_pdpt
     or eax, 0x03                ; Present | Writable
-    mov [boot_pml4], eax
-    mov [boot_pml4 + 511 * 8], eax
+    mov [boot_pml4], eax            ; PML4[0]   identity (transitional)
+    mov [boot_pml4 + 256 * 8], eax  ; PML4[256] HHDM 0xFFFF800000000000
+    mov [boot_pml4 + 511 * 8], eax  ; PML4[511] kernel 0xFFFFFFFF80000000
 
-    ; PDPT[0]   -> boot_pd (0 - 1GB identity)
+    ; PDPT[0]   -> boot_pd (0 - 1GB identity / HHDM window)
     ; PDPT[510] -> boot_pd (0xFFFFFFFF80000000 corresponds to PDPT index 510)
     mov eax, boot_pd
     or eax, 0x03                ; Present | Writable
     mov [boot_pdpt], eax
     mov [boot_pdpt + 510 * 8], eax
 
-    ; Map first 16MB (8 x 2MB huge pages) into boot_pd
+    ; Map the full first 1 GiB (512 x 2MB huge pages) into boot_pd.
     ; 0x83 = Present (bit 0) | Writable (bit 1) | Huge Page 2MB (bit 7)
     mov ecx, 0
 .map_pages:
@@ -85,7 +93,7 @@ _start:
     mov [boot_pd + ecx * 8], eax
     mov dword [boot_pd + ecx * 8 + 4], 0
     inc ecx
-    cmp ecx, 8                  ; 8 * 2MB = 16MB mapped
+    cmp ecx, 512                ; 512 * 2MB = 1 GiB mapped
     jne .map_pages
 
     ; Load CR3 with physical address of PML4
@@ -145,9 +153,14 @@ long_mode_higher_half:
     mov rsp, stack_top
 
     ; Pass boot parameters to kmain(uint64_t magic, uint64_t mbi_addr)
-    ; SysV AMD64 ABI: 1st argument = RDI, 2nd argument = RSI
-    mov edi, [rel mb_magic]
-    mov esi, [rel mb_info]
+    ; SysV AMD64 ABI: 1st argument = RDI, 2nd argument = RSI.
+    ; mb_magic/mb_info live in .boot.bss at low physical addresses (~1 MB),
+    ; which are NOT within RIP-relative range of this high-half code, so use
+    ; absolute disp32 addressing (reachable through the identity mapping).
+    default abs
+    mov edi, [mb_magic]
+    mov esi, [mb_info]
+    default rel
 
     ; Call the C kernel entry point
     call kmain
@@ -184,10 +197,13 @@ mb_info:
     resd 1
 
 alignb 4096
+global boot_pml4
 boot_pml4:
     resb 4096
+global boot_pdpt
 boot_pdpt:
     resb 4096
+global boot_pd
 boot_pd:
     resb 4096
 

@@ -1,5 +1,7 @@
 package kernel;
+import arch;
 import drivers;
+import mem;
 import types;
 
 // Linker-exported symbols
@@ -14,6 +16,12 @@ extern char _kernel_bss_end;
 extern char _kernel_end;
 
 extern void kprintf(const char *fmt, ...);
+extern void isr_run_tests(void);
+extern void pmm_selftest(void);
+extern void vmm_selftest(void);
+extern void slab_selftest(void);
+extern void sched_selftest(void);
+extern void uproc_selftest(void);
 
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
@@ -28,7 +36,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (Milestone 1 Minimal Demo)\n");
+    kprintf(" Welcome to fakeos! (Milestone 3: Ring-3 processes + fast syscalls)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -58,6 +66,64 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      UART 16550    : COM1 at I/O Port 0x03F8 (115200 Baud, 8N1)\n");
     kprintf("      VGA Display   : 80x25 Text Mode at 0xFFFFFFFF800B8000 (Physical 0x000B8000)\n");
 
+    // Initialize the modern interrupt infrastructure: GDT with a 64-bit TSS
+    // (RSP0 + IST1 double-fault stack), 256-entry 64-bit IDT, legacy PIC
+    // permanently masked in favor of the Local APIC.
+    arch.gdt_init();
+    arch.idt_init();
+    types.uint64_t idt_base = arch.idt_get_base();
+    types.uint64_t tss_base = arch.gdt_get_tss_base();
+    types.uint64_t rsp0 = arch.gdt_get_rsp0();
+    types.uint64_t ist1 = arch.gdt_get_ist1();
+    kprintf("\n[INT] Interrupt Infrastructure Online:\n");
+    kprintf("      GDT            : 7 descriptors (kernel/user code+data, 64-bit TSS)\n");
+    kprintf("      IDT            : 256 gates at %p (vectors 0..47 + spurious 255)\n",
+            idt_base);
+    kprintf("      TSS            : base %p, RSP0=%p, IST1=%p (#DF guard stack)\n",
+            tss_base, rsp0, ist1);
+    kprintf("      8259A PIC      : all IRQ lines masked (Local APIC path only)\n");
+
+    // Exercise CPU exception capture: #DE, #UD and #PF are raised on purpose
+    // and recovered via RIP redirection after the register snapshot dump.
+    isr_run_tests();
+
+    // Initialize and calibrate the Local APIC timer against the legacy PIT,
+    // then verify periodic 100 Hz interrupts over a 500 ms busy wait.
+    arch.lapic_init();
+    types.uint32_t lapic_id = arch.lapic_get_id();
+    kprintf("\n[INT] Local APIC timer calibrated (APIC ID %u), periodic 100 Hz mode armed\n",
+            (types.uint64_t)lapic_id);
+    arch.cpu_sti();
+    types.uint64_t ticks_before = arch.lapic_get_ticks();
+    arch.pit_busy_wait_500ms();
+    types.uint64_t ticks_after = arch.lapic_get_ticks();
+    arch.cpu_cli();
+    types.uint64_t ticks_delta = ticks_after - ticks_before;
+    if (ticks_delta >= 35 && ticks_delta <= 75) {
+        kprintf("      [PASS] APIC Timer Calibration: %u ticks received in 500 ms (target 100 Hz)\n",
+                ticks_delta);
+    } else {
+        kprintf("      [FAIL] APIC Timer Calibration: %u ticks received in 500 ms (expected 35..75)\n",
+                ticks_delta);
+    }
+    // Enable NXE and bring up the memory subsystem: the VMM toolchain comes
+    // first so the PMM can extend the HHDM direct map (2 MiB pages allocated
+    // through the first-gigabyte buddy) to cover all RAM above 1 GiB.
+    mem.vmm_init();
+    mem.pmm_init(mbi_addr);
+    pmm_selftest();
+    vmm_selftest();
+    slab_selftest();
+
+    // Kernel threads, round-robin preemptive scheduling and spinlocks; then
+    // per-process address spaces with VMA demand paging and COW forks.
+    sched_selftest();
+    mem.as_selftest();
+
+    // Ring-3 user processes: SYSCALL/SYSRET fast syscalls, ELF loading, COW
+    // fork across real user address spaces and timer preemption at ring 3.
+    uproc_selftest();
+
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");
 
@@ -77,13 +143,25 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos minimal demo has fully run through the end-to-end pipeline!\n");
+    kprintf(" [SUCCESS] fakeos: Ring-3 user processes + SYSCALL/SYSRET fast syscalls online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
     kprintf("           - UART 16550 Serial Output: OK\n");
     kprintf("           - VGA Text Display Driver: OK\n");
     kprintf("           - Formatted Kernel Logger (kprintf): OK\n");
+    kprintf("           - 64-bit GDT / TSS / IST (#DF guard stack): OK\n");
+    kprintf("           - 64-bit IDT + CPU exception capture & dump: OK\n");
+    kprintf("           - Local APIC periodic timer (100 Hz ticks): OK\n");
+    kprintf("           - HHDM direct map + identity mapping retired: OK\n");
+    kprintf("           - Multiboot memory map + buddy PMM (4K..4M): OK\n");
+    kprintf("           - 4-level VMM toolchain (map/translate/unmap, NX): OK\n");
+    kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
+    kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
+    kprintf("           - Kernel threads + RR scheduler + spinlocks: OK\n");
+    kprintf("           - Ring-3 user processes (IRET entry, per-process PML4): OK\n");
+    kprintf("           - SYSCALL/SYSRET (write/getpid/yield/fork/exit): OK\n");
+    kprintf("           - COW fork + timer preemption at ring 3: OK\n");
     kprintf("================================================================================\n");
     kprintf(" System idle. CPU halted.\n");
 }

@@ -79,42 +79,43 @@
 
 ```mermaid
 flowchart TD
-    M1["阶段一：裸机脚手架与调试基础设施<br/>(进行中 · 核心骨架已跑通)"] --> M2["阶段二：现代内存管理子系统<br/>(PMM / VMM / HHDM / Slab)"]
-    M2 --> M3["阶段三：进程抽象、抢占调度与快速系统调用<br/>(PCB / TCB / SYSCALL)"]
+    M1["阶段一：裸机脚手架与调试基础设施<br/>(已完成 · IDT/TSS/IST/APIC Timer 已就绪)"] --> M2["阶段二：现代内存管理子系统<br/>(PMM/HHDM/VMM/Slab/VMA/COW 全部就绪)"] --> M3["阶段三：进程抽象、抢占调度与快速系统调用<br/>(内核线程/RR 调度/Ring3/SYSCALL 已就绪)"]
     M3 --> M4["阶段四：VFS 虚拟文件系统与用户态空间<br/>(Ring 3 / Ramfs / libc)"]
     M4 --> M5["阶段五：fakecc 自举与生态全闭环<br/>(自举编译内核)"]
 ```
 
-### 阶段一：裸机脚手架与调试基础设施（Milestone 1 · 核心骨架已就绪）
+### 阶段一：裸机脚手架与调试基础设施（Milestone 1 · 已完成）
 - [x] **引导方案确定与链接脚本**：实现 Multiboot 1/2 双兼容头，配置高半核链接脚本（LMA `0x100000`, VMA `0xFFFFFFFF80000000`）。
 - [x] **fakecc 现代化编译流水线**：建立跨平台（macOS/Linux）构建系统（Makefile），实现包依赖自动解析与无外部头文件独立编译。
 - [x] **64 位长模式切换与初始分页**：实现 32 位到 64 位长模式跳转，开启 PAE、Paging 与 SSE 向量支持，搭建初始 4 级页表。
 - [x] **基础控制台输出驱动**：实现 UART 16550 串口驱动（COM1 115200 8N1）与 VGA 80x25 文本显存控制台驱动（支持硬件光标与平滑滚屏）。
 - [x] **内核格式化日志系统**：实现内核级双通道格式化日志函数 `kprintf`（同步输出至串口终端与屏幕）。
 - [x] **自动化测试与 CI 流水线**：编写无头 QEMU 自动化回归测试脚本（`make test`），接入 GitHub Actions 持续集成。
-- [ ] **64 位 IDT 中断描述符表**：构建 64 位中断门与陷阱门描述符结构，实现统一中断入口派发表。
-- [ ] **CPU 异常捕获与寄存器 Dump**：实现 0~31 号硬件异常（重点覆盖 Page Fault `#PF` 与 General Protection Fault `#GP`）的汇编上下文保存桩（Stubs）与全景寄存器快照 Dump。
-- [ ] **TSS 与 IST 独立异常栈**：初始化 64 位任务状态段（TSS），配置 Interrupt Stack Table，防护内核栈溢出与 Double Fault。
-- [ ] **Local APIC 定时器初始化**：配置 APIC Timer 提供稳定的高精度系统时钟节拍（Tick）。
+- [x] **64 位 IDT 中断描述符表**：构建 64 位中断门与陷阱门描述符结构，实现统一中断入口派发表（0~47 + 255 spurious，共 49 个门）。
+- [x] **CPU 异常捕获与寄存器 Dump**：实现 0~31 号硬件异常（重点覆盖 Page Fault `#PF` 与 General Protection Fault `#GP`）的汇编上下文保存桩（Stubs）与全景寄存器快照 Dump，内核内置 `#DE` / `#UD` / `#PF` 触发-恢复自测。
+- [x] **TSS 与 IST 独立异常栈**：初始化 64 位任务状态段（TSS），配置 RSP0 与 IST1 Double Fault 独立守护栈（16 KiB），可防护内核栈溢出。
+- [x] **Local APIC 定时器初始化**：启用 IA32_APIC_BASE，建立 LAPIC MMIO 高半核映射，以 PIT 通道 2 校准 APIC Timer 分频，提供稳定的 100 Hz 周期时钟节拍（Tick）。
 
-### 阶段二：现代内存管理子系统（Milestone 2）
-- [ ] **物理内存管理器（PMM）**：解析 Multiboot 提供的内存映射图，实现基于位图（Bitmap）及伙伴系统（Buddy System）的 4KB 物理页分配与释放。
-- [ ] **高端物理直接映射（HHDM）**：建立全量物理内存在高半空间的直接连续映射区，彻底解决内核访问物理页表的寻址问题。
-- [ ] **虚拟内存管理（VMM）**：实现 4 级页表增删查改工具链（PML4 / PDPT / PD / PT），支持页面属性细粒度控制（NX、Read-Only、User/Supervisor、Cache-Disable）。
-- [ ] **内核动态堆分配器（Kmalloc / Slab）**：基于伙伴系统物理页构建 Slab/Slub 对象缓存分配器，提供高效 `kmalloc` / `kfree`。
-- [ ] **虚存区间与按需分页（VMA & Demand Paging）**：抽象虚拟内存区域（VMA），支持缺页异常（Page Fault）处理、按需分配与写时复制（COW）。
+### 阶段二：现代内存管理子系统（Milestone 2 · PMM/VMM/Slab 已就绪）
+- [x] **物理内存管理器（PMM）**：解析 Multiboot 1 提供的内存映射图（mmap，含 ACPI/MMIO 孔洞识别与无 mmap 时的 mem_upper 回退），实现 11 阶伙伴系统（Buddy System，4KiB ~ 4MiB 块），空闲链表按物理地址有序、分裂/合并/双重释放防护完备，提供 `pmm_alloc_page(s)` / `pmm_free_page(s)`；当前管理上限 4 GiB 物理内存。
+- [x] **高端物理直接映射（HHDM）**：引导期在 `0xFFFF800000000000`（PML4[256]）建立首个 1 GiB 物理内存的 2MiB 大页直接映射；PMM 首个 buddy 就绪后用 VMM 动态补齐 1 GiB 以上全部 RAM 的 2MiB 映射（页表帧由 buddy 供给），随后撤销临时恒等映射，低半地址空间完整让渡给用户态。实测 2 GiB / 4 GiB 机型正确纳管。
+- [x] **虚拟内存管理（VMM）**：实现 4 级页表增删查改工具链（PML4 / PDPT / PD / PT，含 2 MiB 大页），`vmm_map` / `vmm_unmap` / `vmm_translate` 支持属性细粒度控制（NX（开启 EFER.NXE）、Read-Only、User/Supervisor、PWT/PCD 缓存策略），惰性建表、重复映射/冲突大页拒绝、INVLPG 精确失效。
+- [x] **内核动态堆分配器（Kmalloc / Slab）**：8 个尺寸类（16B ~ 2048B）单页 Slab 缓存（页首 32B 描述符 + 侵入式空闲链），超大对象直通伙伴系统（8KiB ~ 4MiB 幂整块）；按帧 O(1) 分派表支撑精确 `kmalloc` / `kfree` 与双重释放防护。
+- [x] **虚存区间与按需分页（VMA & Demand Paging）**：每进程独立 PML4（内核/HHDM 槽共享、低半空间私有），匿名 VMA 预留 + 首次触页按需分配零页；`#PF` 处理器支持 PROT_READ/WRITE 权限校验、非映射守卫拒绝；实现帧引用计数驱动的**写时复制（COW）fork**——克隆时目录表私有深拷贝、叶子共享置只读并计数，写触发私有拷贝，父空间数据隔离。
 
-### 阶段三：进程抽象、抢占调度与快速系统调用（Milestone 3）
-- [ ] **执行体抽象（PCB / TCB）**：定义进程与线程控制块，封装虚拟地址空间（CR3）、内核栈、用户栈及寄存器执行上下文。
-- [ ] **汇编级上下文切换（`switch_to`）**：编写纯汇编上下文保存与恢复原语，实现协作式与抢占式任务调度。
-- [ ] **抢占式调度器**：基于时钟中断实现时间片轮转（Round-Robin）调度，逐步演进至 CFS 动态优先级调度模型。
-- [ ] **内核同步原语**：实现自旋锁（Spinlock）、睡眠互斥锁（Mutex）与原子操作。
-- [ ] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_LSTAR`、`MSR_STAR` 与 `MSR_SFMASK`，打通微秒级用户态到内核态的快速陷入路径。
+### 阶段三：进程抽象、抢占调度与快速系统调用（Milestone 3 · Ring3/SYSCALL 已就绪）
+- [x] **执行体抽象（TCB）**：32 槽线程控制块，封装内核栈（buddy 分配 16 KiB）、入口/参数、状态与保存的 RSP；kmain 作为 0 号 idle 上下文。
+- [x] **汇编级上下文切换（`switch_to`）**：纯汇编 callee-saved RSP 上下文切换原语 + 新线程跳板；实现协作式 `sched_yield` 与基于 Local APIC tick 的**时间片抢占式轮转调度**，`kthread_create/exit` 生命周期完整（退出回收栈且不参与轮转）。
+- [x] **同步原语**：xchg 测试-设置自旋锁与中断标志 save/restore 原语，切换窗口关中断防止 tick 嵌套切换破坏栈帧；并修复 spurious vector 255 滞留 ISR 会把 APIC PPR 抬到 15 级从而饿死定时器的问题（按 ISR 位条件 EOI，未用 LVT 源全部屏蔽）。
+- [ ] **调度策略演进**：当前为基于时钟中断的时间片轮转（Round-Robin，idle 槽让路），后续演进至动态优先级/CFS 模型与等待队列（阻塞/唤醒）。
+- [ ] **睡眠锁与原子操作**：自旋锁已就绪；后续补充互斥锁（Mutex）、信号量与睡眠/唤醒等待队列。
+- [x] **用户进程与 PCB**：TCB 扩展 pid/地址空间句柄/用户态标志；每进程独立 PML4 低半空间 + 按需分页用户栈，经 `user_iret_trampoline`（IRETQ 帧）首次进入 Ring 3；切换时联动 CR3、TSS RSP0 与 SYSCALL 内核栈；内嵌极简 ELF64 装载器按 `PT_LOAD` 权限预置 RX/RW 段。
+- [x] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_STAR`/`MSR_LSTAR`/`MSR_SFMASK`（屏蔽 IF|DF）与 `EFER.SCE`，GDT 布局满足 SYSRET 段选择子推导；`syscall_entry` 在逐线程内核栈上构建 128 字节寄存器帧（用户 RSP 随帧传递，抢占安全），派发 `write/getpid/yield/fork/exit`；`fork` 经 COW 地址空间克隆 + 帧拷贝实现父子双返回；Ring-3 定时器抢占、Ring-3 不可恢复故障单进程猎杀均有自测覆盖。
 
 ### 阶段四：VFS、现代驱动模型与用户空间（Milestone 4）
 - [ ] **虚拟文件系统抽象（VFS）**：设计现代对象模型抽象（`inode`、`dentry`、`file`、`file_operations`、`mount`）。
 - [ ] **初始内存文件系统（Ramfs / Initramfs）**：实现内存文件系统挂载与文件读写。
-- [ ] **首个 Ring 3 用户态进程（`init`）**：通过 `sysret` 跳转至用户态空间，执行第一个用户空间程序并通过 `syscall` 打印信息。
+- [x] **首个 Ring 3 用户态进程（`init`）**：内嵌 `user/init.elf`（fakecc -O0 + 独立链接脚本，经 `incbin` 进入内核镜像），双实例进入 Ring 3 并通过 `syscall` 完成打印/getpid/yield/fork/COW 校验/exit 全流程。
 - [ ] **核心 POSIX 系统调用集**：实现文件及进程系统调用（`open`, `close`, `read`, `write`, `mmap`, `brk`, `fork`, `execve`, `exit`, `waitpid`）。
 - [ ] **输入与字符终端（TTY / Keyboard）**：接入 PS/2 键盘中断驱动与行缓冲终端 TTY。
 - [ ] **移植 fakecc 运行时（Runtime / Libc）**：基于 fakecc 零依赖运行时，构建用户态基础 C 库，运行交互式 Shell。

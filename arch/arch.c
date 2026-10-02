@@ -1,6 +1,8 @@
 package arch;
 import types;
 
+typedef types.uint64_t u64;
+
 extern void outb(types.uint16_t port, types.uint8_t val);
 extern types.uint8_t inb(types.uint16_t port);
 extern void outw(types.uint16_t port, types.uint16_t val);
