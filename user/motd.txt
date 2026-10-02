@@ -1,0 +1,2 @@
+Welcome to fakeos - built entirely with the fakecc toolchain.
+Try: hello, ls /bin, cat /etc/motd, pwd, echo $?

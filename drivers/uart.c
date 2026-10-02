@@ -47,3 +47,12 @@ void uart_puts(const char *s) {
         s++;
     }
 }
+
+/* Non-blocking receive: LSR bit0 (Data Ready) gates a read of RBR.
+ * Returns the received byte (0..255) or -1 when no byte is available. */
+int uart_getc_nonblock(void) {
+    if ((arch.inb(COM1 + 5) & 0x01) == 0) {
+        return -1;
+    }
+    return (int)(arch.inb(COM1 + 0) & 0xFF);
+}

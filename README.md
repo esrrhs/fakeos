@@ -80,7 +80,7 @@
 ```mermaid
 flowchart TD
     M1["阶段一：裸机脚手架与调试基础设施<br/>(已完成 · IDT/TSS/IST/APIC Timer 已就绪)"] --> M2["阶段二：现代内存管理子系统<br/>(PMM/HHDM/VMM/Slab/VMA/COW 全部就绪)"] --> M3["阶段三：进程抽象、抢占调度与快速系统调用<br/>(内核线程/RR 调度/Ring3/SYSCALL 已就绪)"]
-    M3 --> M4["阶段四：VFS 虚拟文件系统与用户态空间<br/>(Ring 3 / Ramfs / libc)"]
+    M3 --> M4["阶段四：VFS/POSIX/用户态空间<br/>(Ramfs/Shell/libc 已就绪)"]
     M4 --> M5["阶段五：fakecc 自举与生态全闭环<br/>(自举编译内核)"]
 ```
 
@@ -112,13 +112,18 @@ flowchart TD
 - [x] **用户进程与 PCB**：TCB 扩展 pid/地址空间句柄/用户态标志；每进程独立 PML4 低半空间 + 按需分页用户栈，经 `user_iret_trampoline`（IRETQ 帧）首次进入 Ring 3；切换时联动 CR3、TSS RSP0 与 SYSCALL 内核栈；内嵌极简 ELF64 装载器按 `PT_LOAD` 权限预置 RX/RW 段。
 - [x] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_STAR`/`MSR_LSTAR`/`MSR_SFMASK`（屏蔽 IF|DF）与 `EFER.SCE`，GDT 布局满足 SYSRET 段选择子推导；`syscall_entry` 在逐线程内核栈上构建 128 字节寄存器帧（用户 RSP 随帧传递，抢占安全），派发 `write/getpid/yield/fork/exit`；`fork` 经 COW 地址空间克隆 + 帧拷贝实现父子双返回；Ring-3 定时器抢占、Ring-3 不可恢复故障单进程猎杀均有自测覆盖。
 
-### 阶段四：VFS、现代驱动模型与用户空间（Milestone 4）
-- [ ] **虚拟文件系统抽象（VFS）**：设计现代对象模型抽象（`inode`、`dentry`、`file`、`file_operations`、`mount`）。
-- [ ] **初始内存文件系统（Ramfs / Initramfs）**：实现内存文件系统挂载与文件读写。
-- [x] **首个 Ring 3 用户态进程（`init`）**：内嵌 `user/init.elf`（fakecc -O0 + 独立链接脚本，经 `incbin` 进入内核镜像），双实例进入 Ring 3 并通过 `syscall` 完成打印/getpid/yield/fork/COW 校验/exit 全流程。
-- [ ] **核心 POSIX 系统调用集**：实现文件及进程系统调用（`open`, `close`, `read`, `write`, `mmap`, `brk`, `fork`, `execve`, `exit`, `waitpid`）。
-- [ ] **输入与字符终端（TTY / Keyboard）**：接入 PS/2 键盘中断驱动与行缓冲终端 TTY。
-- [ ] **移植 fakecc 运行时（Runtime / Libc）**：基于 fakecc 零依赖运行时，构建用户态基础 C 库，运行交互式 Shell。
+### 阶段四：VFS、POSIX 系统调用与用户空间（Milestone 4 · 已就绪）
+- [x] **虚拟文件系统抽象（VFS）**：`fs` 包提供 inode（常规文件/目录/字符设备）、目录项父子树、打开文件表（offset/refcount）与根挂载；内核态绝对/相对路径解析（多斜杠折叠、`.`/`..`、cwd 规范化）；所有跨包对象以 u32 句柄传递，操作按 inode 类型 if 链分派。
+- [x] **内存文件系统（Ramfs）**：静态文件指向 incbin 内核镜像（只读不可变，写打开被拒），运行时文件为 kmalloc/buddy 支撑的动态缓冲（2 倍扩容、1 MiB 上限、稀疏零填充）；目录支持创建与 48 字节定长记录枚举。`/bin/{init,sh,hello,cat,ls}` 与 `/etc/motd` 经多 blob `incbin` 发布，启动时逐级建目录释放到根。
+- [x] **每进程文件描述符与 POSIX 文件调用**：TCB 内 16 个 fd 槽，fd 0/1/2 绑定控制台，fork 继承并共享打开文件描述（引用计数），execve 保留，进程退出统一关闭；实现 `read/write/open/close/lseek`，O_RDONLY/WRONLY/RDWR/CREAT/TRUNC/APPEND 与 SEEK_SET/CUR/END；所有用户指针先经 VMA range 校验（字符串按页校验，兼容栈顶 argv）。
+- [x] **进程生命周期补齐**：退出记录表 + DEAD 槽延迟到 `wait4` 回收（避免长会话耗尽 TCB 槽），孤儿自动 reparent 到 pid 1；阻塞以内核态 yield 轮询实现，支持 WNOHANG 与 ECHILD 语义，退出码低 8 位经 status 回传。
+- [x] **execve 映像替换**：从 Ramfs 文件装载 ELF 到全新地址空间，构造 SysV 初始栈（argc/argv/空 envp，16B 对齐），改写当前 syscall 帧的用户 RIP/RSP；pid、ppid、fd 表与 cwd 保持不变；坏路径/坏 ELF/超长 argv 返回 -1 且原映像存活。
+- [x] **堆与匿名映射**：`brk` 在 ELF 段之上的固定 1 MiB 预留堆区移动 program break（按需分页）；`mmap` 在独立 mmap 窗口（256 MiB 起向上）分配匿名 MAP_PRIVATE 段。
+- [x] **目录与工作目录系统调用**：`mkdir/chdir/getcwd/getdents64`，每进程 cwd 字符串驱动相对路径解析。
+- [x] **串口 TTY 标准输入**：COM1 接收实现 canonical 行规程（256B 行缓冲、字符回显、`\r`/`\n` 兼容、退格编辑、缓冲满强制收行），无输入时 yield 让出；`read(0)` 阻塞至行结束，残余字节留待下次读取。QEMU 串口管道可直接注入命令，Shell 端到端回归无头自动化。
+- [ ] **PS/2 键盘硬件驱动与按键中断**：本阶段标准输入先落串口 TTY（可自动化测试），IRQ1 扫描码/Shift/Caps 键盘映射后续接入。
+- [x] **自研用户态 libc 与 crt0**：单一 `package user` 提供全部 syscall 汇编包装（注意第 4 参 RCX→R10 搬移）、mem/string 例程、mini_printf（%s/%d/%u/%x/%c）、brk bump + first-fit 的 malloc/free；crt0 从初始栈取 argc/argv 调 `main`，返回值即退出码。
+- [x] **交互式 /bin/sh 与用户程序**：提示符 `fakeos:~$`、空格分词、内建 `echo`（含 `$?`）/`cd`/`mkdir`/`pwd`/`help`/`exit [code]`；外部命令自动加 `/bin` 前缀，fork+execve+wait4 同步执行并传递退出状态；附带 `/bin/hello`（退出码 42）、`/bin/cat`、`/bin/ls`。启动序列为内核装载 pid 1 = /bin/init（完成阶段三/四全部用户态自测）后 `execve` 到 /bin/sh，`exit` 后内核打印里程碑 SUCCESS。
 
 ### 阶段五：fakecc 自举与生态全闭环（Milestone 5）
 - [ ] **文件系统与进程环境完备化**：补齐 `fakecc` 运行所需的文件 I/O 与动态内存系统调用。

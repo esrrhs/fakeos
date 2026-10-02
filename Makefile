@@ -59,11 +59,18 @@ OBJS := \
 	$(BUILD_DIR)/vmm.o \
 	$(BUILD_DIR)/slab.o \
 	$(BUILD_DIR)/as.o \
+	$(BUILD_DIR)/ramfs.o \
 	$(BUILD_DIR)/memtest.o \
 	$(BUILD_DIR)/sched.o \
 	$(BUILD_DIR)/proctest.o \
 	$(BUILD_DIR)/syscall.o \
+	$(BUILD_DIR)/sysfile.o \
+	$(BUILD_DIR)/sysproc.o \
+	$(BUILD_DIR)/proc.o \
+	$(BUILD_DIR)/tty.o \
 	$(BUILD_DIR)/uproc.o \
+	$(BUILD_DIR)/rootfs.o \
+	$(BUILD_DIR)/vfstest.o \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
 
@@ -113,22 +120,44 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 
-# Userland: fakecc-compiled init linked at 0x400000, embedded into the kernel
+# Userland: fakecc-compiled programs linked at 0x400000, embedded into the
+# kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
+USER_PROGS := init sh hello cat ls
+USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
+              $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
+USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
+
+$(BUILD_DIR)/user/crt0.o: user/crt0.asm
+	@mkdir -p $(BUILD_DIR)/user
+	@echo "  [NASM]    $<"
+	@$(NASM) $(NASMFLAGS) -o $@ $<
+
 $(BUILD_DIR)/user/usys.o: user/usys.asm
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 
-$(BUILD_DIR)/user/init.o: user/init.c
+$(BUILD_DIR)/user/libc.o: user/libc.c
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/user/init.elf: $(BUILD_DIR)/user/usys.o $(BUILD_DIR)/user/init.o user/user.ld
-	@echo "  [LD]      $@"
-	@$(LD) -T user/user.ld -n -o $@ $(BUILD_DIR)/user/usys.o $(BUILD_DIR)/user/init.o
+$(BUILD_DIR)/user/%.o: user/%.c
+	@mkdir -p $(BUILD_DIR)/user
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/userblob.o: user/blob.asm $(BUILD_DIR)/user/init.elf
+# Each program ELF: crt0 + syscall wrappers + libc + program main.
+define USER_ELF_RULE
+$(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
+                           $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o user/user.ld
+	@echo "  [LD]      $$@"
+	@$(LD) -T user/user.ld -n -o $$@ $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
+	       $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o
+endef
+$(foreach p,$(USER_PROGS),$(eval $(call USER_ELF_RULE,$(p))))
+
+$(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
@@ -199,6 +228,11 @@ $(BUILD_DIR)/as.o: mem/as.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/ramfs.o: fs/ramfs.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/sched.o: kernel/sched.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -214,7 +248,37 @@ $(BUILD_DIR)/syscall.o: kernel/syscall.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/sysfile.o: kernel/sysfile.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tty.o: kernel/tty.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/sysproc.o: kernel/sysproc.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/proc.o: kernel/proc.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/uproc.o: kernel/uproc.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rootfs.o: kernel/rootfs.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/vfstest.o: kernel/vfstest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@

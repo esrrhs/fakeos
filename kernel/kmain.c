@@ -1,6 +1,7 @@
 package kernel;
 import arch;
 import drivers;
+import fs;
 import mem;
 import types;
 
@@ -22,6 +23,8 @@ extern void vmm_selftest(void);
 extern void slab_selftest(void);
 extern void sched_selftest(void);
 extern void uproc_selftest(void);
+extern void vfs_selftest(void);
+extern void rootfs_publish(void);
 
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
@@ -36,7 +39,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (Milestone 3: Ring-3 processes + fast syscalls)\n");
+    kprintf(" Welcome to fakeos! (Milestone 4: VFS, Ramfs, POSIX syscalls, shell)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -115,6 +118,12 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     vmm_selftest();
     slab_selftest();
 
+    // Virtual file system: inode/dentry/open-file core, Ramfs instance and
+    // the embedded rootfs image (/bin/* user ELFs, /etc/motd).
+    fs.fs_init();
+    rootfs_publish();
+    vfs_selftest();
+
     // Kernel threads, round-robin preemptive scheduling and spinlocks; then
     // per-process address spaces with VMA demand paging and COW forks.
     sched_selftest();
@@ -143,11 +152,11 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: Ring-3 user processes + SYSCALL/SYSRET fast syscalls online!\n");
+    kprintf(" [SUCCESS] fakeos: VFS, Ramfs, POSIX syscalls, TTY input, libc and interactive shell online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
-    kprintf("           - UART 16550 Serial Output: OK\n");
+    kprintf("           - UART 16550 Serial Output/Input: OK\n");
     kprintf("           - VGA Text Display Driver: OK\n");
     kprintf("           - Formatted Kernel Logger (kprintf): OK\n");
     kprintf("           - 64-bit GDT / TSS / IST (#DF guard stack): OK\n");
@@ -159,9 +168,12 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
     kprintf("           - Kernel threads + RR scheduler + spinlocks: OK\n");
+    kprintf("           - VFS inode/dentry/open-file + Ramfs (static/dynamic): OK\n");
+    kprintf("           - Embedded rootfs (/bin/init,sh,hello,cat,ls,/etc/motd): OK\n");
     kprintf("           - Ring-3 user processes (IRET entry, per-process PML4): OK\n");
-    kprintf("           - SYSCALL/SYSRET (write/getpid/yield/fork/exit): OK\n");
-    kprintf("           - COW fork + timer preemption at ring 3: OK\n");
+    kprintf("           - SYSCALL/SYSRET (read/write/open/execve/wait4/mmap/...): OK\n");
+    kprintf("           - brk heap + anonymous mmap, getdents, chdir/getcwd: OK\n");
+    kprintf("           - Canonical serial TTY stdin + libc + interactive /bin/sh: OK\n");
     kprintf("================================================================================\n");
     kprintf(" System idle. CPU halted.\n");
 }

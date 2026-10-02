@@ -1,5 +1,6 @@
 package kernel;
 import arch;
+import fs;
 import mem;
 import types;
 
@@ -33,7 +34,11 @@ enum {
 
     MAX_THREADS  = 32,
     STACK_ORDER  = 2,                 /* 4 frames = 16 KiB per kernel stack  */
-    STACK_BYTES  = 16384
+    STACK_BYTES  = 16384,
+
+    FD_MAX       = 16,
+    FD_EMPTY     = 0xFFFFFFFF,
+    CWD_LEN      = 64
 };
 
 struct tcb {
@@ -46,7 +51,10 @@ struct tcb {
     u32 state;
     u32 id;
     u32 pid;           /* User process id (0 for kernel threads)          */
+    u32 ppid;          /* Parent process id (0 = kernel / no parent)      */
     u32 is_user;       /* Runs at ring 3 between syscalls/interrupts      */
+    u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
+    char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
 
 static struct tcb threads[MAX_THREADS];
@@ -63,6 +71,7 @@ static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
 void sched_init(void) {
     u32 i;
     for (i = 0; i < MAX_THREADS; i++) {
+        u32 j;
         threads[i].state = TCB_FREE;
         threads[i].rsp = 0;
         threads[i].stack_phys = 0;
@@ -71,7 +80,13 @@ void sched_init(void) {
         threads[i].arg = 0;
         threads[i].as_h = 0;
         threads[i].pid = 0;
+        threads[i].ppid = 0;
         threads[i].is_user = 0;
+        for (j = 0; j < FD_MAX; j++) {
+            threads[i].fd[j] = FD_EMPTY;
+        }
+        threads[i].cwd[0] = '/';
+        threads[i].cwd[1] = 0;
         threads[i].id = i;
     }
     /* Slot 0 is the boot/init context (kmain). Its RSP is captured lazily
@@ -109,6 +124,37 @@ static u32 pick_next(u32 from) {
 /* ---------------------------------------------------------------------------
  * Thread creation
  * ------------------------------------------------------------------------- */
+
+/* Per-process descriptor table helpers. User processes start with fd 0/1/2
+ * bound to the permanent console open-file; forked children inherit the whole
+ * table sharing the same open-file descriptions (fs layer refcounted). */
+static void fd_table_clear(struct tcb *t) {
+    u32 i;
+    for (i = 0; i < FD_MAX; i++) {
+        t->fd[i] = FD_EMPTY;
+    }
+}
+
+static void fd_table_install_console(struct tcb *t) {
+    fd_table_clear(t);
+    t->fd[0] = fs.fs_console_fh();
+    t->fd[1] = fs.fs_console_fh();
+    t->fd[2] = fs.fs_console_fh();
+}
+
+static void cwd_set_root(struct tcb *t) {
+    t->cwd[0] = '/';
+    t->cwd[1] = 0;
+}
+
+static void cwd_copy_from(struct tcb *dst, const char *src) {
+    u32 i = 0;
+    while (src[i] != 0 && i < CWD_LEN - 1) {
+        dst->cwd[i] = src[i];
+        i++;
+    }
+    dst->cwd[i] = 0;
+}
 
 static u32 alloc_slot(void) {
     u32 i;
@@ -151,7 +197,10 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].arg = arg;
     threads[i].as_h = 0;
     threads[i].pid = 0;
+    threads[i].ppid = 0;
     threads[i].is_user = 0;
+    fd_table_clear(&threads[i]);
+    cwd_set_root(&threads[i]);
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -187,7 +236,10 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].arg = 0;
     threads[i].as_h = as_h;
     threads[i].pid = pid;
+    threads[i].ppid = 0;
     threads[i].is_user = 1;
+    fd_table_install_console(&threads[i]);
+    cwd_set_root(&threads[i]);
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -231,7 +283,21 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].arg = 0;
     threads[i].as_h = child_as_h;
     threads[i].pid = child_pid;
+    threads[i].ppid = threads[current].pid;
     threads[i].is_user = 1;
+    {
+        u32 f;
+        for (f = 0; f < FD_MAX; f++) {
+            u32 fh = threads[current].fd[f];
+            threads[i].fd[f] = fh;
+            if (fh != FD_EMPTY) {
+                /* Shared open-file description; the console slot is permanent
+                 * and its retain is a no-op. */
+                fs.fs_file_retain(fh);
+            }
+        }
+    }
+    cwd_copy_from(&threads[i], threads[current].cwd);
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -358,6 +424,12 @@ u64 sched_current_as_h(void) {
     return threads[current].as_h;
 }
 
+/* execve() swaps the address space of the running thread in place. CR3 is
+ * switched by the caller; subsequent context switches use the new handle. */
+void sched_replace_as(u64 new_as_h) {
+    threads[current].as_h = new_as_h;
+}
+
 /* Called from the timer ISR path when a tick was taken while the interrupted
  * context was ring 3 (CS & 3): proves ring-3 threads are truly preemptible. */
 void sched_note_user_tick(void) {
@@ -366,4 +438,95 @@ void sched_note_user_tick(void) {
 
 u64 sched_user_tick_count(void) {
     return user_mode_ticks;
+}
+
+/* ---------------------------------------------------------------------------
+ * Per-process file descriptors and working directory
+ * ------------------------------------------------------------------------- */
+
+u32 sched_fd_get(u32 idx) {
+    if (idx >= FD_MAX) {
+        return FD_EMPTY;
+    }
+    return threads[current].fd[idx];
+}
+
+void sched_fd_set(u32 idx, u32 fh) {
+    if (idx < FD_MAX) {
+        threads[current].fd[idx] = fh;
+    }
+}
+
+/* Lowest empty descriptor; POSIX allocates the smallest available number. */
+u32 sched_fd_alloc(void) {
+    u32 i;
+    for (i = 0; i < FD_MAX; i++) {
+        if (threads[current].fd[i] == FD_EMPTY) {
+            return i;
+        }
+    }
+    return FD_EMPTY;
+}
+
+/* Close every descriptor of the running process; called from proc_terminate
+ * before the address space is torn down. */
+void sched_fd_close_all(void) {
+    u32 i;
+    for (i = 0; i < FD_MAX; i++) {
+        if (threads[current].fd[i] != FD_EMPTY) {
+            fs.fs_close(threads[current].fd[i]);
+            threads[current].fd[i] = FD_EMPTY;
+        }
+    }
+}
+
+const char *sched_cwd(void) {
+    return threads[current].cwd;
+}
+
+void sched_cwd_set(const char *kpath) {
+    cwd_copy_from(&threads[current], kpath);
+}
+
+u32 sched_current_ppid(void) {
+    return threads[current].ppid;
+}
+
+/* True when a live (neither exited nor freed) child TCB of ppid exists. The
+ * exit record alone is enough for wait once the child is DEAD. */
+u32 sched_has_live_child(u32 ppid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].pid != 0 && threads[i].ppid == ppid
+            && threads[i].state != TCB_DEAD && threads[i].state != TCB_FREE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Release the DEAD slot of a successfully waited-for pid. The kernel stack
+ * was already freed in kthread_exit; only the slot identity remains. */
+u32 sched_reap_dead(u32 pid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].pid == pid && threads[i].state == TCB_DEAD) {
+            threads[i].state = TCB_FREE;
+            threads[i].pid = 0;
+            threads[i].ppid = 0;
+            threads[i].is_user = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Reparent live children when their parent exits; orphans join pid 1. */
+void sched_reparent_children(u32 old_ppid, u32 new_ppid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].pid != 0 && threads[i].ppid == old_ppid) {
+            threads[i].ppid = new_ppid;
+        }
+    }
 }

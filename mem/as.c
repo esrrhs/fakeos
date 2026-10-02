@@ -50,6 +50,15 @@ enum {
     PROT_EXEC  = 4
 };
 
+/* Fixed user-space layout: the ELF image loads near 0x400000, the brk heap
+ * starts above the image, the demand stack lives just below 0x800000 and
+ * anonymous mmap allocations grow upward in a separate window well above the
+ * heap (none of the ranges overlap). */
+static const u64 HEAP_BASE = 0x02000000ULL;
+static const u64 HEAP_SIZE = 0x00100000ULL;        /* 1 MiB reserved */
+static const u64 MMAP_BASE = 0x10000000ULL;        /* 256 MiB */
+static const u64 MMAP_LIMIT = 0x40000000ULL;       /* 1 GiB ceiling */
+
 struct vma {
     u64 start;
     u64 end;
@@ -61,6 +70,9 @@ struct address_space {
     u64 pml4;
     struct vma vmas[MAX_VMA];
     u32 nvma;
+    u64 brk_base;              /* 0 until the first brk reserves the heap VMA */
+    u64 brk_cur;
+    u64 mmap_next;             /* next free hint in the anonymous mmap zone  */
 };
 
 /* Per-frame share count for COW. 1 = single owner (plain writable page),
@@ -147,6 +159,9 @@ static volatile u64 *resolve_pt(u64 pml4, u64 vaddr, int create, u64 leaf_flags)
 void as_init(struct address_space *as) {
     u32 i;
     as->nvma = 0;
+    as->brk_base = 0;
+    as->brk_cur = 0;
+    as->mmap_next = 0;
     for (i = 0; i < MAX_VMA; i++) {
         as->vmas[i].kind = VMA_FREE;
         as->vmas[i].start = 0;
@@ -370,6 +385,9 @@ void as_cow_clone(struct address_space *dst, struct address_space *src) {
 
     /* Duplicate the VMA reservations. */
     dst->nvma = src->nvma;
+    dst->brk_base = src->brk_base;
+    dst->brk_cur = src->brk_cur;
+    dst->mmap_next = src->mmap_next;
     for (i = 0; i < src->nvma; i++) {
         dst->vmas[i] = src->vmas[i];
     }
@@ -688,6 +706,111 @@ void as_activate_h(u64 handle) {
 /* Reserve a demand-paged anonymous range in the target space. */
 int as_map_anon_h(u64 handle, u64 start, u64 size, u32 prot) {
     return as_map_anon(as_of(handle), start, size, prot);
+}
+
+/* brk(): lazily reserve the fixed 1 MiB heap VMA on first use and move the
+ * program break. A newbrk of 0 queries the current break. The break only
+ * moves; touched pages demand-allocate through the ordinary #PF path. */
+u64 as_brk_h(u64 handle, u64 newbrk) {
+    struct address_space *as = as_of(handle);
+    if (as == 0) {
+        return (u64)(-1);
+    }
+    if (as->brk_base == 0) {
+        if (!as_map_anon(as, HEAP_BASE, HEAP_SIZE, PROT_READ | PROT_WRITE)) {
+            return (u64)(-1);
+        }
+        as->brk_base = HEAP_BASE;
+        as->brk_cur = HEAP_BASE;
+    }
+    if (newbrk == 0) {
+        return as->brk_cur;
+    }
+    if (newbrk < as->brk_base || newbrk > as->brk_base + HEAP_SIZE) {
+        return (u64)(-1);
+    }
+    as->brk_cur = newbrk;
+    return newbrk;
+}
+
+/* Anonymous MAP_PRIVATE mapping: page-aligned reservation grown upward from
+ * MMAP_BASE, stopping below the demand stack. Returns the start VA or 0. */
+u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot) {
+    struct address_space *as = as_of(handle);
+    u64 hint;
+    if (as == 0 || len == 0) {
+        return 0;
+    }
+    len = (len + 0xFFF) & ~0xFFFULL;
+    hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
+    if (hint + len > MMAP_LIMIT) {
+        return 0;
+    }
+    if (!as_map_anon(as, hint, len, prot)) {
+        return 0;
+    }
+    as->mmap_next = hint + len;
+    return hint;
+}
+
+/* Force-allocate the frame backing uva's page in a (not necessarily active)
+ * address space, honoring its VMA permissions. Used to seed a freshly built
+ * user stack during process creation / execve. Returns the physical frame or
+ * 0 when the VA is outside every VMA or tables cannot be grown. */
+u64 as_force_page_h(u64 handle, u64 uva) {
+    struct address_space *as = as_of(handle);
+    u64 page_va = uva & ~0xFFFULL;
+    struct vma *vma = find_vma(as, page_va);
+    volatile u64 *pt;
+    u64 pte;
+    if (as == 0 || vma == 0) {
+        return 0;
+    }
+    pt = resolve_pt(as->pml4, uva, 1, PTE_U);
+    if (pt == 0) {
+        return 0;
+    }
+    pte = pt[pt_i(uva)];
+    if (pte & PTE_P) {
+        return entry_phys(pte);
+    }
+    {
+        u64 frame = alloc_zero_frame();
+        if (frame == 0) {
+            return 0;
+        }
+        frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
+        pt[pt_i(uva)] = frame | leaf_perms(vma);
+        return frame;
+    }
+}
+
+/* Copy kernel bytes into user VA of a possibly inactive space, force-paging
+ * each touched frame and writing through the HHDM. Returns 1 on success. */
+int as_copy_in_h(u64 handle, u64 uva, const char *src, u64 len) {
+    u64 off = 0;
+    if (as_of(handle) == 0) {
+        return 0;
+    }
+    while (off < len) {
+        u64 frame = as_force_page_h(handle, uva + off);
+        u64 poff = (uva + off) & 0xFFF;
+        u64 chunk = PAGE_SIZE - poff;
+        volatile u8 *dst8;
+        u64 k;
+        if (frame == 0) {
+            return 0;
+        }
+        if (chunk > len - off) {
+            chunk = len - off;
+        }
+        dst8 = (volatile u8 *)(HHDM_BASE + frame);
+        for (k = 0; k < chunk; k++) {
+            dst8[poff + k] = (u8)src[off + k];
+        }
+        off += chunk;
+    }
+    return 1;
 }
 
 /* Record a VMA covering [va, va+memsz) and pre-populate the pages that carry

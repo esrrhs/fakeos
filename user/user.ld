@@ -1,5 +1,5 @@
 OUTPUT_FORMAT(elf64-x86-64)
-ENTRY(umain)
+ENTRY(_start)
 
 USER_VMA = 0x400000;
 
