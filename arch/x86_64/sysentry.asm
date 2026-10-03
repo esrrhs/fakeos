@@ -15,29 +15,41 @@ global syscall_user_rsp
 
 section .text
 
-; ------------------------------------------------------------------------------
-; SYSCALL entry (MSR_LSTAR). CPU state on entry:
-;   RCX = user return RIP, R11 = user RFLAGS, RSP = user stack pointer.
-;   CS/SS loaded from STAR, RFLAGS &= ~SFMASK (we mask IF|DF), no stack switch.
-; The user stack pointer is stashed through a private conduit slot, then stored
-; INTO the per-syscall frame (the pad slot at +120): a single global cannot
-; survive preemption, since another thread's SYSCALL would overwrite it before
-; a preempted thread reaches the epilogue. Frame travel also makes fork() copy
-; the correct user RSP to the child for free.
+; Trap frame layout (grows down from the per-thread kernel stack top T):
 ;
-; Frame built on the kernel stack (128 bytes, 16-byte aligned for the C call):
-;   [0]   rax (syscall number)
-;   [8]   r9  [16] r8  [24] r10  [32] rdx  [40] rsi  [48] rdi   (arguments)
-;   [56]  r15 [64] r14 [72] r13  [80] r12  [88] rbp  [96] rbx   (user regs)
-;   [104] rcx = user RIP, [112] r11 = user RFLAGS, [120] user RSP
-; ------------------------------------------------------------------------------
+;   T-264 (B): 8-byte user-RSP pad + 256 bytes saved XMM0-15 ([B+8..B+264))
+;   T-384 (F): 128-byte GPR frame (struct syscall_frame), pad at F+120
+;
+; XMM must survive syscalls: kernel C handlers emit SSE spills, and the user
+; compiler keeps aggregate temporaries in vector registers around its raw
+; __syscall sites. The user RSP is stashed in a global conduit (SFMASK clears
+; IF on entry); the syscall number stays in RAX through the pushes and is
+; pushed last, so the conduit reload (which clobbers RAX) happens only after
+; the number is safely in its frame slot. fork_ret_trampoline lands on this
+; identical 392-byte layout.
 align 16
 syscall_entry:
     mov     [rel syscall_user_rsp], rsp
     mov     rsp, [rel syscall_kstack_top]
-    sub     rsp, 8              ; keeps RSP 16-byte aligned for the C call
-    push    r11
-    push    rcx
+    sub     rsp, 264            ; 256 XMM bytes + 8 user-RSP pad (16-aligned)
+    movdqa  [rsp + 0x08], xmm0
+    movdqa  [rsp + 0x18], xmm1
+    movdqa  [rsp + 0x28], xmm2
+    movdqa  [rsp + 0x38], xmm3
+    movdqa  [rsp + 0x48], xmm4
+    movdqa  [rsp + 0x58], xmm5
+    movdqa  [rsp + 0x68], xmm6
+    movdqa  [rsp + 0x78], xmm7
+    movdqa  [rsp + 0x88], xmm8
+    movdqa  [rsp + 0x98], xmm9
+    movdqa  [rsp + 0xa8], xmm10
+    movdqa  [rsp + 0xb8], xmm11
+    movdqa  [rsp + 0xc8], xmm12
+    movdqa  [rsp + 0xd8], xmm13
+    movdqa  [rsp + 0xe8], xmm14
+    movdqa  [rsp + 0xf8], xmm15
+    push    r11                 ; frame +112 user RFLAGS
+    push    rcx                 ; frame +104 user RIP
     push    rbx
     push    rbp
     push    r12
@@ -50,9 +62,9 @@ syscall_entry:
     push    r10
     push    r8
     push    r9
-    push    rax
-    mov     rax, [rel syscall_user_rsp]   ; conduit is safe: IF=0 since entry
-    mov     [rsp + 120], rax              ; frame pad slot = user RSP
+    push    rax                 ; frame +0 syscall number (RAX still intact)
+    mov     rax, [rel syscall_user_rsp]
+    mov     [rsp + 120], rax    ; frame +120 pad = user RSP
     mov     rdi, rsp            ; struct syscall_frame *
     cld
     call    syscall_dispatch    ; return value in RAX
@@ -61,7 +73,7 @@ syscall_entry:
 ; (fork_ret_trampoline joins here on the child's copied frame.)
 global syscall_epilogue
 syscall_epilogue:
-    add     rsp, 8              ; drop saved RAX slot (retval already in RAX)
+    add     rsp, 8              ; drop syscall-number slot (retval in RAX)
     pop     r9
     pop     r8
     pop     r10
@@ -76,17 +88,29 @@ syscall_epilogue:
     pop     rbx
     pop     rcx                 ; user RIP
     pop     r11                 ; user RFLAGS
-    mov     rsp, [rsp]          ; frame pad slot holds THIS syscall's user RSP
-    ; NOTE: nasm does not recognize the "sysretq" mnemonic (it silently parses
-    ; as a label definition and emits no bytes). Emit REX.W + 0F 07 by hand:
-    ; this is 64-bit SYSRET (RIP=RCX, RFLAGS=R11, CS/SS from STAR, ring 3).
-    db      0x48, 0x0F, 0x07
+    movdqa  xmm0,  [rsp + 0x08]
+    movdqa  xmm1,  [rsp + 0x18]
+    movdqa  xmm2,  [rsp + 0x28]
+    movdqa  xmm3,  [rsp + 0x38]
+    movdqa  xmm4,  [rsp + 0x48]
+    movdqa  xmm5,  [rsp + 0x58]
+    movdqa  xmm6,  [rsp + 0x68]
+    movdqa  xmm7,  [rsp + 0x78]
+    movdqa  xmm8,  [rsp + 0x88]
+    movdqa  xmm9,  [rsp + 0x98]
+    movdqa  xmm10, [rsp + 0xa8]
+    movdqa  xmm11, [rsp + 0xb8]
+    movdqa  xmm12, [rsp + 0xc8]
+    movdqa  xmm13, [rsp + 0xd8]
+    movdqa  xmm14, [rsp + 0xe8]
+    movdqa  xmm15, [rsp + 0xf8]
+    mov     rsp, [rsp]          ; pad holds THIS thread's user RSP
+    ; NOTE: nasm does not recognize the "sysretq" mnemonic; encode by hand.
+    db      0x48, 0x0F, 0x07    ; 64-bit SYSRET (RIP=RCX, RFLAGS=R11)
 
 ; ------------------------------------------------------------------------------
-; First entry into ring 3 for a freshly created user thread. Installed as the
-; return address of the synthesized switch_context frame, with:
-;   R12 = user entry RIP, RBX = user stack pointer.
-; CR3 was already switched to the process address space by the scheduler.
+; First entry into ring 3 for a freshly created user thread. On resume the
+; scheduler switch frame delivers R12 = user entry RIP, RBX = user RSP.
 ; ------------------------------------------------------------------------------
 align 16
 user_iret_trampoline:
@@ -98,9 +122,9 @@ user_iret_trampoline:
     iretq
 
 ; ------------------------------------------------------------------------------
-; fork() child return path. The child's kernel stack carries a byte-copy of the
-; parent's syscall frame; switch_context resumes the child with R12 = frame
-; base. fork() returns 0 in the child.
+; fork() child return path. The child's kernel stack carries a byte-copy of
+; the full 392-byte trap frame (GPRs + pad + XMM); switch resumes with
+; R12 = frame base. fork() returns 0 in the child.
 ; ------------------------------------------------------------------------------
 align 16
 fork_ret_trampoline:

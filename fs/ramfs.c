@@ -36,8 +36,8 @@ enum {
 
     ROOT_INO    = 1,
     CONSOLE_INO = 63,
-    MAX_INODES  = 64,
-    MAX_DENTS   = 32,
+    MAX_INODES  = 256,
+    MAX_DENTS   = 64,
     NAME_LEN    = 32,               /* 31 usable chars + NUL */
     NAME_MAX    = 31,
 
@@ -47,7 +47,9 @@ enum {
 
     DENT_RECLEN = 48,             /* fixed-size getdents64 record */
 
-    FILE_MAX = 1048576,            /* per-file growth ceiling: 1 MiB */
+    /* Dynamic files are kmalloc-backed; cap bounds worst-case buddy
+     * pressure (tool outputs are a few hundred KB, margin for growth). */
+    FILE_MAX = 16777216,          /* 16 MiB per-file growth ceiling */
 
     O_RDONLY  = 0,
     O_WRONLY  = 1,
@@ -130,7 +132,11 @@ static u32 name_eq(const char *a, const char *b, u32 n) {
 
 static u32 alloc_ino(u32 type, u32 parent) {
     u32 i;
-    for (i = 2; i < CONSOLE_INO; i++) {
+    /* Slots 2..MAX_INODES-1, skipping the fixed console slot. */
+    for (i = 2; i < MAX_INODES; i++) {
+        if (i == CONSOLE_INO) {
+            continue;
+        }
         if (inodes[i].type == INO_FREE) {
             u32 k;
             inodes[i].type = type;
@@ -400,6 +406,59 @@ u32 fs_mkdir(const char *path) {
         return 0;
     }
     return ino;
+}
+
+/* True when an open-file description references the inode. */
+static u32 inode_is_open(u32 ino) {
+    u32 i;
+    for (i = 0; i < MAX_OPEN_FILES; i++) {
+        if (opens[i].used && opens[i].ino == ino) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* unlink: detach the directory entry. The inode slot is freed only when no
+ * open file still references it (POSIX keeps unlinked-but-open files alive);
+ * otherwise it lingers detached until reboot, bounded by the slot count. */
+u32 fs_unlink(const char *path) {
+    char last[NAME_LEN];
+    u32 last_n = 0;
+    u32 parent = walk_parent(path, last, &last_n, 0);
+    struct inode *d;
+    u32 target;
+    u32 slot;
+    u32 k;
+
+    if (parent == 0 || inodes[parent].type != INO_DIR || last_n == 0) {
+        return 0;
+    }
+    d = &inodes[parent];
+    target = dir_find(parent, last, last_n);
+    if (target == 0) {
+        return 0;
+    }
+    for (slot = 0; slot < d->ndent; slot++) {
+        if (d->dents[slot].ino == target) {
+            break;
+        }
+    }
+    if (slot >= d->ndent) {
+        return 0;
+    }
+    /* Shift later entries down over the removed slot. */
+    for (k = slot; k + 1 < d->ndent; k++) {
+        d->dents[k] = d->dents[k + 1];
+    }
+    d->ndent--;
+
+    if (!inode_is_open(target)) {
+        inodes[target].type = INO_FREE;
+        inodes[target].parent = 0;
+        inodes[target].ndent = 0;
+    }
+    return 1;
 }
 
 /* ---------------------------------------------------------------------------

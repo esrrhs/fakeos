@@ -244,9 +244,11 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     return i;
 }
 
-/* fork(): clone the currently running user thread. The parent's 128-byte
- * syscall frame is copied onto the child's kernel stack; the child first
- * resumes in fork_ret_trampoline, which returns 0 to user space. */
+/* fork(): clone the currently running user thread. The parent's complete
+ * syscall trap frame is copied onto the child's kernel stack: the 128-byte
+ * GPR frame plus the 264-byte user-RSP pad and XMM save area the epilogue
+ * reads on its way back to user space. The child first resumes in
+ * fork_ret_trampoline, which returns 0 to user space. */
 u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     u32 i = alloc_slot();
     if (i == 0xFFFFFFFF) {
@@ -259,24 +261,28 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     }
     u64 top = 0xFFFF800000000000ULL + stack_phys + STACK_BYTES;
 
-    u64 *dst = (u64 *)(top - 128);
+    /* Trap frame: 15 pushed GPRs (120) + user-RSP pad (8) + XMM area (256),
+     * exactly the region syscall_entry lays out below the stack top. */
+    enum { FRAME_QWORDS = (120 + 8 + 256) / 8 };
+    u64 fbase = top - 384;
+    u64 *dst = (u64 *)(fbase);
     u64 *src = (u64 *)frame_base;
     u32 k;
-    for (k = 0; k < 16; k++) {
+    for (k = 0; k < FRAME_QWORDS; k++) {
         dst[k] = src[k];
     }
 
     /* switch_context frame below the copied syscall frame: r12 = frame base */
-    u64 *frame = (u64 *)(top - 128 - 56);
+    u64 *frame = (u64 *)(fbase - 56);
     frame[0] = 0;                                   /* r15 */
     frame[1] = 0;                                   /* r14 */
     frame[2] = 0;                                   /* r13 */
-    frame[3] = top - 128;                           /* r12 = frame base */
+    frame[3] = fbase;                               /* r12 = frame base */
     frame[4] = 0;                                   /* rbx */
     frame[5] = 0;                                   /* rbp */
     frame[6] = (u64)(&fork_ret_trampoline);         /* return address */
 
-    threads[i].rsp = top - 128 - 56;
+    threads[i].rsp = fbase - 56;
     threads[i].stack_phys = stack_phys;
     threads[i].kstack_top = top;
     threads[i].entry = 0;

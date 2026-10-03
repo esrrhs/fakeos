@@ -33,8 +33,13 @@ extern u32 copy_user_cstring(char *dst, u64 uva, u32 maxlen);
  * loaded from /bin/init rather than from a private blob symbol. */
 
 enum {
-    UPROC_STACK_TOP  = 0x800000,        /* user stack top VA          */
-    UPROC_STACK_SIZE = 16384,           /* 4 demand-paged RW pages    */
+    /* 8 MiB demand-paged stack near (but below) the signed-32-bit ceiling:
+     * fakecc -O0 materializes enum constants through sign-extending 32-bit
+     * moves, so a top at exactly 0x80000000 would arrive as a negative-high
+     * address. 0x7f800000 stays positive, clears the 1 GiB mmap ceiling and
+     * leaves the compiler the deep -O0 frames it needs (Linux soft limit). */
+    UPROC_STACK_TOP  = 0x7f800000,       /* user stack top VA          */
+    UPROC_STACK_SIZE = 0x00800000,       /* 8 MiB demand-paged RW      */
     UPROC_TEST_CHILDREN = 2,            /* init forks two COW probes  */
     MONITOR_PHASE1_TICKS = 1500,        /* 15 s: COW children deadline  */
     MONITOR_PHASE2_TICKS = 3000,        /* 30 s: shell exit deadline    */

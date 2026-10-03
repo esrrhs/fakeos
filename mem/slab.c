@@ -80,7 +80,7 @@ static u32 big_order_for(u64 size) {
         }
         order++;
     }
-    return NCLASSES + 1;             /* Unsupported */
+    return BIG_ORDER_MAX + 1;       /* Unsupported: must be > every order */
 }
 
 /* Create a fresh single-page slab for class c and prepend it to the chain. */

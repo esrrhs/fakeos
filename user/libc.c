@@ -196,6 +196,12 @@ static long vformat(char *buf, const char *fmt, va_list ap) {
             continue;
         }
         fmt++;
+        /* Length modifiers are accepted but ignored: every integer
+         * argument arrives in a 64-bit slot on x86-64. */
+        while (*fmt == 'l' || *fmt == 'z' || *fmt == 'h' ||
+               *fmt == 'j' || *fmt == 't') {
+            fmt++;
+        }
         if (*fmt == 's') {
             const char *s = va_arg(ap, const char *);
             if (s == 0) {
@@ -218,10 +224,19 @@ static long vformat(char *buf, const char *fmt, va_list ap) {
         } else if (*fmt == 'x' || *fmt == 'X') {
             u64 v = (u64)va_arg(ap, unsigned long long);
             pf_hex(v, buf, &n);
+        } else if (*fmt == 'p') {
+            u64 v = (u64)va_arg(ap, unsigned long long);
+            const char *p = "0x";
+            while (*p) {
+                buf[n++] = *p++;
+            }
+            pf_hex(v, buf, &n);
         } else if (*fmt == 'c') {
             buf[n++] = (char)va_arg(ap, int);
         } else if (*fmt == '%') {
             buf[n++] = '%';
+        } else if (*fmt == 0) {
+            break;
         } else {
             buf[n++] = '%';
             buf[n++] = *fmt;

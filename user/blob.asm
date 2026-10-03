@@ -1,7 +1,7 @@
 ; ==============================================================================
 ; fakeos - embedded rootfs images (built from user/ at user virtual addresses)
 ;
-; Five static ELF user programs plus the /etc/motd text. rootfs_publish() in
+; Six static ELF user programs plus the /etc/motd text. rootfs_publish() in
 ; kernel/rootfs.c releases them into Ramfs at boot. All blobs live in the
 ; kernel .rodata and are mapped read-only into the higher-half image.
 ; ==============================================================================
@@ -24,6 +24,10 @@ BLOB user_sh,    "build/user/sh.elf"
 BLOB user_hello, "build/user/hello.elf"
 BLOB user_cat,   "build/user/cat.elf"
 BLOB user_ls,    "build/user/ls.elf"
+BLOB user_kbuild, "build/user/kbuild.elf"
+BLOB user_ldfake, "build/user/ldfake.elf"
+BLOB user_dumpbin, "build/user/dumpbin.elf"
 BLOB motd,       "user/motd.txt"
+BLOB environ,    "user/environ.txt"
 
 section .note.GNU-stack noalloc noexec nowrite progbits

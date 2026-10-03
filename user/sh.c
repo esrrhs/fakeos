@@ -127,20 +127,35 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        /* External command: search /bin/<name>. */
+        /* External command: a slash in the name means run that exact path
+         * (e.g. /tmp/ping, ./tool); otherwise try /bin/<name>. */
         {
-            char path[40];
+            char path[96];
             long child;
             long status = 0;
             long reaped;
+            const char *target;
+            int has_slash = 0;
+            int k;
 
-            strcpy(path, "/bin/");
-            strncpy(path + 5, tokens[0], 34);
-            path[39] = 0;
+            for (k = 0; tokens[0][k] != 0; k++) {
+                if (tokens[0][k] == '/') {
+                    has_slash = 1;
+                    break;
+                }
+            }
+            if (has_slash) {
+                target = tokens[0];
+            } else {
+                strcpy(path, "/bin/");
+                strncpy(path + 5, tokens[0], 90);
+                path[95] = 0;
+                target = path;
+            }
 
             child = u_fork();
             if (child == 0) {
-                if (u_execve(path, tokens, 0) < 0) {
+                if (u_execve(target, tokens, 0) < 0) {
                     printf("sh: %s: command not found\n", tokens[0]);
                     u_exit(127);
                 }

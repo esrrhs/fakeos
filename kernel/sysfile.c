@@ -342,6 +342,14 @@ u64 sys_mkdir(u64 upath) {
     return fs.fs_mkdir(path) != 0 ? 0 : (u64)(-1);
 }
 
+u64 sys_unlink(u64 upath) {
+    char path[PATH_KMAX];
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    return fs.fs_unlink(path) ? 0 : (u64)(-1);
+}
+
 u64 sys_chdir(u64 upath) {
     char path[PATH_KMAX];
     u32 ino;

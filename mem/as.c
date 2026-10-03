@@ -51,11 +51,12 @@ enum {
 };
 
 /* Fixed user-space layout: the ELF image loads near 0x400000, the brk heap
- * starts above the image, the demand stack lives just below 0x800000 and
- * anonymous mmap allocations grow upward in a separate window well above the
- * heap (none of the ranges overlap). */
+ * starts above the image, anonymous mmap allocations grow upward in a window
+ * above the heap, the 8 MiB demand stack lives at the 2 GiB ceiling, and
+ * MAP_FIXED callers (ASAN shadow) reserve their own ranges above; none of
+ * the fixed ranges overlap. */
 static const u64 HEAP_BASE = 0x02000000ULL;
-static const u64 HEAP_SIZE = 0x00100000ULL;        /* 1 MiB reserved */
+static const u64 HEAP_SIZE = 0x00400000ULL;        /* 4 MiB reserved: in-OS build tools */
 static const u64 MMAP_BASE = 0x10000000ULL;        /* 256 MiB */
 static const u64 MMAP_LIMIT = 0x40000000ULL;       /* 1 GiB ceiling */
 
@@ -708,7 +709,7 @@ int as_map_anon_h(u64 handle, u64 start, u64 size, u32 prot) {
     return as_map_anon(as_of(handle), start, size, prot);
 }
 
-/* brk(): lazily reserve the fixed 1 MiB heap VMA on first use and move the
+/* brk(): lazily reserve the fixed 4 MiB heap VMA on first use and move the
  * program break. A newbrk of 0 queries the current break. The break only
  * moves; touched pages demand-allocate through the ordinary #PF path. */
 u64 as_brk_h(u64 handle, u64 newbrk) {
@@ -754,6 +755,119 @@ u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot) {
     }
     as->mmap_next = hint + len;
     return hint;
+}
+
+/* MAP_FIXED anonymous reservation at a caller-chosen page-aligned address.
+ * Used by the fakecc runtime to reserve its 16 TiB ASAN shadow window at
+ * 0x100000000000: the range is huge but costs nothing until a shadow byte
+ * is touched, at which point ordinary demand paging backs the single page.
+ * Overlapping an existing VMA is rejected (Linux would unmap it; no in-tree
+ * caller needs that). */
+u64 as_mmap_fixed_h(u64 handle, u64 addr, u64 len, u32 prot) {
+    struct address_space *as = as_of(handle);
+    u64 end;
+    if (as == 0 || len == 0 || (addr & 0xFFF) != 0) {
+        return 0;
+    }
+    len = (len + 0xFFF) & ~0xFFFULL;
+    if (len == 0) {
+        return 0;
+    }
+    end = addr + len;
+    if (end <= addr || end > 0x0000800000000000ULL) {
+        return 0;                    /* wrap or non-canonical user address */
+    }
+    if (!as_map_anon(as, addr, len, prot)) {
+        return 0;
+    }
+    return addr;
+}
+
+/* Tear down present leaf PTEs over [va, va+len) and release frame ownership.
+ * Page-table frames themselves stay behind (empty tables are harmless and
+ * reused by later demand faults). Shared COW frames drop one reference and
+ * are returned to the buddy only when the last owner goes away. */
+static void unmap_present_pages(struct address_space *as, u64 va, u64 len) {
+    u64 off = 0;
+    while (off < len) {
+        u64 page_va = (va + off) & ~0xFFFULL;
+        volatile u64 *pt = resolve_pt(as->pml4, page_va, 0, PTE_U);
+        if (pt != 0) {
+            u64 e = pt[pt_i(page_va)];
+            if (e & PTE_P) {
+                u64 frame = entry_phys(e);
+                pt[pt_i(page_va)] = 0;
+                invlpg_page(page_va);
+                if (frame < (u64)MAX_FRAMES_AS * PAGE_SIZE
+                    && frame_refs[(u32)(frame / PAGE_SIZE)] > 0) {
+                    frame_refs[(u32)(frame / PAGE_SIZE)]--;
+                    if (frame_refs[(u32)(frame / PAGE_SIZE)] == 0) {
+                        pmm_free_page(frame);
+                    }
+                }
+            }
+        }
+        off += PAGE_SIZE;
+    }
+}
+
+/* munmap: remove a page-aligned range fully contained in one VMA, splitting
+ * the reservation when unmap hits its middle. Pages are unmapped up front. */
+int as_munmap_h(u64 handle, u64 uva, u64 len) {
+    struct address_space *as = as_of(handle);
+    u64 start;
+    u64 end;
+    u32 i;
+    u32 idx = (u32)-1;
+    struct vma *v;
+
+    if (as == 0 || len == 0 || (uva & 0xFFF) != 0 || (len & 0xFFF) != 0) {
+        return 0;
+    }
+    start = uva;
+    end = uva + len;
+    if (end <= start) {
+        return 0;                       /* wrap */
+    }
+    for (i = 0; i < as->nvma; i++) {
+        if (start >= as->vmas[i].start && end <= as->vmas[i].end) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == (u32)-1) {
+        return 0;                      /* not fully covered by one VMA */
+    }
+    v = &as->vmas[idx];
+    unmap_present_pages(as, start, end - start);
+
+    if (start == v->start && end == v->end) {
+        /* Whole VMA: drop the reservation, keeping the array compact. */
+        for (i = idx; i + 1 < as->nvma; i++) {
+            as->vmas[i] = as->vmas[i + 1];
+        }
+        as->nvma--;
+    } else if (start == v->start) {
+        v->start = end;
+    } else if (end == v->end) {
+        v->end = start;
+    } else {
+        /* Hole in the middle: keep [start, uva), append [end, oldend). */
+        struct vma tail;
+        u64 old_end = v->end;
+        u32 prot = v->prot;
+        if (as->nvma >= MAX_VMA) {
+            return 0;                  /* cannot represent the split */
+        }
+        v->end = start;
+        tail.start = end;
+        tail.end = old_end;
+        tail.prot = prot;
+        tail.kind = VMA_ANON;
+        as->vmas[as->nvma] = tail;
+        as->nvma++;
+    }
+    return 1;
 }
 
 /* Force-allocate the frame backing uva's page in a (not necessarily active)

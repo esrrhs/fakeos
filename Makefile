@@ -22,6 +22,15 @@ endif
 # Project directories
 BUILD_DIR := build
 ROOT_DIR  := $(shell pwd)
+# External fakecc source tree used to build the in-OS native compiler
+# (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
+# in a throwaway /tmp copy.
+FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
+
+# Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
+M5STAGE := $(BUILD_DIR)/m5stage
+M5ASM   := $(BUILD_DIR)/m5blob.asm
+M5OBJ   := $(BUILD_DIR)/m5blob.o
 
 # Flags
 NASMFLAGS := -f elf64
@@ -70,6 +79,7 @@ OBJS := \
 	$(BUILD_DIR)/tty.o \
 	$(BUILD_DIR)/uproc.o \
 	$(BUILD_DIR)/rootfs.o \
+	$(BUILD_DIR)/m5blob.o \
 	$(BUILD_DIR)/vfstest.o \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
@@ -122,7 +132,7 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
-USER_PROGS := init sh hello cat ls
+USER_PROGS := init sh hello cat ls kbuild ldfake dumpbin
 USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
@@ -159,6 +169,20 @@ $(foreach p,$(USER_PROGS),$(eval $(call USER_ELF_RULE,$(p))))
 
 $(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt
 	@mkdir -p $(BUILD_DIR)
+	@echo "  [NASM]    $<"
+	@$(NASM) $(NASMFLAGS) -o $@ $<
+
+# --- Milestone 5: in-OS compiler/source/reference/reference staging -------------------
+M5_REF_DEPS := $(filter-out $(BUILD_DIR)/userblob.o $(M5OBJ),$(OBJS))
+
+# m5blob incbins the staged tree AND the current userblob (the rebuilt
+# kernel must keep an equivalent userspace); userblob must be rebuilt first.
+$(M5ASM): $(M5_REF_DEPS) $(BUILD_DIR)/userblob.o user/progs/ping.c \
+	tools/m5_stage.sh tools/m5_build_fakecc.sh
+	@mkdir -p $(M5STAGE)
+	@FAKECC_SRC=$(FAKECC_SRC) bash tools/m5_stage.sh $(M5STAGE)
+
+$(M5OBJ): $(M5ASM)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 

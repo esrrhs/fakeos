@@ -30,6 +30,7 @@ extern u64 sys_read_fd(u64 fd, u64 buf, u64 len);
 extern u64 sys_write_fd(u64 fd, u64 buf, u64 len);
 extern u64 sys_lseek(u64 fd, u64 off, u64 whence);
 extern u64 sys_mkdir(u64 upath);
+extern u64 sys_unlink(u64 upath);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
@@ -37,6 +38,10 @@ extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
 extern u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
+extern u64 sys_munmap(u64 addr, u64 len);
+extern u64 sys_chmod(u64 path, u64 mode);
+extern u64 sys_gettid(void);
+extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
 
 /* proc.c */
 extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
@@ -74,17 +79,23 @@ enum {
     SC_CLOSE = 3,
     SC_LSEEK = 8,
     SC_MMAP  = 9,
+    SC_MUNMAP = 11,
     SC_BRK   = 12,
     SC_GETCWD = 79,
     SC_CHDIR = 80,
     SC_MKDIR = 83,
+    SC_FUTEX = 202,
+    SC_GETDENTS = 217,
     SC_YIELD = 24,
     SC_GETPID = 39,
-    SC_GETDENTS = 217,
+    SC_CHMOD = 90,
+    SC_GETTID = 186,
     SC_FORK  = 57,
     SC_EXECVE = 59,
     SC_EXIT  = 60,
-    SC_WAIT4 = 61
+    SC_WAIT4 = 61,
+    SC_UNLINK = 87,
+    SC_EXIT_GROUP = 231
 };
 
 enum {
@@ -155,8 +166,7 @@ void proc_terminate(u64 code) {
     }
 }
 
-u64 syscall_dispatch(struct syscall_frame *f) {
-    syscall_count++;
+static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_READ) {
         return sys_read_fd(f->rdi, f->rsi, f->rdx);
     }
@@ -174,6 +184,21 @@ u64 syscall_dispatch(struct syscall_frame *f) {
     }
     if (f->rax == SC_MMAP) {
         return sys_mmap(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_MUNMAP) {
+        return sys_munmap(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_CHMOD) {
+        return sys_chmod(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_GETTID) {
+        return sys_gettid();
+    }
+    if (f->rax == SC_FUTEX) {
+        return sys_futex(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_UNLINK) {
+        return sys_unlink(f->rdi);
     }
     if (f->rax == SC_BRK) {
         return sys_brk(f->rdi);
@@ -209,9 +234,17 @@ u64 syscall_dispatch(struct syscall_frame *f) {
     if (f->rax == SC_EXIT) {
         proc_terminate(f->rdi);
     }
+    if (f->rax == SC_EXIT_GROUP) {
+        proc_terminate(f->rdi);
+    }
     kprintf("[SYSCALL] pid %u: unknown syscall nr=%u, rejected\n",
             (u64)sched_current_pid(), f->rax);
     return (u64)(-1);
+}
+
+u64 syscall_dispatch(struct syscall_frame *f) {
+    syscall_count++;
+    return syscall_dispatch_inner(f);
 }
 
 u64 syscall_count_total(void) {
