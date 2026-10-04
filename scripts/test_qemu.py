@@ -55,7 +55,7 @@ class VM:
                 break
             if not data:
                 break
-            chunks.append(data.decode("utf-8", errors="replace"))
+            chunks.append(data.decode("utf-8", errors="surrogateescape"))
         return "".join(chunks)
 
     def wait_for(self, marker, timeout):
@@ -72,7 +72,7 @@ class VM:
                 break
             if not data:
                 break
-            out += data.decode("utf-8", errors="replace")
+            out += data.decode("utf-8", errors="surrogateescape")
         return out
 
     def close(self):
@@ -89,14 +89,23 @@ class VM:
 
 def decode_dumpbin(captured):
     """Pull length-framed base64 chunks emitted by /bin/dumpbin out of a
-    serial capture; return the concatenated file bytes (or None)."""
+    serial capture; return the concatenated file bytes (or None).
+
+    `captured` may be bytes or str. Decoding the serial stream as UTF-8 is
+    lossy and wrong here: the base64 payload is arbitrary binary that can
+    straddle a multi-byte sequence, and errors="replace" would silently
+    collapse several lost bytes into one U+FFFD, shifting the payload and
+    breaking base64 alignment. Work in bytes end to end.
+    """
+    raw = captured if isinstance(captured, bytes) else captured.encode(
+        "utf-8", "surrogateescape")
     frames = re.findall(
-        r"===DUMP/BEGIN name=fakeos-new len=(\d+)===\s*(.*?)===DUMP/END===",
-        captured, re.S,
+        rb"===DUMP/BEGIN name=fakeos-new len=(\d+)===\s*(.*?)===DUMP/END===",
+        raw, re.S,
     )
     if not frames:
         return None, 0, 0
-    blob = b"".join(base64.b64decode("".join(p.split())) for _, p in frames)
+    blob = b"".join(base64.b64decode(b"".join(p.split())) for _, p in frames)
     declared = sum(int(n) for n, _ in frames)
     return blob, len(frames), declared
 
