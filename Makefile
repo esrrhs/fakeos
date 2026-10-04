@@ -38,9 +38,11 @@ NASMFLAGS := -f elf64
 # mis-handles some long-lived pointer locals across va_arg extraction (the
 # format pointer in kprintf was observed coalesced onto a scratch register).
 # Revisit -O1 once the allocator interference bug is fixed upstream.
-# --target=x86_64-linux: this fakecc build ships no arm64-macos backend, and
-# the host default on Apple Silicon would otherwise be selected and rejected.
-FCCFLAGS  := -O0 --target=x86_64-linux
+# --target=x86_64-linux exists only on multi-target fakecc builds; upstream
+# master emits x86-64 ELF unconditionally and rejects the flag, so probe the
+# installed compiler's usage text instead of passing it unconditionally.
+FCC_HAS_TARGET := $(shell $(FCC) 2>&1 | grep -q -- '--target' && echo yes)
+FCCFLAGS  := -O0 $(if $(filter yes,$(FCC_HAS_TARGET)),--target=x86_64-linux)
 LDFLAGS   := -T boot/linker.ld -n --gc-sections
 QEMUFLAGS := -m 128M -serial stdio
 

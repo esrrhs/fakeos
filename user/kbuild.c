@@ -32,7 +32,38 @@ extern void memset(void *dst, int c, unsigned long n);
 extern void strcpy(char *dst, const char *src);
 extern unsigned long strlen(const char *s);
 
-enum { O_RDONLY = 0, READ_CAP = 65536 };
+enum { O_RDONLY = 0, READ_CAP = 65536,
+       CC_MAX_FLAGS = 2, CC_FLAG_LEN = 40 };
+
+static unsigned long read_file(const char *path, char *buf);
+
+/* Extra flags the staged in-OS fakecc understands. The build publishes
+ * /etc/fakecc.flags (one space-separated line): multi-target builds list
+ * "--target=x86_64-linux", single-backend builds ship an empty file. */
+static char cc_flags[CC_MAX_FLAGS][CC_FLAG_LEN];
+static unsigned long n_cc_flags;
+
+static void load_cc_flags(void) {
+    char buf[128];
+    unsigned long len = read_file("/etc/fakecc.flags", buf);
+    unsigned long i = 0;
+    n_cc_flags = 0;
+    while (i < len && n_cc_flags < CC_MAX_FLAGS) {
+        unsigned long n = 0;
+        while (i < len && (buf[i] == ' ' || buf[i] == '\t' ||
+                           buf[i] == '\n' || buf[i] == '\r')) {
+            i++;
+        }
+        while (i < len && buf[i] != ' ' && buf[i] != '\t' &&
+               buf[i] != '\n' && buf[i] != '\r' && n < CC_FLAG_LEN - 1) {
+            cc_flags[n_cc_flags][n++] = buf[i++];
+        }
+        if (n) {
+            cc_flags[n_cc_flags][n] = 0;
+            n_cc_flags++;
+        }
+    }
+}
 
 struct mod_entry {
     const char *pkg;
@@ -134,10 +165,24 @@ static void build_path(char *dst, const char *dir, const char *name,
 int main(void) {
     long st;
     u_chdir("/src");
+    load_cc_flags();
 
     puts("[kbuild] stage a: compiler/exec chain on ping.c");
 
-    char *ping_cc[] = { "/bin/fakecc", "ping.c", "-o", "/tmp/ping", 0 };
+    /* argv: fakecc [extra flags...] ping.c -o /tmp/ping (max 8 slots) */
+    char *ping_cc[4 + CC_MAX_FLAGS];
+    {
+        unsigned long k = 0;
+        unsigned long j;
+        ping_cc[k++] = "/bin/fakecc";
+        for (j = 0; j < n_cc_flags; j++) {
+            ping_cc[k++] = cc_flags[j];
+        }
+        ping_cc[k++] = "ping.c";
+        ping_cc[k++] = "-o";
+        ping_cc[k++] = "/tmp/ping";
+        ping_cc[k] = 0;
+    }
     st = run_child("/bin/fakecc", ping_cc);
     if (st != 0) {
         printf("[kbuild] FAIL ping compile exit=%d\n", st);
@@ -191,8 +236,22 @@ int main(void) {
             refp[k] = 0;
         }
 
-        char *cc[] = { "/bin/fakecc", "-c", "-O0", "--target=x86_64-linux",
-                        src, "-o", tmpo, 0 };
+        /* argv: fakecc [extra flags...] -c -O0 src -o tmpo (max 8) */
+        char *cc[7 + CC_MAX_FLAGS];
+        {
+            unsigned long k = 0;
+            unsigned long j;
+            cc[k++] = "/bin/fakecc";
+            for (j = 0; j < n_cc_flags; j++) {
+                cc[k++] = cc_flags[j];
+            }
+            cc[k++] = "-c";
+            cc[k++] = "-O0";
+            cc[k++] = src;
+            cc[k++] = "-o";
+            cc[k++] = tmpo;
+            cc[k] = 0;
+        }
         st = run_child("/bin/fakecc", cc);
         if (st != 0) {
             printf("[kbuild] FAIL %s/%s compile exit=%d\n",

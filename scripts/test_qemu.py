@@ -189,6 +189,17 @@ def main():
         dumped = vm.wait_for("dumpbin: sent ", 120.0)
         if "dumpbin: sent " not in dumped:
             dumped += vm.read_available(5.0)
+        else:
+            # The completion line is printed after the last frame, but the
+            # serial pipe may still hold buffered bytes when wait_for's poll
+            # happens to observe the marker mid-drain. Truncating there loses
+            # base64 characters mid-frame and surfaces as a padding error,
+            # so keep reading until the stream goes quiet.
+            for _ in range(20):
+                extra = vm.read_available(0.5)
+                if not extra:
+                    break
+                dumped += extra
 
     # 4. Release pid 1 (code 7) -> monitor SUCCESS banner.
     vm.send("exit 7")

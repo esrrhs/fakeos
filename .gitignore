@@ -3,3 +3,4 @@ build/
 *.elf
 *.bin
 .DS_Store
+.workbuddy/

@@ -38,6 +38,25 @@ if [ ! -f "$STAGE/bin/fakecc" ]; then
     FAKECC_SRC="$FAKECC_SRC" bash "$SCRIPT_DIR/m5_build_fakecc.sh" "$STAGE/bin/fakecc"
 fi
 
+# Publish the extra CFLAGS this embedded fakecc understands. Multi-target
+# builds accept --target; upstream master's single-backend compiler emits
+# x86-64 ELF unconditionally and rejects the flag. /bin/kbuild reads this
+# file at runtime, so the same kbuild binary works with either compiler.
+#
+# The probe must NOT execute the artifact: it is a linux x86-64 binary and the
+# staging host is usually macOS, so running it fails with "exec format error"
+# and the flag would be silently dropped -- which then makes the in-OS
+# recompiles disagree with the host reference objects. Read the embedded usage
+# string instead; it is present in the binary regardless of the build host.
+mkdir -p "$STAGE/etc"
+if grep -qa -- '--target' "$STAGE/bin/fakecc"; then
+    echo '--target=x86_64-linux' > "$STAGE/etc/fakecc.flags"
+    REF_TARGET_FLAG='--target=x86_64-linux'
+else
+    : > "$STAGE/etc/fakecc.flags"
+    REF_TARGET_FLAG=''
+fi
+
 rm -rf "$STAGE/src" "$STAGE/ref" "$STAGE/asm"
 mkdir -p "$STAGE/src/runtime" "$STAGE/ref" "$STAGE/asm"
 
@@ -71,7 +90,7 @@ for src in $(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
     if [ -x "$M5_S0" ]; then
         ( cd "$ROOT" && \
-          FAKECC_PKG="$ROOT" "$M5_S0" -O0 --target=x86_64-linux \
+          FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
               -c "$src" -o "$STAGE/ref/$out_rel" ) \
             || { echo "stage0 failed to compile $rel" >&2; exit 1; }
     else
