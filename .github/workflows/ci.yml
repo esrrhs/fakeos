@@ -35,11 +35,19 @@ jobs:
           fakecc || true
 
       - name: Build fakeos kernel
+        env:
+          # Milestone 5 builds a native fakecc from source and stages it into
+          # the kernel image, so the staging step needs the fakecc *source
+          # tree*, not just the installed binary. Keep this in sync with the
+          # clone path above.
+          FAKECC_SRC: /tmp/fakecc
         run: |
           make clean
           make build
 
       - name: Run automated QEMU regression tests
+        env:
+          FAKECC_SRC: /tmp/fakecc
         run: |
           make test
 
