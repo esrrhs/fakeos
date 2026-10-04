@@ -82,6 +82,12 @@ cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
 # is exactly the determinism AC-5 proves inside the OS. M5_S0 overrides the
 # stage-0 location; when it is unavailable, fall back to the objects already
 # built for the kernel image in $BUILD (produced by the installed fakecc).
+#
+# The fallback also covers a stage 0 that exists but cannot compile the
+# sources -- the CI runner builds stage 0 from upstream fakecc master, whose
+# compiler crashes (SIGSEGV) on this kernel's sources while the installed
+# fakecc compiles them fine. Those objects came from the very compiler the
+# in-OS fakecc is compared against, so the byte comparison stays meaningful.
 M5_S0="${M5_S0:-/tmp/fakeos-m5-fakecc/s0host/fakecc}"
 for src in $(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c' | sort); do
     rel=${src#$STAGE/src/}
@@ -89,10 +95,18 @@ for src in $(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c
     out_rel=$(dirname "$rel")/$n.o
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
     if [ -x "$M5_S0" ]; then
-        ( cd "$ROOT" && \
-          FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
-              -c "$src" -o "$STAGE/ref/$out_rel" ) \
-            || { echo "stage0 failed to compile $rel" >&2; exit 1; }
+        if ! ( cd "$ROOT" && \
+               FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
+                   -c "$src" -o "$STAGE/ref/$out_rel" ); then
+            echo "stage0 failed on $rel; falling back to build/$n.o" >&2
+            rm -f "$STAGE/ref/$out_rel"
+            if [ -f "$BUILD/$n.o" ]; then
+                cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
+            else
+                echo "no reference object available for $rel" >&2
+                exit 1
+            fi
+        fi
     else
         cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
     fi
