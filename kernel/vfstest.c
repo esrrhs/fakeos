@@ -26,8 +26,14 @@ enum {
     T_FILE_MAX = 4194304
 };
 
-static const char static_msg[] = { 'r', 'a', 'm', 'f', 's', '-', 's', 't',
-                                   'a', 't', 'i', 'c', '!', '!' };
+/* Spelled as a string literal rather than a char initialiser list: this is
+ * the only kernel source that used `static const char x[] = { 'a', ... }`,
+ * and fakecc emits different code for that form (the in-OS compiler and the
+ * host compiler disagreed by 5 bytes on this file alone). A const pointer to
+ * a literal keeps the read-only intent -- the test writes through a char*
+ * on purpose, to prove a static file rejects writes -- without depending on
+ * that initialiser form. */
+static const char *static_msg = "ramfs-static!!";
 
 static u32 vfs_fails;
 
