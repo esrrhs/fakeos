@@ -95,6 +95,7 @@ cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
 # passes and the loop then dies halfway, having produced a mixed tree.
 M5_S0="${M5_S0:-/tmp/fakeos-m5-fakecc/s0host/fakecc}"
 M5_SRCS=$(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c' | sort)
+M5_S0_OK=0
 if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
     M5_PROBE=$(mktemp -d)
     stage0_ok=1
@@ -114,9 +115,13 @@ if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
         # Every trial object is valid: reuse them instead of recompiling.
         mkdir -p "$STAGE/ref"
         cp -R "$M5_PROBE/." "$STAGE/ref/"
+        M5_S0_OK=1
     else
+        # Drop the partial probe results by pointing the loop at build/*.o.
+        # The scratch dir is removed below; $STAGE/ref is left alone because
+        # the loop rewrites every entry in it from $BUILD anyway.
         M5_S0=""
-        rm -rf "$STAGE/ref"
+        M5_S0_OK=0
     fi
     rm -rf "$M5_PROBE"
 fi
