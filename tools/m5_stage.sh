@@ -83,30 +83,34 @@ cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
 # stage-0 location; when it is unavailable, fall back to the objects already
 # built for the kernel image in $BUILD (produced by the installed fakecc).
 #
-# The fallback also covers a stage 0 that exists but cannot compile the
-# sources -- the CI runner builds stage 0 from upstream fakecc master, whose
-# compiler crashes (SIGSEGV) on this kernel's sources while the installed
-# fakecc compiles them fine. Those objects came from the very compiler the
-# in-OS fakecc is compared against, so the byte comparison stays meaningful.
+# Reference objects must come from ONE compiler, never a per-file mix: the
+# milestone's whole claim is that the in-OS fakecc reproduces them byte for
+# byte, and two different producers guarantee a spurious mismatch. On the CI
+# runner stage 0 is built from upstream fakecc master, which cannot compile
+# every source (it crashes partway through), while the installed fakecc
+# compiles all of them. So probe stage 0 once up front and pick a single
+# source for the whole tree; if a file does slip through the probe but fails
+# later, that is fatal rather than silently half-and-half.
 M5_S0="${M5_S0:-/tmp/fakeos-m5-fakecc/s0host/fakecc}"
+if [ -x "$M5_S0" ]; then
+    # Probe on the smallest source; a stage 0 that cannot handle it will not
+    # handle the rest either.
+    if ! ( cd "$ROOT" && FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
+               -c "$STAGE/src/types/types.c" -o /dev/null ) >/dev/null 2>&1; then
+        echo "stage0 cannot compile this tree; using build/*.o as reference" >&2
+        M5_S0=""
+    fi
+fi
 for src in $(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c' | sort); do
     rel=${src#$STAGE/src/}
     n=$(basename "$rel" .c)
     out_rel=$(dirname "$rel")/$n.o
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
-    if [ -x "$M5_S0" ]; then
-        if ! ( cd "$ROOT" && \
-               FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
-                   -c "$src" -o "$STAGE/ref/$out_rel" ); then
-            echo "stage0 failed on $rel; falling back to build/$n.o" >&2
-            rm -f "$STAGE/ref/$out_rel"
-            if [ -f "$BUILD/$n.o" ]; then
-                cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
-            else
-                echo "no reference object available for $rel" >&2
-                exit 1
-            fi
-        fi
+    if [ -n "$M5_S0" ]; then
+        ( cd "$ROOT" && \
+          FAKECC_PKG="$ROOT" "$M5_S0" -O0 $REF_TARGET_FLAG \
+              -c "$src" -o "$STAGE/ref/$out_rel" ) \
+            || { echo "stage0 failed to compile $rel" >&2; exit 1; }
     else
         cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
     fi

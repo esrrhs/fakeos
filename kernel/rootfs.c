@@ -41,7 +41,14 @@ extern u64 m5_blob_count;
 
 static void publish_one(const char *path, u64 start, u64 end) {
     u64 size = end - start;
-    if (start == 0 || size == 0 || !fs.fs_publish_file(path, start, size)) {
+    /* A zero-length blob is legitimate, not a failure: /etc/fakecc.flags is
+     * empty when the staged compiler takes no extra flags (a single-backend
+     * fakecc that emits x86-64 ELF unconditionally). Only a missing or
+     * unaligned blob is a real error. */
+    if (size == 0) {
+        return;
+    }
+    if (start == 0 || !fs.fs_publish_file(path, start, size)) {
         kprintf("[FS] FAILED to publish %s\n", path);
         return;
     }
