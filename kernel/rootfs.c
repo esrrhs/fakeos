@@ -83,6 +83,13 @@ void rootfs_publish(void) {
 
     for (i = 0; i < m5_blob_count; i++) {
         u64 msize = (u64)m5_blob_table[i].end - (u64)m5_blob_table[i].start;
+        /* Same rule as publish_one(): a zero-length staged file is legitimate
+         * (an empty /etc/fakecc.flags) and must not be reported as a failure.
+         * fs_publish_file rejects size 0, so skip those entries here instead
+         * of letting the batch loop report a phantom [FS] FAILED. */
+        if (msize == 0) {
+            continue;
+        }
         if (fs.fs_publish_file(m5_blob_table[i].path,
                               (u64)m5_blob_table[i].start, msize)) {
             ok++;
