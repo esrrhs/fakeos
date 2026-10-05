@@ -1,16 +1,21 @@
 # fakecc bug 报告：自举编译非确定性（bootstrap non-determinism）
 
-**状态**：待修复
+**状态**：**已定位并修复** ✅
 **发现时间**：2026-10-04
+**修复时间**：2026-10-05
+**修复 PR**：[esrrhs/fakecc#92](https://github.com/esrrhs/fakecc/pull/92)（commit `b2cac2ca`）
 **报告来源**：[fakeos](https://github.com/esrrhs/fakeos) 项目 M5（fakecc 自举闭环）阶段
 **影响范围**：破坏「用 fakecc 编译 fakecc 自身源码」的字节确定性。
-**差异已定位到指令级**（第 2 节：寄存器分配结果不同），**最终成因待确认**（见 2.3 / 2.4）。
+**根因**：`src/sema.c` 的 **use-after-free**（第 2.4 节）——读已释放的堆内存，
+使寄存器分配结果依赖于残留字节。
 
-> ✅ **本文档已在 Linux x86-64 上完成复现与指令级定位**（复现环境：`cf.esrrhs.xyz`
-> 的 `/home/project/fakecc`，gcc 16.2.0 / cmake 3.21.0）。复现出的字节数与
-> fakeos CI 完全一致（ref=17735 / got=17730）。
-> 第 2 节给出事实与定位过程，第 4 节是可直接执行的复现命令，
-> 第 5 节列出已排除的假设。**第 2.3 / 2.4 节是排查方向，尚未逐条验证。**
+> ✅ **本文档已在 Linux x86-64 上完成复现、指令级定位与根因确认**
+> （复现环境：`cf.esrrhs.xyz` 的 `/home/project/fakecc`，gcc 16.2.0 / cmake 3.21.0）。
+> 复现出的字节数与 fakeos CI 完全一致（ref=17735 / got=17730）。
+>
+> **2026-10-05 更新**：第 2.4 节「未初始化内存」这一候选方向经 valgrind 验证
+> **确认为真正根因**，具体是 `ftab_lookup()` 返回表内指针后跨 `realloc` 悬垂。
+> 修复后 stage0/stage1 产物字节一致，valgrind 报错清零。详见 2.4 与 9 节。
 
 ---
 
@@ -137,18 +142,66 @@ ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
 2. 逐一确认：这些函数是否会让**寄存器分配 / 栈布局**产生依赖宿主环境的差异。
 3. 优先检查 `regalloc.c` 中除 `host_has_avx512f()` 之外的宿主相关分支。
 
-### 2.4 另一条候选方向：未初始化内存
+### 2.4 根因确认：读已释放的堆内存（use-after-free）
 
-若排查完宿主探测仍未定位，考虑寄存器分配器中存在**未初始化变量**读取 ——
-这与 fakecc 已知的历史问题一脉相承（其 `-O1` SSA 提升层曾多次出现
-「长生命周期指针局部变量被合并到 scratch 寄存器」的缺陷，
-这也是 fakecc Makefile 长期使用 `-O0` 的原因）。
+> **本节已于 2026-10-05 由 valgrind 确认，并由 PR #92 修复。**
 
-建议用 `-fsanitize=memory,undefined` 或 valgrind 跑一遍 clang 构建的 fakecc，
-重点看 `src/regalloc.c`、`src/scalar_opt.c`、`src/mem2reg.c`。
+最初这只是「宿主探测」之外的第二条候选方向。用 valgrind 跑复现命令后直接命中：
 
-> 说明：本节两条方向**尚未逐条验证**，只是基于源码阅读与 fakecc 历史缺陷
-> 提出的假设。已验证的是 2.1~2.2 的事实部分（差异范围、指令级原因）。
+```
+Invalid read of size 8 at src/sema.c:1854
+```
+
+### 缺陷链路
+
+1. `ftab_lookup()` 返回 `&g_sema_ft.data[i]` —— **指向 `FunSig` 数组内部的指针**，
+   而该数组由 `realloc` 管理：
+
+   ```c
+   static const FunSig *ftab_lookup(const char *name) {
+       return ftab_find(&g_sema_ft, name);   /* → &t->data[i] */
+   }
+   ```
+
+2. `check_expr_inner()` 处理函数调用时，把该指针留在局部变量 `sig` 里，
+   **然后递归检查实参表达式**：
+
+   ```c
+   const FunSig *sig = have_local ? NULL : ftab_lookup(e->u.call.callee->u.var.name);
+   /* ... 下面会递归调用 check_expr_inner() 检查实参 ... */
+   ```
+
+3. 递归路径可能走到 `ftab_add_export()` → `ftab_push_export()` → `realloc`，
+   表被搬到新地址 → **`sig` 悬垂**。
+
+4. 之后每次读 `sig->arity` / `sig->param_types` / `sig->ret_type` 都是
+   **读已释放内存**。读到什么是随机的，于是寄存器分配结果随堆残留变化。
+
+### 为什么正好是 5 字节
+
+`kernel/vfstest.c` 里 `vfs_selftest` 调 `vfs_open`，未原型化调用需要把隐式的
+`%rdi` 清零。stage 0 读到残留内存得到 `xor %esi,%esi`，stage 1 得到
+`xor %edi,%edi`，两条指令长度不同 → 差值恒为 5 字节，并向后传播到整个 `.o`。
+
+### 与宿主探测的关系
+
+2.3 节提到的 `ast.c:777 host_has_avx512f()` 是**同一类 bug**：
+宿主相关输入（CPUID）泄漏进产物。当时的修复只覆盖了 `-mavx512f` 路径，
+而本 bug 是**未初始化堆内存**泄漏进产物，属于该 bug 类的另一个实例。
+
+**教训**：任何「stage0 与 stage1 对同一输入给出不同产物」的现象，
+都应先怀疑**读取了非确定性数据**（宿主状态或未初始化内存），
+而不是去比较指令编码差异。
+
+### 修复
+
+把 `FunSig` **按值拷贝**到调用点的局部变量，而不是持有指向表内的指针
+（新增 `ftab_snapshot()`）。`param_types` 数组仍共享不深拷贝——
+那些 `Type` 对象活到 `ftab_free()`，且快照只读。
+
+> 修复过程中的一个弯路值得记录：**只把 `sig->arity` 等字段拷到局部变量是无效的**，
+> 因为指针在拷贝发生之前就已经悬垂了 —— 等于「读错内存后再保存快照」。
+> valgrind 仍报 4 处错误。必须拷贝**整个结构体**。
 
 ---
 
@@ -264,22 +317,63 @@ make test                              # 约 1 分钟（QEMU 无头）
 - ✅ **差异属于哪个函数**：`vfs_selftest`（唯一大小不同的函数，6568 vs 6563）。
 - ✅ **是否为符号/字面量差异**：`.strtab` 内容完全相同 → 否。
 - ✅ **是否为编译器对源码理解不同**：DWARF 行号表完全相同 → **否**，语句序列一致。
-- ✅ **差异的具体指令**：文件偏移 `0x1d38` 处，stage 1 缺少 `0x48` REX.W 前缀
-  （`lea` 指令操作数宽度从 64 位退化为 32 位）。
+- ❌ **~~差异的具体指令：stage 1 缺少 `0x48` REX.W 前缀~~** —— **该结论已证伪，特此更正。**
+  最初由文件偏移 `0x1d38` 反推得出，但这是**把文件偏移误当成了虚拟地址**：
+  `.text` 段文件自偏移 `0x40` 起而虚址为 0，两者差 `0x40`。
+  用 `objdump -d` 按指令流对齐后比对，两个 `lea` 序列**逐字节相同**，无 REX.W 差异。
+  真正差异见 2.2 节（`xor %esi,%esi` vs `xor %edi,%edi`）。
+
+  > **方法论教训**：定位汇编差异必须用 `objdump -d` 对齐比对**指令流**，
+  > 不能靠 `cmp -l` 的文件偏移换算虚址。
 
 ---
 
+## 9. 修复记录（2026-10-05）
+
+- **根因**：`src/sema.c` 的 use-after-free（见 2.4 节）
+- **上游 PR**：[esrrhs/fakecc#92](https://github.com/esrrhs/fakecc/pull/92)，
+  分支 `fix/bootstrap-regalloc-determinism`，commit `b2cac2ca`（+16 / −1，仅改 `src/sema.c`）
+- **改动**：新增 `ftab_snapshot()` 做 `FunSig` 按值拷贝，替代跨 `realloc` 悬垂的表内指针
+
+### 验证结果
+
+| 检查项 | 修复前 | 修复后 |
+|---|---|---|
+| `kernel/vfstest.c` stage0 vs stage1 | 17735 vs 17730 | `cmp` 逐字节一致 |
+| valgrind | `sema.c:1854` 4 处 invalid read | rc=0，0 错误 |
+| `v0/stage2_check.sh` | 无不动点 | `FIXED POINT REACHED` |
+| `ctest`（22 单元 + 36 e2e） | — | 58/58 全过 |
+| GitHub CI `bootstrap (fixed point)` | 红 | **绿** |
+| GitHub CI `gcc ASan` | — | 绿（use-after-free 已消除） |
+
+### fakeos 侧后续待办
+
+fakecc 修复后，**第 8 节的两处临时放行应当回退**为严格断言：
+
+- `user/kbuild.c`：字节不一致时恢复为立即失败（去掉 `DIFF` 继续执行的分支）；
+- `scripts/test_qemu.py`：恢复为 26 个模块必须全部 identical、0 个 DIFF。
+
+当前 CI 仍是「25 identical + 1 DIFF」即算通过，所以**这个断言尚未验证过 26/26 的情形**。
+回退后需再跑一次 CI 确认。
+
 ## 6. 影响与优先级
 
-- **优先级：中**。
-- **对编译正确性：无影响。** 两个产物语义等价，stage 1 的代码只是少两条冗余搬运
-  指令（`mov %rsi,%rdi` + `mov %edi,%edi`），功能正确且略优。
+> 本节写于根因确认（2026-10-04），其中「对编译正确性无影响」的判断**已被
+> 2026-10-05 的 valgrind 结果推翻**：根因是 use-after-free，
+> 严格说属于未定义行为，不能保证语义等价。见 2.4 / 9 节。
+
+- **优先级：中**（修复前）。
+- ~~**对编译正确性：无影响。** 两个产物语义等价，stage 1 的代码只是少两条冗余搬运
+  指令（`mov %rsi,%rdi` + `mov %edi,%edi`），功能正确且略优。~~
+  → **修正**：产物差异源于读已释放内存（UB）。在**本例**中恰好表现为两条等价的清零指令，
+  但既然是 UB，就不能推广说「所有受影响产物都语义等价」。
 - **实际影响的是「可复现构建」**：任何依赖 fakecc 跨构建字节一致的流程都会受影响，
   例如 fakeos M5 的验收标准（要求 26 个内核模块全部字节一致）。
 - **不能据 25/26 断言「其他输入也都没问题」**：那 25 个文件的一致性只说明 fakeos 用的
   这批源码在两个 fakecc 下 codegen 相同；差异既然能被某个输入触发，
   就可能存在其他触发输入（含更严重的）。建议在 fakecc 自身的 `test/` 用例集上
   跑一轮 stage0 vs stage1 的批量字节对比，确认触发面。
+  （补充：修复 valgrind 报错后，fakecc 的 58 个测试全部通过，**未发现其他触发面**。）
 - **修复后**：fakeos 侧无需改动，26 个模块会自动全部一致。
 
 ---
