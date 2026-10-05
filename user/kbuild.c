@@ -267,13 +267,13 @@ int main(void) {
                     (long)pkg, (long)nm, got_n, ref_n);
             return 1;
         }
-        /* A byte mismatch is recorded and the sweep continues rather than
-         * aborting: the modules are independent, so one compiler codegen
-         * difference does not invalidate the other 25 results, nor the link
-         * and second-boot phases that follow. Whether a mismatch is fatal is
-         * decided by the caller, which knows the toolchain in use. Missing
-         * objects and compile failures stay fatal -- those mean the
-         * bootstrap itself is broken, not merely non-deterministic. */
+        /* A byte mismatch means the in-OS compiler and the host reference
+         * disagree, i.e. the self-bootstrap is not reproducible.  Every
+         * module is still swept so the log names all offenders, but a
+         * mismatch is fatal: it invalidates the reference objects the link
+         * and second-boot phases are about to consume. Missing objects and
+         * compile failures stay fatal too -- both mean the bootstrap itself
+         * is broken rather than merely non-deterministic. */
         if (got_n != ref_n) {
             printf("[kbuild] DIFF %s/%s size: got %u ref %u\n",
                     (long)pkg, (long)nm, got_n, ref_n);
@@ -303,6 +303,8 @@ int main(void) {
     if (diff) {
         printf("[kbuild] MISMATCH %u of %u objects differ from /ref\n",
                 diff, nmod);
+        printf("[kbuild] FAIL byte-identical rebuild is not reproducible\n");
+        return 1;
     }
     printf("[kbuild] all %u kernel objects byte-identical\n", ok);
 

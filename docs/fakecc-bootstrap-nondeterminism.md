@@ -328,34 +328,6 @@ make test                              # 约 1 分钟（QEMU 无头）
 
 ---
 
-## 9. 修复记录（2026-10-05）
-
-- **根因**：`src/sema.c` 的 use-after-free（见 2.4 节）
-- **上游 PR**：[esrrhs/fakecc#92](https://github.com/esrrhs/fakecc/pull/92)，
-  分支 `fix/bootstrap-regalloc-determinism`，commit `b2cac2ca`（+16 / −1，仅改 `src/sema.c`）
-- **改动**：新增 `ftab_snapshot()` 做 `FunSig` 按值拷贝，替代跨 `realloc` 悬垂的表内指针
-
-### 验证结果
-
-| 检查项 | 修复前 | 修复后 |
-|---|---|---|
-| `kernel/vfstest.c` stage0 vs stage1 | 17735 vs 17730 | `cmp` 逐字节一致 |
-| valgrind | `sema.c:1854` 4 处 invalid read | rc=0，0 错误 |
-| `v0/stage2_check.sh` | 无不动点 | `FIXED POINT REACHED` |
-| `ctest`（22 单元 + 36 e2e） | — | 58/58 全过 |
-| GitHub CI `bootstrap (fixed point)` | 红 | **绿** |
-| GitHub CI `gcc ASan` | — | 绿（use-after-free 已消除） |
-
-### fakeos 侧后续待办
-
-fakecc 修复后，**第 8 节的两处临时放行应当回退**为严格断言：
-
-- `user/kbuild.c`：字节不一致时恢复为立即失败（去掉 `DIFF` 继续执行的分支）；
-- `scripts/test_qemu.py`：恢复为 26 个模块必须全部 identical、0 个 DIFF。
-
-当前 CI 仍是「25 identical + 1 DIFF」即算通过，所以**这个断言尚未验证过 26/26 的情形**。
-回退后需再跑一次 CI 确认。
-
 ## 6. 影响与优先级
 
 > 本节写于根因确认（2026-10-04），其中「对编译正确性无影响」的判断**已被
@@ -395,3 +367,37 @@ fakecc 修复后，**第 8 节的两处临时放行应当回退**为严格断言
 - `scripts/test_qemu.py`：断言改为「26 个模块中 ≥25 个 identical、≤1 个 DIFF」，并要求每个模块都被明确归类（既不放过、也不静默忽略）。
 
 这是一处**如实暴露上游缺陷**的临时放行，不是掩盖 —— DIFF 会在日志中明确打印。若你修复了 fakecc，请告知，我们会把断言恢复为严格的 26/26。
+
+---
+
+## 9. 修复记录（2026-10-05）
+
+- **根因**：`src/sema.c` 的 use-after-free（见 2.4 节）
+- **上游 PR**：[esrrhs/fakecc#92](https://github.com/esrrhs/fakecc/pull/92)，
+  分支 `fix/bootstrap-regalloc-determinism`，commit `b2cac2ca`（+16 / −1，仅改 `src/sema.c`）
+- **改动**：新增 `ftab_snapshot()` 做 `FunSig` 按值拷贝，替代跨 `realloc` 悬垂的表内指针
+
+### 验证结果
+
+| 检查项 | 修复前 | 修复后 |
+|---|---|---|
+| `kernel/vfstest.c` stage0 vs stage1 | 17735 vs 17730 | `cmp` 逐字节一致 |
+| valgrind | `sema.c:1854` 4 处 invalid read | rc=0，0 错误 |
+| `v0/stage2_check.sh` | 无不动点 | `FIXED POINT REACHED` |
+| `ctest`（22 单元 + 36 e2e） | — | 58/58 全过 |
+| GitHub CI `bootstrap (fixed point)` | 红 | **绿** |
+| GitHub CI `gcc ASan` | — | 绿（use-after-free 已消除） |
+
+> 注：fakecc 自身的 CI 有一例与本 bug 无关的红灯（`ubuntu-latest · gcc coverage`），
+> 失败在下载 `cli.codecov.io` 的 TLS 握手，Build/Test/Coverage 三步均 success。
+
+### fakeos 侧：临时放行已回退
+
+上游修复后，第 8 节的两处临时放行**已恢复为严格断言**：
+
+- `user/kbuild.c`：`diff` 非零时打印 `[kbuild] MISMATCH` 与 `FAIL` 并 `return 1`，
+  在链接与二次引导之前中止；`DIFF` 逐模块诊断打印保留。
+- `scripts/test_qemu.py`：断言 26 个模块**全部 identical、0 个 DIFF**，
+  并把 `all 2[56] kernel objects byte-identical` 收紧为 `all 26`。
+
+> 由于此前 CI 从未在 26/26 情形下运行过，严格断言需经一次 CI 验证。

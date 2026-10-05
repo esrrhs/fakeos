@@ -309,10 +309,8 @@ def main():
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
-        # host reference object byte-for-byte; the count is asserted from the
-        # run because upstream fakecc master is not byte-stable across its own
-        # two build paths for one module (see the "accounted for" check below)
-        re.compile(r"\[kbuild\] all 2[56] kernel objects byte-identical"),
+        # host reference object byte-for-byte
+        re.compile(r"\[kbuild\] all 26 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -352,27 +350,26 @@ def main():
     ]
     # kbuild/ldfake also publish the new user programs
     #
-    # The byte-comparison is required to cover every module except where the
-    # compiler itself is not reproducible. With the toolchain this project is
-    # developed against all 26 match. Upstream fakecc master, which CI
-    # installs, is not byte-stable across its own two build paths (CMake host
-    # build vs the self-hosted compiler running inside fakeos) for exactly one
-    # module -- kbuild reports it as "[kbuild] DIFF" and still finishes, so
-    # the link and second-boot phases are still exercised. Allow that single
-    # upstream mismatch here instead of hiding it: a DIFF line is printed, and
-    # the "no kbuild FAIL line" check below still catches a broken bootstrap.
+    # Every module must be byte-identical. Upstream fakecc had a use-after-free
+    # in its semantic analyser (ftab_lookup() handing out a pointer into a
+    # realloc'd table) that made register allocation read uninitialised heap
+    # bytes, so its two build paths -- CMake host build vs the self-hosted
+    # compiler running inside fakeos -- disagreed on kernel/vfstest.c by 5
+    # bytes. That is fixed upstream (esrrhs/fakecc#92); a DIFF here now means
+    # the self-bootstrap really is not reproducible, which kbuild treats as
+    # fatal, so the assertion is strict again rather than tolerating a slack
+    # module. See docs/fakecc-bootstrap-nondeterminism.md.
     mismatches = len(re.findall(r"\[kbuild\] DIFF ", stdout))
     identical = norm.count("[kbuild] identical ")
     extra = [
         ("ls /bin lists kbuild", "\nkbuild\n" in norm),
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
-        # every module accounted for: identical, or reported as an upstream
-        # compiler mismatch (never silently dropped)
+        # every module accounted for, and all of them identical
         ("all 26 modules accounted for",
-         identical + mismatches == 26 and identical >= 25),
-        (f"upstream codegen mismatches <= 1 (saw {mismatches})",
-         mismatches <= 1),
+         identical + mismatches == 26),
+        (f"all 26 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 26 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),
