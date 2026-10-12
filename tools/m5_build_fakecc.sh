@@ -51,6 +51,42 @@ cd "$SCRATCH"
 HAS_MACHO=0
 [ -f "$FAKECC_SRC/src/macho.c" ] && HAS_MACHO=1
 
+# WIP arm64-macos trees use DARWIN open(2) constants in the target-neutral
+# builtin runtime/stdio.c (O_CREAT 0x200/O_TRUNC 0x400/O_APPEND 0x08).  The
+# stage1 produced here is a linux x86-64 binary that runs ON fakeos, so its
+# fopen("wb") would pass 0x641 and fail to create the output file (fakeos'
+# ramfs uses the Linux values O_CREAT 0x40/O_TRUNC 0x200).  Rewrite them to
+# Linux values in the scratch copy.  Upstream master already ships the Linux
+# values, so this is a verified no-op there (the replacements simply do not
+# match).  The macOS stage0 is unaffected either way: clang links it against
+# the host libc, not this runtime file.
+#
+# The comment above parse_fopen_mode() asserts the Darwin values hold "on both
+# Linux and Darwin", which is exactly the claim being worked around here.  It
+# is rewritten along with the constants so the file does not end up claiming
+# one set of values while computing another.
+if [ -f runtime/stdio.c ] && grep -q '512 /\* O_CREAT \*/ | 1024 /\* O_TRUNC \*/' runtime/stdio.c; then
+    python3 - <<'PYEOF'
+p = "runtime/stdio.c"
+s = open(p).read()
+s2 = s.replace("| 512 /* O_CREAT */ | 1024 /* O_TRUNC */",
+                "| 64 /* O_CREAT */ | 512 /* O_TRUNC */")
+s2 = s2.replace("| 512 /* O_CREAT */ | 8 /* O_APPEND */",
+                "| 64 /* O_CREAT */ | 1024 /* O_APPEND */")
+assert s2 != s, "Darwin fopen constants found but not rewritten"
+s3 = s2.replace(
+    "/* O_CREAT is 0x200 and O_TRUNC is 0x400 on both Linux and Darwin; the\n"
+    "     * 0x40 used here belongs to O_NOCTTY, so \"w\" created nothing and \"a\"\n"
+    "     * asked for neither create nor append.  O_APPEND is 0x08. */",
+    "/* fopen flags rewritten to the Linux values by tools/m5_build_fakecc.sh:\n"
+    "     * O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400.  This compiler emits a\n"
+    "     * linux x86-64 stage1 that runs on fakeos, whose ramfs uses the Linux\n"
+    "     * numbers, so the Darwin values that were here did not create files. */")
+assert s3 != s2, "Darwin fopen comment found but not rewritten"
+open(p, "w").write(s3)
+PYEOF
+fi
+
 # --- 2. host-side shim headers for the one-time gcc -E translation -----------
 # WIP-only: macho.c's #include <sys/wait.h>/<unistd.h> have no dialect
 # equivalents; provide minimal declarations so cpp translation succeeds.

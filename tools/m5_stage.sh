@@ -62,6 +62,30 @@ mkdir -p "$STAGE/src/runtime" "$STAGE/ref" "$STAGE/asm"
 
 # fakecc builtin runtime sources (compiled by fakecc inside the OS).
 cp "$FAKECC_SRC"/runtime/*.c "$STAGE/src/runtime/"
+# Same Darwin->Linux open(2) flag fix as m5_build_fakecc.sh step 1b, including
+# the stale comment: the in-OS fakecc links this runtime when building ping, so
+# /src/runtime must carry the Linux constants too.  No-op on upstream master.
+if grep -q '512 /\* O_CREAT \*/ | 1024 /\* O_TRUNC \*/' "$STAGE/src/runtime/stdio.c"; then
+    python3 - "$STAGE/src/runtime/stdio.c" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s2 = s.replace("| 512 /* O_CREAT */ | 1024 /* O_TRUNC */",
+                "| 64 /* O_CREAT */ | 512 /* O_TRUNC */")
+s2 = s2.replace("| 512 /* O_CREAT */ | 8 /* O_APPEND */",
+                "| 64 /* O_CREAT */ | 1024 /* O_APPEND */")
+assert s2 != s, "Darwin fopen constants found but not rewritten"
+s3 = s2.replace(
+    "/* O_CREAT is 0x200 and O_TRUNC is 0x400 on both Linux and Darwin; the\n"
+    "     * 0x40 used here belongs to O_NOCTTY, so \"w\" created nothing and \"a\"\n"
+    "     * asked for neither create nor append.  O_APPEND is 0x08. */",
+    "/* fopen flags rewritten to the Linux values by tools/m5_stage.sh:\n"
+    "     * O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400.  The in-OS compiler\n"
+    "     * targets linux x86-64 and fakeos' ramfs uses the Linux numbers. */")
+assert s3 != s2, "Darwin fopen comment found but not rewritten"
+open(p, "w").write(s3)
+PYEOF
+fi
 
 # Kernel C sources, preserving package directories.
 for pkg in types arch drivers kernel mem fs; do
@@ -99,8 +123,8 @@ M5_S0_OK=0
 if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
     M5_PROBE=$(mktemp -d)
     stage0_ok=1
-    for src in $M5_SRCS; do
-        rel=${src#$STAGE/src/}
+    while IFS= read -r src; do
+        rel=${src#"$STAGE/src/"}
         out_rel=$(dirname "$rel")/$(basename "$rel" .c).o
         mkdir -p "$M5_PROBE/$(dirname "$out_rel")"
         if ! ( cd "$ROOT" && FAKECC_PKG="$ROOT" \
@@ -110,7 +134,9 @@ if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
             stage0_ok=0
             break
         fi
-    done
+    done <<EOF
+$M5_SRCS
+EOF
     if [ "$stage0_ok" = 1 ]; then
         # Every trial object is valid: reuse them instead of recompiling.
         mkdir -p "$STAGE/ref"
@@ -125,15 +151,17 @@ if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
     fi
     rm -rf "$M5_PROBE"
 fi
-for src in $M5_SRCS; do
-    rel=${src#$STAGE/src/}
+while IFS= read -r src; do
+    rel=${src#"$STAGE/src/"}
     n=$(basename "$rel" .c)
     out_rel=$(dirname "$rel")/$n.o
     # When stage 0 handled the tree the trial objects are already in place.
     [ -n "$M5_S0" ] && [ -f "$STAGE/ref/$out_rel" ] && continue
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
     cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
-done
+done <<EOF
+$M5_SRCS
+EOF
 
 # Prebuilt nasm objects (no in-OS assembler in this milestone).
 for a in boot desc io sysentry switch; do
