@@ -1,4 +1,5 @@
 build/
+.m5fakecc/
 *.o
 *.elf
 *.bin

@@ -41,7 +41,7 @@ NASMFLAGS := -f elf64
 # --target=x86_64-linux exists only on multi-target fakecc builds; upstream
 # master emits x86-64 ELF unconditionally and rejects the flag, so probe the
 # installed compiler's usage text instead of passing it unconditionally.
-FCC_HAS_TARGET := $(shell $(FCC) 2>&1 | grep -q -- '--target' && echo yes)
+FCC_HAS_TARGET := $(shell '$(FCC)' 2>&1 | grep -q -- '--target' && echo yes)
 FCCFLAGS  := -O0 $(if $(filter yes,$(FCC_HAS_TARGET)),--target=x86_64-linux)
 LDFLAGS   := -T boot/linker.ld -n --gc-sections
 QEMUFLAGS := -m 128M -serial stdio
@@ -152,12 +152,12 @@ $(BUILD_DIR)/user/usys.o: user/usys.asm
 $(BUILD_DIR)/user/libc.o: user/libc.c
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/user/%.o: user/%.c
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 # Each program ELF: crt0 + syscall wrappers + libc + program main.
 define USER_ELF_RULE
@@ -192,132 +192,132 @@ $(M5OBJ): $(M5ASM)
 $(BUILD_DIR)/types.o: types/types.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/arch.o: arch/arch.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/gdt.o: arch/gdt.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/idt.o: arch/idt.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lapic.o: arch/lapic.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/uart.o: drivers/uart.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/vga.o: drivers/vga.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/kprintf.o: kernel/kprintf.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/isr.o: kernel/isr.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pmm.o: mem/pmm.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/vmm.o: mem/vmm.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/slab.o: mem/slab.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/as.o: mem/as.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/ramfs.o: fs/ramfs.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/sched.o: kernel/sched.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/proctest.o: kernel/proctest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/syscall.o: kernel/syscall.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/sysfile.o: kernel/sysfile.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/tty.o: kernel/tty.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/sysproc.o: kernel/sysproc.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/proc.o: kernel/proc.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/uproc.o: kernel/uproc.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/rootfs.o: kernel/rootfs.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/vfstest.o: kernel/vfstest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/memtest.o: kernel/memtest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/kmain.o: kernel/kmain.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
-	@FAKECC_PKG=$(ROOT_DIR) $(FCC) $(FCCFLAGS) -c $< -o $@
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 # Run automated test
 test: build
