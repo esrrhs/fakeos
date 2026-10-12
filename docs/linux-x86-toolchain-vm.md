@@ -25,7 +25,7 @@ Linux x86-64 宿主  --master编出-->  fakecc (x86-64)
 | 后端 | **QEMU**（Apple Virtualization 只支持 aarch64 客户机） |
 | 架构 | x86_64（Apple Silicon 上纯模拟，无加速） |
 | CPU / 内存 | 4 核 / 8 GB，EPYC 模型 |
-| 磁盘 | Ubuntu 24.04 LTS 云镜像（SHA256 已校验） |
+| 磁盘 | 由 UTM 向导创建；ISO 与云镜像均已下载并校验（见下） |
 | 客户机用户 | `fakeos`，免密sudo，仅允许 SSH 密钥登录 |
 | 共享目录 | 宿主**整个** `/Users/mingming/project` → 客户机 `/mnt/host-proj` |
 
@@ -34,24 +34,66 @@ Linux x86-64 宿主  --master编出-->  fakecc (x86-64)
 > `fakefish`、`yellowdns`、`domain-socks` 等项目都能直接在客户机里访问。
 > 9p 是按需读取、不会预拷贝全部内容，所以目录大不影响启动速度。
 
-## 首次启动
+## ⚠️ 创建虚拟机：必须用 UTM 界面向导
 
-1. 打开 UTM，选 **`fakeos-linux-x86`**，点击启动。
-2. cloud-init 会自动完成：建 `fakeos` 用户、装齐依赖、挂载共享目录。
-   **首次启动在纯模拟下约3-8 分钟**，控制台会滚动 cloud-init 日志。
-3. 看到登录提示后，另开终端连进去：
+**不要手工写 `config.plist` 造 `.utm` 包。** 实测 UTM 对非自身创建的包一律报：
 
-```bash
-ssh fakeos@localhost -p <UTM 分配的端口>
+```
+error com.utmapp.UTM : Failed to create object for file:///.../<name>.utm/
 ```
 
-登录后自检：
+然后窗口根本不创建、`utmctl list` 也看不到它。已排除 plist 键值问题——补齐
+`Virtualization` 等键组、二分移除各配置组、手搓最小配置，
+乃至**以能正常加载的 macOS.utm 配置为模板只改后端与架构**，全部仍然失败。
+所以这不是配置写法问题，而是包的身份/授权问题（疑似 UTM 沙盒访问授权或
+TCC 记录缺失），命令行绕不过去。
+
+### 路径 A：用安装 ISO（推荐）
+
+在 UTM 里 `+` → **Virtualize** → **Linux**，向导会创建合法的包：
+
+| 向导项 | 填什么 |
+|---|---|
+| 名称 | `fakeos-linux-x86` |
+| 架构 | **Other → x86_64**（不能选 aarch64） |
+| 内存 / CPU | 8 GB / 4 核 |
+| 镜像 | 挂 `~/utm-images/ubuntu-24.04.5-live-server-amd64.iso` |
+
+装完再配共享目录（见下节）与依赖：
+
+```bash
+sudo apt install -y build-essential nasm cmake git python3 qemu-system-x86 binutils
+```
+
+ISO 版的代价：要在安装向导里手工设用户名密码，且没有 cloud-init 无人值守。
+
+### 路径 B：用云镜像（挂到已有虚拟机）
+
+如果 UTM 里已有（或向导里选了"使用现有磁盘镜像"），挂
+`~/utm-images/noble-server-cloudimg-amd64.img`，并把 CIDATA 种子盘
+`~/utm-images/cloudinit/seed.iso` 挂成光驱。此时 cloud-init 会自动建用户、
+装依赖、配 9p 挂载，**无需手工配置**。
+
+两个镜像都已校验：
+
+| 文件 | 大小 | SHA256（前 16 位） |
+|---|---|---|
+| `ubuntu-24.04.5-live-server-amd64.iso` | 4.08 GB | `97f3d7ffb032c3eb…` |
+| `noble-server-cloudimg-amd64.img` | 597 MB | `6a81c37564db9b1e…` |
+
+## 启动后
+
+连进客户机（SSH，或直接在控制台登录）：
 
 ```bash
 ls /mnt/host-proj            # 应看到 fakecc、fakeos 及其余共享项目
 uname -m                     # x86_64
-nasm -v && cmake --version   # 依赖已由 cloud-init 装好
+nasm -v && cmake --version
 ```
+
+> 走 ISO 路径时 9p 共享要手动配：在 UTM 设置里把宿主
+> `/Users/mingming/project` 加入共享目录，然后在客户机执行
+> `sudo mkdir -p /mnt/host-proj && mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/host-proj`
 
 ## 通用开发环境，不只服务 fakeos
 
