@@ -219,6 +219,7 @@ def main():
         "echo PIPEOK | cat",    # pipe() + shell | via wait queues
         "ping -c 1 10.0.2.2",  # sys_ping + VirtIO-net ICMP
         "ping -c 1 gateway",   # /etc/hosts resolve_host
+        "ping -c 1 localhost", # 127.0.0.1 loopback ICMP
         "echo \"QUOTE OK\"", # shell quote tokenizer
         "udptest",            # UDP socket loopback
         "falsecmd || echo OR_OK",  # shell || short-circuit

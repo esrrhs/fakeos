@@ -122,7 +122,7 @@ flowchart TD
 - [x] **堆与匿名映射**：`brk` 在 ELF 段之上的固定 1 MiB 预留堆区移动 program break（按需分页）；`mmap` 在独立 mmap 窗口（256 MiB 起向上）分配匿名 MAP_PRIVATE 段。
 - [x] **目录与工作目录系统调用**：`mkdir/chdir/getcwd/getdents64`，每进程 cwd 字符串驱动相对路径解析。
 - [x] **串口 TTY 标准输入**：COM1 接收实现 canonical 行规程（256B 行缓冲、字符回显、`\r`/`\n` 兼容、退格编辑、缓冲满强制收行），无输入时 yield 让出；`read(0)` 阻塞至行结束，残余字节留待下次读取。QEMU 串口管道可直接注入命令，Shell 端到端回归无头自动化。
-- [ ] **PS/2 键盘硬件驱动与按键中断**：本阶段标准输入先落串口 TTY（可自动化测试），IRQ1 扫描码/Shift/Caps 键盘映射后续接入。
+- [x] **PS/2 键盘硬件驱动与按键中断**：IRQ1 set-1 扫描码经 I/O APIC→vector 33，与串口共享 TTY 行规程（见下方 daily-driver 条目）。
 - [x] **自研用户态 libc 与 crt0**：单一 `package user` 提供全部 syscall 汇编包装（注意第 4 参 RCX→R10 搬移）、mem/string 例程、mini_printf（%s/%d/%u/%x/%c）、brk bump + first-fit 的 malloc/free；crt0 从初始栈取 argc/argv 调 `main`，返回值即退出码。
 - [x] **交互式 /bin/sh 与用户程序**：提示符 `fakeos:~$`、空格分词、内建 `echo`（含 `$?`）/`cd`/`mkdir`/`pwd`/`help`/`exit [code]`；外部命令自动加 `/bin` 前缀，fork+execve+wait4 同步执行并传递退出状态；附带 `/bin/hello`（退出码 42）、`/bin/cat`、`/bin/ls`。启动序列为内核装载 pid 1 = /bin/init（完成阶段三/四全部用户态自测）后 `execve` 到 /bin/sh，`exit` 后内核打印里程碑 SUCCESS。
 
@@ -165,7 +165,7 @@ flowchart TD
 - [x] **简易行编辑器 `/bin/ed`**：`a/c/d/p/n/w/e/q` 子集，可写 Ext2 持久文件。
 - [x] **Ext2 default-root UX**：Ramfs 保留 `/` 列表与 `/bin` `/etc` `/tmp` `/proc` `/src` `/ref` `/asm` `/dev`；其余绝对路径（含 `/home`）落入 Ext2 卷（`/mnt` 仍为卷根别名）。
 - [x] **Signals + Ctrl-C**：`kill`/`SIGINT`/`SIGKILL`/`SIGTERM`/`SIGCHLD`；TTY Ctrl-C 向 foreground（`tty_setfg`）投递 SIGINT；默认动作终止；shell 在 wait 前设置 fg。
-- [x] **DNS stub**：`/etc/resolv.conf` + `/etc/hosts`；libc `resolve_host`（字面量 / hosts / UDP DNS A）；`ping`/`nc` 接受主机名。静态地址（无完整 DHCP）。
+- [x] **DNS stub**：`/etc/resolv.conf` + `/etc/hosts`；libc `resolve_host`（字面量 / hosts / UDP DNS A）；`ping`/`nc` 接受主机名。静态地址（无完整 DHCP）。`127.0.0.1`/本机 loopback ping/UDP/TCP。
 - [x] **login/getty stub**：`/etc/passwd` + `/bin/login`（root / 空或 root 密码）后 exec `/bin/sh`。
 - [x] **TCP retransmit timer**：100Hz 节拍上对未确认 SYN/数据段重传；shell `PATH`（`/bin:.:...`）与引号分词；`kill` builtin。
 

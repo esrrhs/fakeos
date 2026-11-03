@@ -65,6 +65,7 @@ enum {
     UDP_MAX_PAYLOAD = 1400,
     TCP_HDR       = 20,
     TCP_MAX_PAYLOAD = 1360,
+    LOOPBACK_IP   = 0x7F000001u, /* 127.0.0.1 */
     TCP_RX_CAP    = 2048,
     TCP_BACKLOG   = 4,
     SOCKADDR_IN_LEN = 16,
@@ -137,6 +138,7 @@ struct sock {
     u32 rexmit_seq;
     u8  rexmit_flags;
     u16 rexmit_len;
+    u8  rexmit_buf[TCP_MAX_PAYLOAD];
 };
 
 static u8  local_mac[6];
@@ -153,14 +155,21 @@ static u32 ping_waiting;
 static u32 ping_got_reply;
 static u32 ping_target;
 static struct sock socks[MAX_SOCKS];
-static u8 tcp_rexmit_payload[TCP_MAX_PAYLOAD];
 static u16 next_eph = EPHEMERAL_BASE;
+
+/* True if dst is our QEMU lease or IPv4 loopback. */
+static u32 is_local_dst(u32 ip) {
+    return ip == local_ip || ip == LOOPBACK_IP;
+}
 
 static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len);
 static u32 resolve_mac(u32 ip, u8 *mac_out);
 static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
                       u32 seq, u32 ack, u8 flags,
                       const u8 *payload, u16 plen);
+static u32 tcp_tx_seg_ex(u16 sport, u32 dst_ip, u16 dport,
+                         u32 seq, u32 ack, u8 flags,
+                         const u8 *payload, u16 plen, u32 allow_arp);
 
 
 static u16 checksum(const u8 *data, u32 len) {
@@ -596,7 +605,7 @@ static void tcp_arm_rexmit(struct sock *sk, u32 seq, u8 flags,
     sk->rexmit_flags = flags;
     sk->rexmit_len = plen;
     for (i = 0; i < plen && i < TCP_MAX_PAYLOAD; i++) {
-        tcp_rexmit_payload[i] = payload[i];
+        sk->rexmit_buf[i] = payload[i];
     }
     /* ~500ms at 100Hz */
     sk->rexmit_due = (u32)sched_tick_count() + 50;
@@ -630,9 +639,10 @@ void net_tcp_timer(void) {
             sk->tcp_state == TCPS_ESTABLISHED ||
             sk->tcp_state == TCPS_FIN_WAIT ||
             sk->tcp_state == TCPS_LAST_ACK) {
-            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
-                       sk->rexmit_seq, sk->rcv_nxt, sk->rexmit_flags,
-                       tcp_rexmit_payload, sk->rexmit_len);
+            /* No ARP wait from timer ISR. */
+            tcp_tx_seg_ex(sk->local_port, sk->peer_ip, sk->peer_port,
+                          sk->rexmit_seq, sk->rcv_nxt, sk->rexmit_flags,
+                          sk->rexmit_buf, sk->rexmit_len, 0);
             sk->rexmit_due = now + 50;
         } else {
             tcp_clear_rexmit(sk);
@@ -684,6 +694,14 @@ static u32 resolve_mac(u32 ip, u8 *mac_out) {
     return 0;
 }
 
+/* ISR-safe: cache hit only (no ARP wait / net_poll). */
+static u32 resolve_mac_cached(u32 ip, u8 *mac_out) {
+    if ((ip & netmask) != (local_ip & netmask)) {
+        ip = gateway_ip;
+    }
+    return arp_lookup(ip, mac_out);
+}
+
 static u32 udp_deliver_local(u16 sport, u32 dst_ip, u16 dport,
                              const u8 *payload, u16 plen) {
     u32 i;
@@ -717,8 +735,8 @@ static u32 udp_tx(u16 sport, u32 dst_ip, u16 dport,
     if (UDP_HDR + plen > FRAME_MAX - ETH_HDR - IP_HDR) {
         return 0;
     }
-    /* Loopback to our own address: never leave the host. */
-    if (dst_ip == local_ip) {
+    /* Loopback to our address / 127.0.0.1: never leave the host. */
+    if (is_local_dst(dst_ip)) {
         return udp_deliver_local(sport, dst_ip, dport, payload, plen);
     }
     if (!resolve_mac(dst_ip, dst_mac)) {
@@ -1020,9 +1038,9 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
     }
 }
 
-static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
-                      u32 seq, u32 ack, u8 flags,
-                      const u8 *payload, u16 plen) {
+static u32 tcp_tx_seg_ex(u16 sport, u32 dst_ip, u16 dport,
+                         u32 seq, u32 ack, u8 flags,
+                         const u8 *payload, u16 plen, u32 allow_arp) {
     u8 seg[FRAME_MAX];
     u8 dst_mac[6];
     u32 i;
@@ -1048,18 +1066,29 @@ static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
     }
 
     /* Loopback: deliver without leaving the host. */
-    if (dst_ip == local_ip) {
-        csum = tcp_checksum(local_ip, dst_ip, seg, seglen);
+    if (is_local_dst(dst_ip)) {
+        u32 src = (dst_ip == LOOPBACK_IP) ? LOOPBACK_IP : local_ip;
+        csum = tcp_checksum(src, dst_ip, seg, seglen);
         put16(seg + 16, csum);
-        tcp_input(local_ip, dst_ip, seg, seglen);
+        tcp_input(src, dst_ip, seg, seglen);
         return 1;
     }
-    if (!resolve_mac(dst_ip, dst_mac)) {
+    if (allow_arp) {
+        if (!resolve_mac(dst_ip, dst_mac)) {
+            return 0;
+        }
+    } else if (!resolve_mac_cached(dst_ip, dst_mac)) {
         return 0;
     }
     csum = tcp_checksum(local_ip, dst_ip, seg, seglen);
     put16(seg + 16, csum);
     return ip_send(dst_ip, IP_PROTO_TCP, seg, seglen, dst_mac);
+}
+
+static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
+                      u32 seq, u32 ack, u8 flags,
+                      const u8 *payload, u16 plen) {
+    return tcp_tx_seg_ex(sport, dst_ip, dport, seq, ack, flags, payload, plen, 1);
 }
 
 static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
@@ -1077,6 +1106,20 @@ u32 net_icmp_ping(u32 dst_ip, u32 timeout_iters) {
 
     if (!net_up) {
         return 0;
+    }
+    /* Ping self / 127.0.0.1 without leaving the host. */
+    if (is_local_dst(dst_ip)) {
+        ping_id = (u16)(ping_id + 1);
+        if (ping_id == 0) {
+            ping_id = 1;
+        }
+        ping_seq = (u16)(ping_seq + 1);
+        ping_target = dst_ip;
+        ping_got_reply = 1;
+        ping_waiting = 0;
+        (void)timeout_iters;
+        (void)dst_mac;
+        return 1;
     }
     if (!resolve_mac(dst_ip, dst_mac)) {
         kprintf("[NET] ARP failed for %u.%u.%u.%u\n",
@@ -1240,7 +1283,7 @@ u64 sys_bind(u64 fd, u64 uaddr, u64 ulen) {
     if (!parse_sockaddr_in(uaddr, ulen, &ip, &port)) {
         return (u64)(-1);
     }
-    if (ip != 0 && ip != local_ip) {
+    if (ip != 0 && ip != local_ip && ip != LOOPBACK_IP) {
         return (u64)(-1);
     }
     if (port == 0) {
