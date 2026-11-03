@@ -13,6 +13,12 @@ extern u64 virtio_blk_capacity(void);
 extern u32 virtio_blk_read(u64 sector, void *kbuf, u32 count);
 extern u32 virtio_blk_write(u64 sector, const void *kbuf, u32 count);
 extern u32 virtio_blk_flush(void);
+extern void ahci_init(void);
+extern u32 ahci_present_p(void);
+extern u64 ahci_capacity(void);
+extern u32 ahci_read(u64 sector, void *kbuf, u32 count);
+extern u32 ahci_write(u64 sector, const void *kbuf, u32 count);
+extern u32 ahci_flush(void);
 extern void ata_init(void);
 extern u32 ata_present_p(void);
 extern u64 ata_capacity(void);
@@ -20,66 +26,64 @@ extern u32 ata_read(u64 sector, void *kbuf, u32 count);
 extern u32 ata_write(u64 sector, const void *kbuf, u32 count);
 extern u32 ata_flush(void);
 extern u32 pci_find_class(u8 base_class, u8 subclass, u8 *obus, u8 *oslot, u8 *ofunc);
-extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
-extern u32 pci_bar(u8 bus, u8 slot, u8 func, u8 index, u32 *addr, u32 *is_io);
-extern void pci_log_virtio_modern_caps(u8 bus, u8 slot, u8 func);
 extern u32 pci_find_vendor_subsystem(u16 vendor, u16 subsystem,
                                      u8 *obus, u8 *oslot, u8 *ofunc);
-extern u64 pmm_phys_to_virt(u64 paddr);
+extern void pci_log_virtio_modern_caps(u8 bus, u8 slot, u8 func);
 
 enum {
     BLK_NONE = 0,
     BLK_VIRTIO = 1,
-    BLK_ATA = 2
+    BLK_AHCI = 2,
+    BLK_ATA = 3
 };
 
 static u32 blk_kind;
 
 void blk_init(void) {
     blk_kind = BLK_NONE;
-    /* Probe-only: log AHCI ABAR + modern virtio caps (no DMA driver yet). */
+    /* Log modern virtio caps when transitional device is present. */
     {
         u8 bus = 0;
         u8 slot = 0;
         u8 func = 0;
-        if (pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
-            u32 bar0 = 0;
-            u32 abar = 0;
-            u32 io0 = 0;
-            u32 io5 = 0;
-            pci_bar(bus, slot, func, 0, &bar0, &io0);
-            pci_bar(bus, slot, func, 5, &abar, &io5);
-            kprintf("[BLK] AHCI PCI 01.06 at %u:%u.%u BAR0=0x%x ABAR=0x%x - not driven yet (see docs/blk-modern-path.md)\n",
-                    (u64)bus, (u64)slot, (u64)func, (u64)bar0, (u64)abar);
-            if (abar != 0 && io5 == 0 && abar < 0x40000000u) {
-                volatile u32 *ghc = (volatile u32 *)pmm_phys_to_virt((u64)abar);
-                u32 cap = ghc[0];
-                u32 vs = ghc[4]; /* CAP=0x00, VS=0x10 -> index 4 */
-                kprintf("[BLK] AHCI CAP=0x%x VS=0x%x (probe only)\n", (u64)cap, (u64)vs);
-            }
-        } else {
-            kprintf("[BLK] no AHCI (PCI 01.06); using legacy virtio-blk/ATA\n");
-        }
-        bus = 0;
-        slot = 0;
-        func = 0;
         if (pci_find_vendor_subsystem(0x1AF4, 0x0002, &bus, &slot, &func)) {
             pci_log_virtio_modern_caps(bus, slot, func);
         }
     }
-    /* Prefer VirtIO when the legacy queue path is healthy; otherwise ATA. */
+    {
+        u8 bus = 0;
+        u8 slot = 0;
+        u8 func = 0;
+        if (!pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
+            kprintf("[BLK] no AHCI (PCI 01.06); using legacy virtio-blk/ATA\n");
+        }
+    }
+    /* Prefer VirtIO when the legacy queue path is healthy; else AHCI; else ATA. */
     virtio_blk_init();
     if (virtio_blk_present()) {
-        /* Probe one sector. If the queue path is broken, fall through to ATA. */
         u8 probe[512];
         u32 i;
         for (i = 0; i < 512; i++) probe[i] = 0;
         if (virtio_blk_read(0, probe, 1)) {
             blk_kind = BLK_VIRTIO;
             kprintf("[BLK] using VirtIO-blk backend\n");
+            /* Still probe AHCI so qemu-ahci / dual-disk boots log readiness. */
+            ahci_init();
             return;
         }
-        kprintf("[BLK] VirtIO-blk present but I/O failed; trying ATA\n");
+        kprintf("[BLK] VirtIO-blk present but I/O failed; trying AHCI/ATA\n");
+    }
+    ahci_init();
+    if (ahci_present_p()) {
+        u8 probe[512];
+        u32 i;
+        for (i = 0; i < 512; i++) probe[i] = 0;
+        if (ahci_read(0, probe, 1)) {
+            blk_kind = BLK_AHCI;
+            kprintf("[BLK] using AHCI backend\n");
+            return;
+        }
+        kprintf("[AHCI] present but sector-0 read failed; trying ATA\n");
     }
     ata_init();
     if (ata_present_p()) {
@@ -96,24 +100,28 @@ u32 blk_present(void) {
 
 u64 blk_capacity(void) {
     if (blk_kind == BLK_VIRTIO) return virtio_blk_capacity();
+    if (blk_kind == BLK_AHCI) return ahci_capacity();
     if (blk_kind == BLK_ATA) return ata_capacity();
     return 0;
 }
 
 u32 blk_read(u64 sector, void *kbuf, u32 count) {
     if (blk_kind == BLK_VIRTIO) return virtio_blk_read(sector, kbuf, count);
+    if (blk_kind == BLK_AHCI) return ahci_read(sector, kbuf, count);
     if (blk_kind == BLK_ATA) return ata_read(sector, kbuf, count);
     return 0;
 }
 
 u32 blk_write(u64 sector, const void *kbuf, u32 count) {
     if (blk_kind == BLK_VIRTIO) return virtio_blk_write(sector, kbuf, count);
+    if (blk_kind == BLK_AHCI) return ahci_write(sector, kbuf, count);
     if (blk_kind == BLK_ATA) return ata_write(sector, kbuf, count);
     return 0;
 }
 
 u32 blk_flush(void) {
     if (blk_kind == BLK_VIRTIO) return virtio_blk_flush();
+    if (blk_kind == BLK_AHCI) return ahci_flush();
     if (blk_kind == BLK_ATA) return ata_flush();
     return 0;
 }

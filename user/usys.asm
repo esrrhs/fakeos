@@ -50,6 +50,8 @@ global u_tcgetpgrp
 global u_setsockopt
 global u_getsockopt
 global u_select
+global u_poll
+global u_ioctl
 global u_rt_sigaction
 global u_rt_sigreturn
 
@@ -234,6 +236,20 @@ align 16
 u_select:
     mov     r10, rcx
     mov     eax, 23
+    syscall
+    ret
+
+; long u_poll(struct pollfd *fds, unsigned long nfds, long timeout_ms)
+align 16
+u_poll:
+    mov     eax, 7
+    syscall
+    ret
+
+; long u_ioctl(long fd, unsigned long req, unsigned long arg)
+align 16
+u_ioctl:
+    mov     eax, 16
     syscall
     ret
 

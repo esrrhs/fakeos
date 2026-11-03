@@ -27,6 +27,8 @@ extern long u_getpgid(long pid);
 extern long u_tty_setfg(long pgid);
 extern long u_tcsetpgrp(long fd, long pgid);
 extern long u_tcgetpgrp(long fd);
+extern long u_setsid(void);
+extern long u_ioctl(long fd, unsigned long req, unsigned long arg);
 extern void *signal(int sig, void *handler);
 
 extern unsigned long strlen(const char *s);
@@ -69,6 +71,21 @@ struct job {
 };
 
 static struct job jobs[MAX_JOBS];
+static long shell_pgid;
+
+static void shell_claim_tty(void) {
+    /* Prefer ioctl TIOCSPGRP when available; fall back to tcsetpgrp. */
+    long pg = shell_pgid;
+    if (pg == 0) {
+        pg = u_getpid();
+    }
+    {
+        int pgid32 = (int)pg;
+        if (u_ioctl(0, 0x5410UL, (unsigned long)&pgid32) != 0) {
+            u_tcsetpgrp(0, pg);
+        }
+    }
+}
 static int job_seq;
 static char hist[HIST_MAX][256];
 static int hist_len;
@@ -413,7 +430,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
-        puts("signals: Ctrl-C/Z/TTIN/TTOU; tcsetpgrp; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
+        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -452,7 +469,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         u_tcsetpgrp(0, jobs[ji].pgid != 0 ? jobs[ji].pgid : pid);
         reaped = u_wait4(pid, &status, WUNTRACED | WCONTINUED, 0);
-        u_tcsetpgrp(0, 0);
+        shell_claim_tty();
         if (reaped == pid && status_stopped(status)) {
             jobs[ji].stopped = 1;
             jobs[ji].active = 1;
@@ -667,7 +684,7 @@ static long run_pipeline(char **tokens, long rc_in) {
             job_set_pgrp(child, child);
             u_tcsetpgrp(0, child);
             reaped = u_wait4(child, &status, WUNTRACED | WCONTINUED, 0);
-            u_tcsetpgrp(0, 0);
+            shell_claim_tty();
             if (reaped == child && status_stopped(status)) {
                 int ji = job_note_stopped(child, stages[0][0]);
                 if (ji >= 0) {
@@ -749,7 +766,7 @@ static long run_pipeline(char **tokens, long rc_in) {
             }
         }
     }
-    u_tcsetpgrp(0, 0);
+    shell_claim_tty();
     return rc;
 }
 
@@ -867,7 +884,18 @@ int main(int argc, char **argv) {
     signal(SIGTTIN_N, (void *)SIG_IGN_V);
     signal(SIGTTOU_N, (void *)SIG_IGN_V);
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home");
+    /* Session leader + own process group as foreground (not pgid 0). */
+    {
+        long sid = u_setsid();
+        shell_pgid = u_getpid();
+        if (sid < 0) {
+            /* Already a leader/member: still own a pgrp for job control. */
+            u_setpgid(0, shell_pgid);
+        }
+        shell_claim_tty();
+    }
+
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -888,7 +916,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        u_tcsetpgrp(0, 0);
+        shell_claim_tty();
         n = u_read(0, line, sizeof(line) - 1);
         if (n == -4) {
             /* Ctrl-C at prompt: new line already echoed. */

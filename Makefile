@@ -57,6 +57,8 @@ QEMUFLAGS := -m 128M -serial stdio
 DISK_IMG  := $(BUILD_DIR)/disk.img
 # Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
 QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
+# AHCI (SATA) path for drivers/ahci.c bring-up (no virtio-blk).
+QEMU_AHCI := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none -device ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0
 # Legacy/transitional VirtIO-net + QEMU user-mode stack.
 # Explicit subnet + dhcpstart match the guest DHCP client / static fallback
 # (10.0.2.15/24, gw 10.0.2.2). Optional hostfwd example (uncomment to expose
@@ -87,6 +89,7 @@ OBJS := \
 	$(BUILD_DIR)/virtio_blk.o \
 	$(BUILD_DIR)/virtio_net.o \
 	$(BUILD_DIR)/ata.o \
+	$(BUILD_DIR)/ahci.o \
 	$(BUILD_DIR)/blk.o \
 	$(BUILD_DIR)/kprintf.o \
 	$(BUILD_DIR)/isr.o \
@@ -113,7 +116,7 @@ OBJS := \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
 
-.PHONY: all build run qemu qemu-gui qemu-disk disk clean help
+.PHONY: all build run qemu qemu-gui qemu-disk qemu-ahci disk clean help
 
 all: build
 
@@ -281,6 +284,11 @@ $(BUILD_DIR)/ata.o: drivers/ata.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/ahci.o: drivers/ahci.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/blk.o: drivers/blk.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -421,6 +429,10 @@ $(DISK_IMG): tools/mkext2.py
 qemu-disk: build $(DISK_IMG)
 	@echo "Launching fakeos + VirtIO-blk disk (Ctrl-A X to exit)..."
 	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK) $(QEMU_NET) -display none -no-reboot
+
+qemu-ahci: build $(DISK_IMG)
+	@echo "Launching fakeos + AHCI disk (Ctrl-A X to exit)..."
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_AHCI) $(QEMU_NET) -display none -no-reboot
 
 clean:
 	@echo "Cleaning build artifacts..."

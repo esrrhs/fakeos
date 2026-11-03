@@ -364,7 +364,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
+        "fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -382,13 +382,13 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: tcsetpgrp/TTIN/TTOU + setsockopt/select + AHCI probe online!",
+        "[SUCCESS] fakeos: AHCI I/O + poll/select/ioctl + shell session/fg online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 36 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 37 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -449,10 +449,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 36 modules accounted for",
-         identical + mismatches == 36),
-        (f"all 36 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 36 and mismatches == 0),
+        ("all 37 modules accounted for",
+         identical + mismatches == 37),
+        (f"all 37 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 37 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

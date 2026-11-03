@@ -76,6 +76,8 @@ extern u64 sys_getpeername(u64 fd, u64 uaddr, u64 ualen);
 extern u64 sys_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen);
 extern u64 sys_getsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen);
 extern u64 sys_select(u64 nfds, u64 readfds, u64 writefds, u64 exceptfds, u64 timeout);
+extern u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms);
+extern u64 sys_ioctl(u64 fd, u64 req, u64 arg);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
@@ -152,6 +154,8 @@ enum {
     SC_SETSOCKOPT = 54,
     SC_GETSOCKOPT = 55,
     SC_SELECT = 23,
+    SC_POLL = 7,
+    SC_IOCTL = 16,
     SC_PING = 500,
     SC_TTY_SETFG = 501,   /* tcsetpgrp */
     SC_TTY_GETFG = 502,   /* tcgetpgrp */
@@ -377,6 +381,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_SELECT) {
         return sys_select(f->rdi, f->rsi, f->rdx, f->r10, f->r8);
+    }
+    if (f->rax == SC_POLL) {
+        return sys_poll(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_IOCTL) {
+        return sys_ioctl(f->rdi, f->rsi, f->rdx);
     }
     if (f->rax == SC_RT_SIGACTION) {
         return sys_rt_sigaction(f->rdi, f->rsi, f->rdx, f->r10);

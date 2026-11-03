@@ -3,6 +3,7 @@ import arch;
 import mem;
 import types;
 
+typedef types.uint8_t  u8;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 typedef types.int64_t i64;
@@ -295,6 +296,64 @@ u64 sys_getpgid(u64 pid) {
 u64 sys_getsid(u64 pid) {
     u32 s = sched_get_sid((u32)pid);
     return s == 0 ? SC_ERR : (u64)s;
+}
+
+
+/* ioctl(2) TTY stubs: TIOCGPGRP / TIOCSPGRP / TCGETS / TCSETS.
+ * Single console; fd is accepted but ignored for TTY ioctls. */
+u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
+    u64 as = sched_current_as_h();
+    enum {
+        TCGETS_R = 0x5401,
+        TCSETS_R = 0x5402,
+        TIOCGPGRP_R = 0x540F,
+        TIOCSPGRP_R = 0x5410,
+        ENOTTY_NEG = (u64)-25
+    };
+    (void)fd;
+    if (req == TIOCGPGRP_R) {
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 4)) {
+            return (u64)(-1);
+        }
+        *(volatile u32 *)arg = tty_get_fg();
+        return 0;
+    }
+    if (req == TIOCSPGRP_R) {
+        u32 pg;
+        u64 jc;
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 4)) {
+            return (u64)(-1);
+        }
+        pg = *(volatile u32 *)arg;
+        jc = tty_jobctl_tcsetpgrp_check();
+        if (jc != 0) {
+            return jc;
+        }
+        if (pg != 0 && sched_signal_pgrp(pg, 0) == 0) {
+            return (u64)(-1);
+        }
+        tty_set_fg(pg);
+        return 0;
+    }
+    if (req == TCGETS_R) {
+        /* termios is 36+ bytes on Linux x86_64; zero a 64-byte window. */
+        u32 i;
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 64)) {
+            return (u64)(-1);
+        }
+        for (i = 0; i < 64; i++) {
+            ((volatile u8 *)arg)[i] = 0;
+        }
+        /* c_lflag ICANON|ECHO|ISIG-ish nibbles left 0; shell uses raw TTY path. */
+        return 0;
+    }
+    if (req == TCSETS_R) {
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 64)) {
+            return (u64)(-1);
+        }
+        return 0; /* accept and ignore */
+    }
+    return ENOTTY_NEG;
 }
 
 /* tcsetpgrp-ish (custom nr 501): set TTY foreground process group.

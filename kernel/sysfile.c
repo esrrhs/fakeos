@@ -4,9 +4,11 @@ import fs;
 import mem;
 import types;
 
+typedef types.uint16_t u16;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 typedef types.int64_t i64;
+typedef types.int32_t s32;
 
 /* ---------------------------------------------------------------------------
  * File-oriented system calls: open / close / read / write / lseek.
@@ -48,6 +50,8 @@ extern u64 tty_jobctl_write_wait(void);
 extern u32 tty_input_pending(void);
 extern u64 sched_tick_count(void);
 extern void sched_yield(void);
+extern u32 sched_should_eintr(void);
+extern void sched_check_signals(void);
 extern u32 sock_can_read(u32 fh);
 extern u32 sock_can_write(u32 fh);
 
@@ -680,8 +684,43 @@ u64 sys_fsync(u64 fd) {
 
 
 
-/* select(2) stub: nfds<=64, one-word fd_set bitmasks, optional timeval.
- * Ready: console input pending / always-writable console; socket RX/TX. */
+/* Shared readiness probe used by select(2) and poll(2). */
+static u32 fd_ready_read(u32 fh) {
+    if (sock_fh_is(fh)) {
+        return sock_can_read(fh);
+    }
+    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
+        return tty_input_pending();
+    }
+    if (pipe_fh_is(fh)) {
+        return 1;
+    }
+    return 0;
+}
+
+static u32 fd_ready_write(u32 fh) {
+    if (sock_fh_is(fh)) {
+        return sock_can_write(fh);
+    }
+    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
+        return 1;
+    }
+    if (pipe_fh_is(fh)) {
+        return 1;
+    }
+    return 1; /* regular files */
+}
+
+enum {
+    EINTR_SEL = (u64)-4,
+    POLLIN_F = 0x0001,
+    POLLOUT_F = 0x0004,
+    POLLERR_F = 0x0008,
+    POLLNVAL_F = 0x0020
+};
+
+/* select(2): nfds<=64, one-word fd_set bitmasks, optional timeval.
+ * Interruptible: pending fatal / non-SA_RESTART handler -> EINTR. */
 u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
                u64 timeout_u) {
     u64 as = sched_current_as_h();
@@ -809,6 +848,10 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
         if (timeout_u != 0 && sched_tick_count() >= deadline) {
             break;
         }
+        sched_check_signals();
+        if (sched_should_eintr()) {
+            return EINTR_SEL;
+        }
         sched_yield();
     }
 
@@ -822,4 +865,83 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
         *(volatile u64 *)exceptfds_u = 0;
     }
     return (u64)nready;
+}
+
+/* poll(2): nfds<=64, struct pollfd {int fd; short events; short revents}.
+ * timeout_ms < 0 blocks; 0 is non-blocking; >0 is millisecond budget (100 Hz). */
+u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
+    u64 as = sched_current_as_h();
+    u64 deadline = 0;
+    u32 block = 0;
+    u32 i;
+    u32 nready;
+
+    if (as == 0 || nfds > 64) {
+        return (u64)(-1);
+    }
+    if (nfds > 0) {
+        if (!mem.as_user_range_ok(as, ufds, nfds * 8)) {
+            return (u64)(-1);
+        }
+    }
+    if ((i64)timeout_ms < 0) {
+        block = 1;
+    } else if (timeout_ms == 0) {
+        block = 0;
+    } else {
+        u64 ticks = timeout_ms / 10u;
+        if (ticks == 0) {
+            ticks = 1;
+        }
+        block = 1;
+        deadline = sched_tick_count() + ticks;
+    }
+
+    for (;;) {
+        nready = 0;
+        for (i = 0; i < (u32)nfds; i++) {
+            volatile u32 *slot = (volatile u32 *)(ufds + (u64)i * 8);
+            u32 fd = slot[0];
+            u16 events = (u16)(slot[1] & 0xFFFF);
+            u16 revents = 0;
+            u32 fh;
+            slot[1] = (u32)events; /* clear revents (high 16) */
+            if ((s32)fd < 0) {
+                continue;
+            }
+            if (fd >= 16) {
+                revents = POLLNVAL_F;
+            } else {
+                fh = sched_fd_get(fd);
+                if (fh == FD_BAD) {
+                    revents = POLLNVAL_F;
+                } else {
+                    if ((events & POLLIN_F) != 0 && fd_ready_read(fh)) {
+                        revents = (u16)(revents | POLLIN_F);
+                    }
+                    if ((events & POLLOUT_F) != 0 && fd_ready_write(fh)) {
+                        revents = (u16)(revents | POLLOUT_F);
+                    }
+                }
+            }
+            slot[1] = ((u32)revents << 16) | (u32)events;
+            if (revents != 0) {
+                nready++;
+            }
+        }
+        if (nready > 0) {
+            return (u64)nready;
+        }
+        if (!block) {
+            return 0;
+        }
+        if ((i64)timeout_ms >= 0 && sched_tick_count() >= deadline) {
+            return 0;
+        }
+        sched_check_signals();
+        if (sched_should_eintr()) {
+            return EINTR_SEL;
+        }
+        sched_yield();
+    }
 }
