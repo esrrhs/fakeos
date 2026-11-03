@@ -31,6 +31,7 @@ enum {
     TCB_FREE     = 0,
     TCB_RUNNABLE = 1,
     TCB_DEAD     = 2,
+    TCB_SLEEPING = 3,
 
     MAX_THREADS  = 32,
     STACK_ORDER  = 2,                 /* 4 frames = 16 KiB per kernel stack  */
@@ -48,6 +49,7 @@ struct tcb {
     u64 entry;         /* Thread entry function                           */
     u64 arg;           /* Single u64 argument                             */
     u64 as_h;          /* Address space handle (0 = kernel space)         */
+    u64 wait_chan;     /* Sleep channel (0 = not waiting on a waitqueue)  */
     u32 state;
     u32 id;
     u32 pid;           /* User process id (0 for kernel threads)          */
@@ -55,6 +57,11 @@ struct tcb {
     u32 is_user;       /* Runs at ring 3 between syscalls/interrupts      */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
+};
+
+/* Simple sleep-mutex: wait channel is the mutex's own address. */
+struct kmutex {
+    u32 locked;
 };
 
 static struct tcb threads[MAX_THREADS];
@@ -79,6 +86,7 @@ void sched_init(void) {
         threads[i].entry = 0;
         threads[i].arg = 0;
         threads[i].as_h = 0;
+        threads[i].wait_chan = 0;
         threads[i].pid = 0;
         threads[i].ppid = 0;
         threads[i].is_user = 0;
@@ -196,6 +204,7 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].entry = entry;
     threads[i].arg = arg;
     threads[i].as_h = 0;
+    threads[i].wait_chan = 0;
     threads[i].pid = 0;
     threads[i].ppid = 0;
     threads[i].is_user = 0;
@@ -235,6 +244,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].entry = entry_rip;
     threads[i].arg = 0;
     threads[i].as_h = as_h;
+    threads[i].wait_chan = 0;
     threads[i].pid = pid;
     threads[i].ppid = 0;
     threads[i].is_user = 1;
@@ -288,6 +298,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].entry = 0;
     threads[i].arg = 0;
     threads[i].as_h = child_as_h;
+    threads[i].wait_chan = 0;
     threads[i].pid = child_pid;
     threads[i].ppid = threads[current].pid;
     threads[i].is_user = 1;
@@ -347,6 +358,73 @@ void sched_yield(void) {
     }
     arch.cpu_cli();
     sched_switch_to(pick_next(current));
+    arch.cpu_sti();
+}
+
+/* Block the current thread on `chan` until sched_wakeup(chan). Interrupts
+ * are taken around the switch; the caller does not hold a lock across the
+ * sleep (classic Mesa-style: re-check the wait condition after return). */
+void sched_sleep(u64 chan) {
+    if (!active || chan == 0) {
+        return;
+    }
+    arch.cpu_cli();
+    threads[current].wait_chan = chan;
+    threads[current].state = TCB_SLEEPING;
+    sched_switch_to(pick_next(current));
+    /* Woken: state is RUNNABLE and wait_chan cleared by wakeup. */
+    arch.cpu_sti();
+}
+
+/* Like sched_sleep but IRQs are already off and stay off across the return
+ * (used by wait4 to close the lost-wakeup race under a condition check). */
+void sched_sleep_cli(u64 chan) {
+    if (!active || chan == 0) {
+        return;
+    }
+    threads[current].wait_chan = chan;
+    threads[current].state = TCB_SLEEPING;
+    sched_switch_to(pick_next(current));
+}
+
+/* Make every sleeper on `chan` runnable. Safe to call with IRQs off or on. */
+void sched_wakeup(u64 chan) {
+    u32 i;
+    if (chan == 0) {
+        return;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+            threads[i].wait_chan = 0;
+            threads[i].state = TCB_RUNNABLE;
+        }
+    }
+}
+
+/* Channel used by wait4 so an exiting child can wake its parent. */
+u64 sched_wait4_chan(u32 parent_pid) {
+    return 0x5774000000000000ULL | (u64)parent_pid;
+}
+
+void kmutex_init(struct kmutex *m) {
+    m->locked = 0;
+}
+
+void kmutex_lock(struct kmutex *m) {
+    arch.cpu_cli();
+    while (m->locked) {
+        threads[current].wait_chan = (u64)m;
+        threads[current].state = TCB_SLEEPING;
+        sched_switch_to(pick_next(current));
+    }
+    m->locked = 1;
+    arch.cpu_sti();
+}
+
+void kmutex_unlock(struct kmutex *m) {
+    arch.cpu_cli();
+    m->locked = 0;
+    sched_wakeup((u64)m);
     arch.cpu_sti();
 }
 

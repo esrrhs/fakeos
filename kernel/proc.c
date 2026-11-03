@@ -1,4 +1,5 @@
 package kernel;
+import arch;
 import mem;
 import types;
 
@@ -16,8 +17,8 @@ extern void kprintf(const char *fmt, ...);
  * The wait releases both. Children whose parent exits first are reparented
  * to pid 1 (init, which keeps running as /bin/sh).
  *
- * Blocking is implemented by yield-polling (no blocked TCB state exists in
- * this scheduler); WNOHANG returns immediately.
+ * Blocking uses sched_sleep on a per-parent wait channel; the exiting child
+ * wakes the parent via sched_wakeup. WNOHANG returns immediately.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -38,7 +39,8 @@ static struct exit_record exit_table[MAX_EXIT];
 extern u32 sched_current_pid(void);
 extern u32 sched_current_ppid(void);
 extern u64 sched_current_as_h(void);
-extern void sched_yield(void);
+extern void sched_sleep_cli(u64 chan);
+extern u64 sched_wait4_chan(u32 parent_pid);
 extern u32 sched_has_live_child(u32 ppid);
 extern u32 sched_is_live_child(u32 ppid, u32 pid);
 extern u32 sched_reap_dead(u32 pid);
@@ -135,6 +137,22 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
         if (options & WNOHANG) {
             return 0;
         }
-        sched_yield();
+        /* Close the lost-wakeup window: re-check under cli, then sleep
+         * without dropping IRQs until after the thread is marked sleeping. */
+        {
+            u64 chan = sched_wait4_chan(parent);
+            arch.cpu_cli();
+            if (exit_exists(want, parent)) {
+                arch.cpu_sti();
+                continue;
+            }
+            if (!sched_has_live_child(parent)) {
+                arch.cpu_sti();
+                return (u64)(-1);
+            }
+            /* sched_sleep_cli: mark sleeping + switch; returns with IRQs off. */
+            sched_sleep_cli(chan);
+            arch.cpu_sti();
+        }
     }
 }

@@ -22,6 +22,8 @@ extern u32 sched_fd_close_all(void);
 extern u32 sched_current_ppid(void);
 extern void sched_reparent_children(u32 old_ppid, u32 new_ppid);
 extern void kthread_exit(void);
+extern void sched_wakeup(u64 chan);
+extern u64 sched_wait4_chan(u32 parent_pid);
 
 /* sysfile.c */
 extern u64 sys_open(u64 upath, u64 flags, u64 mode);
@@ -148,9 +150,13 @@ void proc_terminate(u64 code) {
      * exit records are keyed by the *child's* ppid, so reparent records whose
      * owner is the exiting pid (not by the parent of the exiting process). */
     proc_record_exit(pid, ppid, code);
+    /* Wake a parent blocked in wait4, if any. */
+    sched_wakeup(sched_wait4_chan(ppid));
     if (pid != 1) {
         sched_reparent_children(pid, 1);
         proc_reparent_exits(pid, 1);
+        /* Orphans moved under init: wake pid 1 in case it is waiting. */
+        sched_wakeup(sched_wait4_chan(1));
     }
 
     /* Close all open files, then leave the doomed address space before its
