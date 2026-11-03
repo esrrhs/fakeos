@@ -165,9 +165,9 @@ long_mode_higher_half:
     ; Call the C kernel entry point
     call kmain
 
-    ; Halt the processor if kmain returns
-    cli
+    ; If kmain returns, idle with interrupts enabled so UART/timer IRQs work.
 .hang:
+    sti
     hlt
     jmp .hang
 

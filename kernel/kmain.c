@@ -25,6 +25,7 @@ extern void sched_selftest(void);
 extern void uproc_selftest(void);
 extern void vfs_selftest(void);
 extern void rootfs_publish(void);
+extern void sched_yield(void);
 
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
@@ -189,5 +190,11 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - Canonical serial TTY stdin + libc + interactive /bin/sh: OK\n");
     kprintf("           - Block device (VirtIO/ATA) + Ext2 persistent /mnt: OK\n");
     kprintf("================================================================================\n");
-    kprintf(" System idle. CPU halted.\n");
+    kprintf(" System idle. Yielding for IRQ-driven shell I/O.\n");
+    /* Stay in slot 0 as a RUNNABLE idle thread: sched_yield leaves IF on for
+     * the resuming peer, and a sti/hlt here would desync threads[0].rsp.
+     * Required once the uproc monitor exits and the shell blocks on TTY. */
+    for (;;) {
+        sched_yield();
+    }
 }
