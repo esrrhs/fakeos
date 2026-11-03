@@ -326,7 +326,7 @@ int main(void) {
      * m5-blob stub. */
     {
         long lfd2 = u_open("/tmp/ldfake.args", 0x42, 0x1FF);
-        char line[1024];
+        char line[2048];
         unsigned long used = 0;
         unsigned long i;
         if (lfd2 < 0) {

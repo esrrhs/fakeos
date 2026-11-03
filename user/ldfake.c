@@ -41,7 +41,7 @@ enum {
     R_32 = 10, R_32S = 11, R_GOTPCRELX = 41, R_PLT32X = 42,
     PT_LOAD = 1,
     O_RDWR_CREAT = 0x42,
-    OBJ_ARENA = 1048576,     /* fits ~800+ KiB userblob+objs */
+    OBJ_ARENA = 1572864,     /* ~1.5MiB: userblob+asm+36 kernel objs */
     OUT_CAP = 2097152,
     KERNEL_LMA = 0x100000,
     KERNEL_VMA = 0xFFFFFFFF80000000UL,
@@ -110,7 +110,7 @@ struct obj {
     unsigned int nsec;
 };
 
-static struct obj objs[40];
+static struct obj objs[64];
 static unsigned int n_objs;
 
 /* Output buckets, in placement order (must match boot/linker.ld). */
@@ -213,6 +213,10 @@ static int read_obj(const char *path) {
         return 0;
     }
     arena_used += len;
+    if (n_objs >= 64) {
+        puterr("ldfake: too many objects");
+        return 0;
+    }
     o = &objs[n_objs++];
     o->data = buf;
     o->size = len;
