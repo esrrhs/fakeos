@@ -143,7 +143,11 @@ fi
 # This artifact is a linux x86-64 executable that runs ON linux x86-64
 # (fakeos), so flip host_default. On Linux-translated trees (and master,
 # which has no target.c) there is nothing to do.
-if [ -f v0/target.c ] && grep -q 'return &TARGET_ARM64_MACOS;' v0/target.c; then
+# Gate on host_default itself, not every TARGET_ARM64_MACOS mention: after a
+# Linux translation host_default is already TARGET_X86_64_LINUX, but the
+# target_arm64_macos() helper and --target=arm64-macos parser still contain
+# "return &TARGET_ARM64_MACOS;" and would falsely trip a broader grep.
+if [ -f v0/target.c ] && grep -A2 'host_default(void)' v0/target.c | grep -q 'return &TARGET_ARM64_MACOS;'; then
     python3 - <<'PYEOF'
 import re
 p = "v0/target.c"
@@ -194,9 +198,21 @@ int macho_write_object(const struct EmitModule *em, const char *path) {
 int macho_read_object(const char *path, struct EmitModule *em) {
     (void)path; (void)em; return -1;
 }
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, unsigned long *nsyms_out) {
+    (void)path;
+    if (install_name_out) *install_name_out = 0;
+    if (syms_out) *syms_out = 0;
+    if (nsyms_out) *nsyms_out = 0;
+    return -1;
+}
+unsigned long macho_tlv_block_tbss_base(unsigned long tdata_len,
+                                       unsigned long max_align) {
+    (void)tdata_len; (void)max_align; return 0;
+}
 int macho_link_objects(struct EmitModule **mods, unsigned long n,
-                       const char *path) {
-    (void)mods; (void)n; (void)path; return -1;
+                       const char *path, int skip_libsystem) {
+    (void)mods; (void)n; (void)path; (void)skip_libsystem; return -1;
 }
 int macho_codesign(const char *path) { (void)path; return -1; }
 int fork(void) { return -1; }
