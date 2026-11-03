@@ -678,6 +678,37 @@ enum {
 
 extern void proc_terminate(u64 code);
 
+
+/* Stub sigaction helpers. Only SIG_DFL (0) and SIG_IGN (1) are honored;
+ * any other handler value clears ignore (default terminate on delivery).
+ * SIGKILL (9) and SIGSTOP (19) cannot be altered. */
+u32 sched_sig_get(u32 sig, u64 *handler_out) {
+    if (sig == 0 || sig > 31) {
+        return (u32)-1;
+    }
+    if (handler_out) {
+        *handler_out = (threads[current].sig_ignore & (1u << sig)) ? 1ULL : 0ULL;
+    }
+    return 0;
+}
+
+u32 sched_sigaction(u32 sig, u64 handler, u64 *old_out) {
+    u64 old = 0;
+    if (sig == 0 || sig > 31 || sig == SIGKILL_N || sig == 19) {
+        return (u32)-1;
+    }
+    old = (threads[current].sig_ignore & (1u << sig)) ? 1ULL : 0ULL;
+    if (old_out) {
+        *old_out = old;
+    }
+    if (handler == 1) {
+        threads[current].sig_ignore |= (1u << sig);
+    } else {
+        threads[current].sig_ignore &= ~(1u << sig);
+    }
+    return 0;
+}
+
 u32 sched_signal_send(u32 pid, u32 sig) {
     u32 i;
     u32 found = 0;

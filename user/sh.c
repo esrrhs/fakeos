@@ -41,6 +41,7 @@ enum {
     O_TRUNC  = 0x200,
     O_APPEND = 0x400,
     SAVE_FD  = 8,
+    HIST_MAX = 32,
     MAX_TOK  = 32,
     MAX_STAGE = 4,
     WNOHANG = 1
@@ -48,6 +49,39 @@ enum {
 
 static long bg_pid = 0;
 static char bg_name[64];
+static char hist[HIST_MAX][256];
+static int hist_len;
+static int hist_next;
+
+static void hist_add(const char *line) {
+    int i = 0;
+    int n = 0;
+    if (line == 0 || line[0] == 0) return;
+    while (line[n] && n < 255) n++;
+    /* Skip duplicate of most recent. */
+    if (hist_len > 0) {
+        int prev = hist_next == 0 ? HIST_MAX - 1 : hist_next - 1;
+        int same = 1;
+        for (i = 0; i <= n; i++) {
+            if (hist[prev][i] != line[i]) { same = 0; break; }
+        }
+        if (same) return;
+    }
+    for (i = 0; i < n; i++) hist[hist_next][i] = line[i];
+    hist[hist_next][n] = 0;
+    hist_next = (hist_next + 1) % HIST_MAX;
+    if (hist_len < HIST_MAX) hist_len++;
+}
+
+static void hist_print(void) {
+    int i;
+    int start = (hist_len < HIST_MAX) ? 0 : hist_next;
+    for (i = 0; i < hist_len; i++) {
+        int idx = (start + i) % HIST_MAX;
+        printf(" %d  %s\n", i + 1, hist[idx]);
+    }
+}
+
 static int bg_active = 0;
 
 static int eq(const char *a, const char *b) {
@@ -158,8 +192,8 @@ static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
            eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "sync") ||
-           eq(cmd, "clear") || eq(cmd, "jobs") || eq(cmd, "fg") ||
-           eq(cmd, "kill");
+           eq(cmd, "clear") || eq(cmd, "history") || eq(cmd, "jobs") ||
+           eq(cmd, "fg") || eq(cmd, "kill");
 }
 
 /* Default PATH directories (colon-separated). */
@@ -273,10 +307,14 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, jobs, fg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
-        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin");
+        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin; !! and history");
+        return 0;
+    }
+    if (eq(tokens[0], "history")) {
+        hist_print();
         return 0;
     }
     if (eq(tokens[0], "jobs")) {
@@ -661,7 +699,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs, history/!!, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -692,6 +730,26 @@ int main(int argc, char **argv) {
             continue;
         }
         line[n] = 0;
+        /* Strip trailing newline already handled by read; expand !!. */
+        if (line[0] == '!' && line[1] == '!' && (line[2] == 0 || line[2] == ' '
+            || line[2] == '\t' || line[2] == '\n' || line[2] == '\r')) {
+            if (hist_len == 0) {
+                puts("sh: !!: event not found");
+                continue;
+            }
+            {
+                int prev = hist_next == 0 ? HIST_MAX - 1 : hist_next - 1;
+                int i = 0;
+                while (hist[prev][i] && i < 255) {
+                    line[i] = hist[prev][i];
+                    i++;
+                }
+                line[i] = 0;
+                puts(line);
+            }
+        }
+
+        hist_add(line);
 
         save = line;
         while (nt < MAX_TOK - 1 && (t = strtok_sh(&save)) != 0) {

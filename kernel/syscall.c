@@ -63,6 +63,7 @@ extern void proc_reparent_exits(u32 old_ppid, u32 new_ppid);
 extern u64 sys_wait4(u64 pid, u64 status, u64 options, u64 ruspace);
 extern u64 sys_kill(u64 pid, u64 sig);
 extern u64 sys_tty_setfg(u64 pid);
+extern u64 sys_rt_sigaction(u64 sig, u64 act, u64 old, u64 setsize);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
 
@@ -127,7 +128,8 @@ enum {
     SC_ACCEPT = 43,
     SC_KILL = 62,
     SC_PING = 500,
-    SC_TTY_SETFG = 501
+    SC_TTY_SETFG = 501,
+    SC_RT_SIGACTION = 13
 };
 
 enum {
@@ -312,6 +314,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_TTY_SETFG) {
         return sys_tty_setfg(f->rdi);
+    }
+    if (f->rax == SC_RT_SIGACTION) {
+        return sys_rt_sigaction(f->rdi, f->rsi, f->rdx, f->r10);
     }
     if (f->rax == SC_EXIT) {
         proc_terminate(f->rdi);

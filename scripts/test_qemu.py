@@ -120,7 +120,7 @@ def second_boot_checks(disk):
     boot = vm.wait_for("fakeos login:", 30.0)
     vm.send("root")
     boot += vm.wait_for("Password:", 5.0)
-    vm.send("")
+    vm.send("root")
     boot += vm.wait_for("Welcome root", 10.0)
     # Drain until a shell prompt ( ~$ or $ ).
     boot += vm.wait_for("fakeos:", 5.0)
@@ -200,7 +200,7 @@ def main():
     boot = vm.wait_for("fakeos login:", 30.0)
     vm.send("root")
     boot += vm.wait_for("Password:", 5.0)
-    vm.send("")  # empty password
+    vm.send("root")  # /etc/passwd $fake$ hash
     boot += vm.wait_for("fakeos:~$", 10.0)
 
     # 2. Drive the interactive shell line by line.

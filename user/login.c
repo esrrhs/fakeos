@@ -1,6 +1,7 @@
 /* fakeos userland - minimal login/getty stub.
  * Accepts user "root" with empty password (or "root"), then execve /bin/sh.
- * /etc/passwd is consulted for a name match only (no crypt yet). */
+ * /etc/passwd: name:password:... — empty hash => empty password;
+ * $fake$salt$hash via libc crypt_check; legacy plaintext still accepted. */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
@@ -29,11 +30,15 @@ static int read_line(char *buf, int cap) {
     return 1;
 }
 
-static int user_known(const char *name) {
+extern int crypt_check(const char *key, const char *setting);
+
+/* Copy password field for name into pw_out (cap bytes). Returns 1 if found. */
+static int passwd_lookup(const char *name, char *pw_out, int cap) {
     char buf[256];
     long fd;
     long n;
     long i;
+    if (pw_out && cap > 0) pw_out[0] = 0;
     fd = u_open("/etc/passwd", 0, 0);
     if (fd < 0) {
         return strcmp(name, "root") == 0;
@@ -45,19 +50,32 @@ static int user_known(const char *name) {
     i = 0;
     while (i < n) {
         char *line = buf + i;
-        char *colon;
+        char *c1;
+        char *c2;
+        int k;
         while (i < n && buf[i] != '\n') i++;
         if (i < n) {
             buf[i] = 0;
             i++;
         }
         if (line[0] == 0 || line[0] == '#') continue;
-        colon = line;
-        while (*colon != 0 && *colon != ':') colon++;
-        if (*colon == ':') {
-            *colon = 0;
-            if (strcmp(line, name) == 0) return 1;
+        c1 = line;
+        while (*c1 != 0 && *c1 != ':') c1++;
+        if (*c1 != ':') continue;
+        *c1 = 0;
+        if (strcmp(line, name) != 0) continue;
+        c2 = c1 + 1;
+        while (*c2 != 0 && *c2 != ':') c2++;
+        *c2 = 0;
+        if (pw_out && cap > 0) {
+            k = 0;
+            while (c1[1 + k] != 0 && k < cap - 1) {
+                pw_out[k] = c1[1 + k];
+                k++;
+            }
+            pw_out[k] = 0;
         }
+        return 1;
     }
     return 0;
 }
@@ -81,9 +99,12 @@ int main(int argc, char **argv) {
         if (!read_line(pass, sizeof(pass))) {
             continue;
         }
-        /* Minimal auth: root with empty or "root" password. */
-        if (user_known(user) && (pass[0] == 0 || strcmp(pass, "root") == 0
-                                 || strcmp(pass, user) == 0)) {
+        {
+        char pwhash[64];
+        if (passwd_lookup(user, pwhash, sizeof(pwhash))
+            && (crypt_check(pass, pwhash)
+                || (pwhash[0] == 0 && pass[0] == 0)
+                || (pwhash[0] != '$' && pwhash[0] != 0 && strcmp(pass, pwhash) == 0))) {
             printf("Welcome %s\n", user);
             sh_argv[0] = "/bin/sh";
             sh_argv[1] = 0;
@@ -91,6 +112,7 @@ int main(int argc, char **argv) {
                 puts("login: exec /bin/sh failed");
                 u_exit(1);
             }
+        }
         }
         puts("Login incorrect");
     }

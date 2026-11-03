@@ -37,6 +37,7 @@ global u_listen
 global u_accept
 global u_kill
 global u_tty_setfg
+global u_rt_sigaction
 
 section .text
 
@@ -158,8 +159,16 @@ USYSC1 u_accept, 43
 ; long u_kill(long pid, long sig)
 USYSC1 u_kill, 62
 
-; long u_tty_setfg(long pid)  - set TTY foreground for Ctrl-C
+; long u_tty_setfg(long pid)
 USYSC1 u_tty_setfg, 501
+
+; long u_rt_sigaction(sig, act, old, setsize) -- 4th arg RCX to R10
+align 16
+u_rt_sigaction:
+    mov     r10, rcx
+    mov     eax, 13
+    syscall
+    ret
 
 ; void u_exit(long code) - does not return
 align 16

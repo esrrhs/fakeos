@@ -37,6 +37,8 @@ static struct exit_record exit_table[MAX_EXIT];
 
 /* sched.c */
 extern u32 sched_current_pid(void);
+extern u32 sched_sigaction(u32 sig, u64 handler, u64 *old_out);
+extern u32 sched_sig_get(u32 sig, u64 *handler_out);
 extern u32 sched_current_ppid(void);
 extern u64 sched_current_as_h(void);
 extern void sched_sleep_cli(u64 chan);
@@ -202,5 +204,40 @@ u64 sys_kill(u64 pid, u64 sig) {
 /* Custom: set TTY foreground process for Ctrl-C (SIGINT) delivery. */
 u64 sys_tty_setfg(u64 pid) {
     tty_set_fg((u32)pid);
+    return 0;
+}
+
+/* Linux nr 13: rt_sigaction(sig, act, oldact, sigsetsize).
+ * Stub: sa_handler SIG_DFL(0) / SIG_IGN(1) only; other pointers clear ignore
+ * (default terminate). SIGKILL/SIGSTOP rejected. */
+u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
+    u64 as = sched_current_as_h();
+    u64 handler = 0;
+    u64 old = 0;
+    u32 st;
+    (void)setsize;
+    if (as == 0) {
+        return (u64)(-1);
+    }
+    st = sched_sig_get((u32)sig, &old);
+    if (st != 0) {
+        return (u64)(-22);
+    }
+    if (act_u != 0) {
+        if (!mem.as_user_range_ok(as, act_u, 8)) {
+            return (u64)(-14);
+        }
+        handler = *(volatile u64 *)act_u;
+        st = sched_sigaction((u32)sig, handler, 0);
+        if (st != 0) {
+            return (u64)(-22);
+        }
+    }
+    if (old_u != 0) {
+        if (!mem.as_user_range_ok(as, old_u, 8)) {
+            return (u64)(-14);
+        }
+        *(volatile u64 *)old_u = old;
+    }
     return 0;
 }

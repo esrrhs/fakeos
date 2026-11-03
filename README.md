@@ -169,6 +169,9 @@ flowchart TD
 - [x] **DNS stub**：`/etc/resolv.conf` + `/etc/hosts`；libc `resolve_host`（字面量 / hosts / UDP DNS A）；`ping`/`nc` 接受主机名。静态地址（无完整 DHCP）。`127.0.0.1`/本机 loopback ping/UDP/TCP。
 - [x] **login/getty stub**：`/etc/passwd` + `/bin/login`（root / 空或 root 密码）后 exec `/bin/sh`。
 - [x] **TCP retransmit timer**：100Hz 节拍上对未确认 SYN/数据段重传；shell `PATH`（`/bin:.:...`）与引号分词；`kill` builtin。
+- [x] **sigaction stub**：Linux `rt_sigaction`（nr 13）；`SIG_DFL`/`SIG_IGN` 生效（自定义 handler 暂按 DFL 投递）；libc `sigaction`/`signal`。
+- [x] **shell history / `!!`**：环形 32 条；`history` builtin；`!!` 重跑上一条。
+- [x] **auth crypt stub**：`/etc/passwd` 支持 `$fake$salt$hash`（FNV-1a）；libc `crypt`/`crypt_check`；默认 root 口令 `root`。
 
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。

@@ -3,6 +3,8 @@
  * external headers - fakecc package ecosystem only. */
 package user;
 
+extern long u_rt_sigaction(long sig, void *act, void *oldact, unsigned long setsize);
+
 typedef unsigned int u32;
 typedef unsigned long long u64;
 typedef long long i64;
@@ -616,4 +618,143 @@ char *strtok_sh(char **save) {
     }
     *save = s;
     return out;
+}
+
+/* ---- signals (stub) ----------------------------------------------------- */
+enum { SIG_DFL_V = 0, SIG_IGN_V = 1 };
+
+struct sigaction {
+    void *sa_handler;
+    unsigned long sa_flags;
+    void *sa_restorer;
+    unsigned long sa_mask;
+};
+
+int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
+    struct sigaction tmp;
+    struct sigaction old;
+    long r;
+    void *ap = 0;
+    void *op = 0;
+    if (act) {
+        tmp = *act;
+        ap = &tmp;
+    }
+    if (oldact) {
+        op = &old;
+    }
+    r = u_rt_sigaction((long)sig, ap, op, 8);
+    if (r < 0) {
+        return -1;
+    }
+    if (oldact) {
+        oldact->sa_handler = old.sa_handler;
+        oldact->sa_flags = 0;
+        oldact->sa_restorer = 0;
+        oldact->sa_mask = 0;
+    }
+    return 0;
+}
+
+void *signal(int sig, void *handler) {
+    struct sigaction act;
+    struct sigaction old;
+    act.sa_handler = handler;
+    act.sa_flags = 0;
+    act.sa_restorer = 0;
+    act.sa_mask = 0;
+    if (sigaction(sig, &act, &old) != 0) {
+        return (void *)(long)-1;
+    }
+    return old.sa_handler;
+}
+
+/* ---- auth crypt stub ---------------------------------------------------- */
+/* Format: $fake$<4-char-salt>$<8-hex> where hash = FNV-1a(salt || ":" || key). */
+static unsigned int fnv1a(const char *s) {
+    unsigned int h = 2166136261u;
+    while (*s) {
+        h ^= (unsigned char)(*s);
+        h *= 16777619u;
+        s++;
+    }
+    return h;
+}
+
+static void hex8(unsigned int v, char *out) {
+    const char *h = "0123456789abcdef";
+    int i;
+    for (i = 0; i < 8; i++) {
+        out[7 - i] = h[v & 0xf];
+        v >>= 4;
+    }
+    out[8] = 0;
+}
+
+char *crypt(const char *key, const char *salt) {
+    static char out[32];
+    char buf[96];
+    unsigned int i;
+    unsigned int h;
+    const char *sp = salt;
+    if (key == 0) key = "";
+    if (sp == 0 || sp[0] == 0) {
+        sp = "$fake$abcd$";
+    }
+    /* Accept full $fake$salt$hash or $fake$salt$ as setting salt. */
+    if (sp[0] == '$' && sp[1] == 'f') {
+        /* copy "$fake$XXXX$" prefix into out */
+        i = 0;
+        while (sp[i] && i < 11) {
+            out[i] = sp[i];
+            i++;
+        }
+        /* ensure form $fake$ssss$ */
+        if (i < 11) {
+            while (i < 6) out[i++] = 'a';
+            out[0] = '$'; out[1] = 'f'; out[2] = 'a'; out[3] = 'k';
+            out[4] = 'e'; out[5] = '$';
+            out[6] = 'a'; out[7] = 'b'; out[8] = 'c'; out[9] = 'd';
+            out[10] = '$';
+            i = 11;
+        }
+        out[11] = 0;
+    } else {
+        out[0] = '$'; out[1] = 'f'; out[2] = 'a'; out[3] = 'k';
+        out[4] = 'e'; out[5] = '$';
+        out[6] = sp[0] ? sp[0] : 'a';
+        out[7] = sp[1] ? sp[1] : 'b';
+        out[8] = sp[2] ? sp[2] : 'c';
+        out[9] = sp[3] ? sp[3] : 'd';
+        out[10] = '$';
+        out[11] = 0;
+        i = 11;
+    }
+    /* buf = salt4 + ":" + key */
+    buf[0] = out[6]; buf[1] = out[7]; buf[2] = out[8]; buf[3] = out[9];
+    buf[4] = ':';
+    {
+        unsigned int k = 0;
+        while (key[k] && k < 80) {
+            buf[5 + k] = key[k];
+            k++;
+        }
+        buf[5 + k] = 0;
+    }
+    h = fnv1a(buf);
+    hex8(h, out + 11);
+    return out;
+}
+
+int crypt_check(const char *key, const char *setting) {
+    char *got;
+    if (setting == 0 || setting[0] == 0) {
+        return key != 0 && key[0] == 0; /* empty hash => empty password only */
+    }
+    if (setting[0] != '$') {
+        /* legacy plaintext field: match exact or (root aliases handled by login) */
+        return key != 0 && strcmp(key, setting) == 0;
+    }
+    got = crypt(key, setting);
+    return strcmp(got, setting) == 0;
 }
