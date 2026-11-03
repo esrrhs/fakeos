@@ -26,8 +26,10 @@ extern void tlb_flush(void);
  * Anonymous VMAs reserve a range with permissions but map nothing; the first
  * touch raises #PF and as_handle_fault() demand-pages it. Read faults share a
  * global zero frame (mapped RO); the first write allocates a private page
- * (or COWs off the shared zero). as_cow_clone() shallow-copies an address
- * space, marking every shared leaf read-only and bumping a per-frame
+ * (or COWs off the shared zero). VMA_FILE ranges demand-read from a ramfs /
+ * Ext2 inode on first touch (true file mmap); MAP_SHARED file pages keep W
+ * across fork (no COW demotion). as_cow_clone() shallow-copies an address
+ * space, marking private shared leaves read-only and bumping a per-frame
  * refcount; the first write after that triggers a private copy.
  * ------------------------------------------------------------------------- */
 
@@ -45,6 +47,10 @@ enum {
 
     VMA_FREE   = 0,
     VMA_ANON   = 1,
+    VMA_FILE   = 2,
+
+    FS_KIND_RAMFS = 0,
+    FS_KIND_EXT2  = 1,
 
     PROT_READ  = 1,
     PROT_WRITE = 2,
@@ -66,6 +72,10 @@ struct vma {
     u64 end;
     u32 prot;
     u32 kind;
+    u32 shared;                /* MAP_SHARED: keep W across fork */
+    u32 fs_kind;               /* FS_KIND_* when kind == VMA_FILE */
+    u32 ino;                   /* backing inode */
+    u64 file_off;              /* file offset of vma->start */
 };
 
 struct address_space {
@@ -175,6 +185,10 @@ void as_init(struct address_space *as) {
         as->vmas[i].start = 0;
         as->vmas[i].end = 0;
         as->vmas[i].prot = 0;
+        as->vmas[i].shared = 0;
+        as->vmas[i].fs_kind = 0;
+        as->vmas[i].ino = 0;
+        as->vmas[i].file_off = 0;
     }
 
     u64 root = alloc_zero_frame();
@@ -217,6 +231,10 @@ int as_map_anon(struct address_space *as, u64 start, u64 size, u32 prot) {
     as->vmas[as->nvma].end = end;
     as->vmas[as->nvma].prot = prot | PROT_READ;
     as->vmas[as->nvma].kind = VMA_ANON;
+    as->vmas[as->nvma].shared = 0;
+    as->vmas[as->nvma].fs_kind = 0;
+    as->vmas[as->nvma].ino = 0;
+    as->vmas[as->nvma].file_off = 0;
     as->nvma++;
     return 1;
 }
@@ -249,6 +267,8 @@ static u64 leaf_perms(struct vma *vma) {
  * Returns 1 when the fault was resolved (resume), 0 when unhandled.
  * ------------------------------------------------------------------------- */
 extern void kprintf(const char *fmt, ...);
+/* Provided by kernel/sysproc.c: fill one page from a file inode. */
+extern u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva);
 
 static u32 ensure_zero_frame(void) {
     if (zero_frame != 0) {
@@ -278,10 +298,28 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
     u64 pte = pt[i];
 
     if (!(pte & PTE_P)) {
-        /* Demand-zero page. */
         if ((err & 0x2) && !(vma->prot & PROT_WRITE)) {
             return 0;                 /* Write to a read-only VMA */
         }
+        if (vma->kind == VMA_FILE) {
+            u64 frame = alloc_zero_frame();
+            u64 foff;
+            if (frame == 0) {
+                return 0;
+            }
+            foff = vma->file_off + (page_va - vma->start);
+            if (!as_file_page_fill(vma->fs_kind, vma->ino, foff,
+                                   HHDM_BASE + frame)) {
+                pmm_free_page(frame);
+                return 0;
+            }
+            frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
+            pt[i] = frame | leaf_perms(vma);
+            private_faults++;
+            invlpg_page(page_va);
+            return 1;
+        }
+        /* Demand-zero anonymous page. */
         if (err & 0x2) {
             /* Write fault: private zero page. */
             u64 frame = alloc_zero_frame();
@@ -362,27 +400,35 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
  * in BOTH spaces (private copy on first write); non-writable leaves (e.g. RX
  * text) stay shared as-is. The refcount bump is mandatory for both kinds:
  * without it, a child exit would free frames the parent still maps. */
-static void cow_copy_pt(volatile u64 *src_pt, volatile u64 *dst_pt) {
+static u32 vma_is_shared_at(struct address_space *as, u64 va) {
+    struct vma *v = find_vma(as, va);
+    return (v != 0 && v->shared != 0) ? 1 : 0;
+}
+
+static void cow_copy_pt(struct address_space *as, u64 va_base,
+                        volatile u64 *src_pt, volatile u64 *dst_pt) {
     u32 i;
     for (i = 0; i < PT_ENTRIES; i++) {
         u64 e = src_pt[i];
+        u64 page_va = va_base + ((u64)i << 12);
         if (!(e & PTE_P)) {
             dst_pt[i] = e;
             continue;
         }
         u32 pfn = (u32)(entry_phys(e) / PAGE_SIZE);
         frame_refs[pfn]++;
-        if (e & PTE_W) {
+        if ((e & PTE_W) && !vma_is_shared_at(as, page_va)) {
             u64 ro = (e & ~(u64)PTE_W) | ((u64)1 << 63);
             src_pt[i] = ro;
             dst_pt[i] = ro;
         } else {
-            dst_pt[i] = e;            /* Already RO / shared */
+            dst_pt[i] = e;            /* Already RO, or MAP_SHARED keep W */
         }
     }
 }
 
-static void cow_walk_pd(volatile u64 *src_pd, volatile u64 *dst_pd) {
+static void cow_walk_pd(struct address_space *as, u64 va_base,
+                        volatile u64 *src_pd, volatile u64 *dst_pd) {
     u32 i;
     for (i = 0; i < PT_ENTRIES; i++) {
         u64 e = src_pd[i];
@@ -397,14 +443,14 @@ static void cow_walk_pd(volatile u64 *src_pd, volatile u64 *dst_pd) {
         if (f == 0) {
             return;
         }
-        /* Point the destination PD entry at the NEW PT frame f (not the
-         * source PT), then deep-copy leaves into it. */
         dst_pd[i] = f | PTE_P | PTE_W | PTE_U;
-        cow_copy_pt(table(entry_phys(e)), table(f));
+        cow_copy_pt(as, va_base + ((u64)i << 21),
+                    table(entry_phys(e)), table(f));
     }
 }
 
-static void cow_walk_pdpt(volatile u64 *src_pdpt, volatile u64 *dst_pdpt) {
+static void cow_walk_pdpt(struct address_space *as, u64 va_base,
+                          volatile u64 *src_pdpt, volatile u64 *dst_pdpt) {
     u32 i;
     for (i = 0; i < PT_ENTRIES; i++) {
         u64 e = src_pdpt[i];
@@ -419,9 +465,9 @@ static void cow_walk_pdpt(volatile u64 *src_pdpt, volatile u64 *dst_pdpt) {
         if (f == 0) {
             return;
         }
-        /* Point at the NEW PD frame f, then deep-copy its PTs. */
         dst_pdpt[i] = f | PTE_P | PTE_W | PTE_U;
-        cow_walk_pd(table(entry_phys(e)), table(f));
+        cow_walk_pd(as, va_base + ((u64)i << 30),
+                    table(entry_phys(e)), table(f));
     }
 }
 
@@ -453,7 +499,7 @@ void as_cow_clone(struct address_space *dst, struct address_space *src) {
             return;
         }
         d[i] = f | PTE_P | PTE_W | PTE_U;
-        cow_walk_pdpt(table(entry_phys(e)), table(f));
+        cow_walk_pdpt(src, ((u64)i << 39), table(entry_phys(e)), table(f));
     }
 
     /* The demotion above rewrote the SOURCE page tables W->RO in place. If the
@@ -839,6 +885,46 @@ u64 as_mmap_fixed_h(u64 handle, u64 addr, u64 len, u32 prot) {
     return addr;
 }
 
+/* File-backed mmap reservation (VMA_FILE). Pages fault in via as_file_page_fill.
+ * shared!=0 => MAP_SHARED (fork keeps W). Returns start VA or 0. */
+u64 as_mmap_file_h(u64 handle, u64 len, u32 prot, u32 shared,
+                   u32 fs_kind, u32 ino, u64 file_off) {
+    struct address_space *as = as_of(handle);
+    u64 hint;
+    if (as == 0 || len == 0 || (len & 0xFFF) != 0 || ino == 0) {
+        return 0;
+    }
+    if ((file_off & 0xFFF) != 0) {
+        return 0;
+    }
+    hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
+    if (hint + len < hint || hint + len > MMAP_LIMIT) {
+        return 0;
+    }
+    if (as->nvma >= MAX_VMA) {
+        return 0;
+    }
+    {
+        u32 i;
+        for (i = 0; i < as->nvma; i++) {
+            if (hint < as->vmas[i].end && as->vmas[i].start < hint + len) {
+                return 0;
+            }
+        }
+    }
+    as->vmas[as->nvma].start = hint;
+    as->vmas[as->nvma].end = hint + len;
+    as->vmas[as->nvma].prot = prot | PROT_READ;
+    as->vmas[as->nvma].kind = VMA_FILE;
+    as->vmas[as->nvma].shared = shared != 0 ? 1 : 0;
+    as->vmas[as->nvma].fs_kind = fs_kind;
+    as->vmas[as->nvma].ino = ino;
+    as->vmas[as->nvma].file_off = file_off;
+    as->nvma++;
+    as->mmap_next = hint + len;
+    return hint;
+}
+
 /* Tear down present leaf PTEs over [va, va+len) and release frame ownership.
  * Page-table frames themselves stay behind (empty tables are harmless and
  * reused by later demand faults). Shared COW frames drop one reference and
@@ -908,6 +994,9 @@ int as_munmap_h(u64 handle, u64 uva, u64 len) {
         }
         as->nvma--;
     } else if (start == v->start) {
+        if (v->kind == VMA_FILE) {
+            v->file_off += (end - start);
+        }
         v->start = end;
     } else if (end == v->end) {
         v->end = start;
@@ -923,7 +1012,15 @@ int as_munmap_h(u64 handle, u64 uva, u64 len) {
         tail.start = end;
         tail.end = old_end;
         tail.prot = prot;
-        tail.kind = VMA_ANON;
+        tail.kind = v->kind;
+        tail.shared = v->shared;
+        tail.fs_kind = v->fs_kind;
+        tail.ino = v->ino;
+        if (v->kind == VMA_FILE) {
+            tail.file_off = v->file_off + (end - v->start);
+        } else {
+            tail.file_off = 0;
+        }
         as->vmas[as->nvma] = tail;
         as->nvma++;
     }

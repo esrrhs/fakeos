@@ -540,6 +540,13 @@ u32 fs_file_is_dir(u32 fh) {
     return inodes[opens[fh].ino].type == INO_DIR;
 }
 
+u32 fs_file_ino(u32 fh) {
+    if (fh >= MAX_OPEN_FILES || !opens[fh].used) {
+        return 0;
+    }
+    return opens[fh].ino;
+}
+
 /* Extra reference from a fork-inherited descriptor. The permanent console
  * slot is shared implicitly. */
 void fs_file_retain(u32 fh) {

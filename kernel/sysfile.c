@@ -50,6 +50,17 @@ extern u64 tty_jobctl_write_wait(void);
 extern u32 tty_input_pending(void);
 extern u64 sched_tick_count(void);
 extern void sched_yield(void);
+extern void sched_sleep(u64 chan);
+extern void sched_wakeup(u64 chan);
+extern u32 pipe_can_read(u32 fh);
+extern u32 pipe_can_write(u32 fh);
+
+/* Wait channel for select/poll; woken by tty/pipe/sock readiness. */
+static u32 select_wait_token;
+
+void select_kick(void) {
+    sched_wakeup((u64)&select_wait_token);
+}
 extern u32 sched_should_eintr(void);
 extern void sched_check_signals(void);
 extern u32 sock_can_read(u32 fh);
@@ -689,23 +700,23 @@ static u32 fd_ready_read(u32 fh) {
     if (sock_fh_is(fh)) {
         return sock_can_read(fh);
     }
-    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
+    if (pipe_fh_is(fh)) {
+        return pipe_can_read(fh);
+    }
+    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return tty_input_pending();
     }
-    if (pipe_fh_is(fh)) {
-        return 1;
-    }
-    return 0;
+    return 1; /* regular files readable */
 }
 
 static u32 fd_ready_write(u32 fh) {
     if (sock_fh_is(fh)) {
         return sock_can_write(fh);
     }
-    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
-        return 1;
-    }
     if (pipe_fh_is(fh)) {
+        return pipe_can_write(fh);
+    }
+    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return 1;
     }
     return 1; /* regular files */
@@ -802,38 +813,13 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
             if (fh == FD_BAD) {
                 continue;
             }
-            if (want_r) {
-                u32 ready = 0;
-                if (sock_fh_is(fh)) {
-                    ready = sock_can_read(fh);
-                } else if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh)
-                           && fs.fs_file_is_console(fh)) {
-                    ready = tty_input_pending();
-                } else if (pipe_fh_is(fh)) {
-                    /* Conservative: report readable; pipe_read still blocks. */
-                    ready = 1;
-                }
-                if (ready) {
-                    out_r |= bit;
-                    this_ready = 1;
-                }
+            if (want_r && fd_ready_read(fh)) {
+                out_r |= bit;
+                this_ready = 1;
             }
-            if (want_w) {
-                u32 ready = 0;
-                if (sock_fh_is(fh)) {
-                    ready = sock_can_write(fh);
-                } else if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh)
-                           && fs.fs_file_is_console(fh)) {
-                    ready = 1;
-                } else if (pipe_fh_is(fh)) {
-                    ready = 1;
-                } else {
-                    ready = 1; /* files */
-                }
-                if (ready) {
-                    out_w |= bit;
-                    this_ready = 1;
-                }
+            if (want_w && fd_ready_write(fh)) {
+                out_w |= bit;
+                this_ready = 1;
             }
             if (this_ready) {
                 nready++;
@@ -852,7 +838,13 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
         if (sched_should_eintr()) {
             return EINTR_SEL;
         }
-        sched_yield();
+        /* Infinite block: channel-sleep. Finite timeout: yield so deadline
+         * can be observed without a timer->select ISR coupling. */
+        if (timeout_u == 0) {
+            sched_sleep((u64)&select_wait_token);
+        } else {
+            sched_yield();
+        }
     }
 
     if (readfds_u != 0) {
@@ -942,6 +934,10 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
         if (sched_should_eintr()) {
             return EINTR_SEL;
         }
-        sched_yield();
+        if ((i64)timeout_ms < 0) {
+            sched_sleep((u64)&select_wait_token);
+        } else {
+            sched_yield();
+        }
     }
 }

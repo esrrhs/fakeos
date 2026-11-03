@@ -1213,6 +1213,45 @@ u32 ext2_file_is_dir(u32 fh) {
     return ((opens[s].mode & EXT2_S_IFMT) == EXT2_S_IFDIR) ? 1 : 0;
 }
 
+u32 ext2_fh_ino(u32 fh) {
+    u32 s;
+    if (!ext2_fh_is(fh)) return 0;
+    s = fh_slot(fh);
+    if (s >= MAX_OPEN || !opens[s].used) return 0;
+    return opens[s].ino;
+}
+
+/* Read up to `len` bytes from inode at absolute file offset into kbuf.
+ * Does not touch open-file offsets. Returns bytes copied (0 = EOF). */
+u64 ext2_ino_pread(u32 ino, u64 off, char *kbuf, u64 len) {
+    u8 raw[128];
+    u64 done = 0;
+    u64 size;
+    if (ino == 0 || kbuf == 0 || sb.block_size == 0) return (u64)(-1);
+    if (!inode_read(ino, raw)) return (u64)(-1);
+    size = rd32(raw + I_SIZE_LO);
+    while (done < len && off + done < size) {
+        u64 pos = off + done;
+        u32 fblk = (u32)(pos / sb.block_size);
+        u32 boff = (u32)(pos % sb.block_size);
+        u32 phys = inode_get_block(raw, fblk);
+        u64 can = sb.block_size - boff;
+        u64 remain = size - pos;
+        u64 take = len - done;
+        u64 k;
+        if (can > remain) can = remain;
+        if (take > can) take = can;
+        if (phys == 0) {
+            for (k = 0; k < take; k++) kbuf[done + k] = 0;
+        } else {
+            if (!bread(phys, blk_buf)) return done != 0 ? done : (u64)(-1);
+            for (k = 0; k < take; k++) kbuf[done + k] = (char)blk_buf[boff + k];
+        }
+        done += take;
+    }
+    return done;
+}
+
 u64 ext2_lseek(u32 fh, u64 off, u32 whence) {
     u32 s;
     u64 neu;

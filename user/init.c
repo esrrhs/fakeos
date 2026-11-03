@@ -156,12 +156,13 @@ static void heap_test(void) {
 
 static void mmap_test(void) {
     unsigned char *p;
+    long fd;
     if (u_mmap(0, 0, 3, 0x22, -1, 0) != -1) {
         puts("[U][FAIL] mmap len=0 should fail");
         return;
     }
     if (u_mmap(0, 4096, 3, 0x01, -1, 0) != -1) {
-        puts("[U][FAIL] non-anon mmap should fail");
+        puts("[U][FAIL] anon MAP_SHARED should fail");
         return;
     }
     p = (unsigned char *)u_mmap(0, 8192, 3, 0x22, -1, 0);
@@ -178,6 +179,27 @@ static void mmap_test(void) {
         return;
     }
     puts("[U][PASS] anonymous mmap");
+
+    /* VMA_FILE demand paging: map /etc/hosts MAP_PRIVATE and touch. */
+    fd = u_open("/etc/hosts", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /etc/hosts for file mmap");
+        return;
+    }
+    p = (unsigned char *)u_mmap(0, 4096, 1, 0x02, fd, 0); /* PROT_READ|MAP_PRIVATE */
+    if (p == (unsigned char *)-1 || p == 0) {
+        puts("[U][FAIL] file MAP_PRIVATE mmap");
+        u_close(fd);
+        return;
+    }
+    /* First touch faults in file content; hosts starts with a comment or letter. */
+    if (p[0] == 0 && p[1] == 0 && p[2] == 0) {
+        puts("[U][FAIL] file mmap demand page empty");
+        u_close(fd);
+        return;
+    }
+    puts("[U][PASS] VMA_FILE demand mmap");
+    u_close(fd);
 }
 
 /* Fixed dirent layout emitted by the kernel: 48-byte records, name at +19. */

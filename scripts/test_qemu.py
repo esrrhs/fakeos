@@ -355,6 +355,7 @@ def main():
         "[U][PASS] vfs file write/read/seek",
         "[U][PASS] brk heap malloc",
         "[U][PASS] anonymous mmap",
+        "[U][PASS] VMA_FILE demand mmap",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
         "[U][PASS] execve rejects non-ELF file",
@@ -382,7 +383,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: AHCI I/O + poll/select/ioctl + shell session/fg online!",
+        "[SUCCESS] fakeos: modern virtio-blk + VMA_FILE mmap + select-sleep + termios online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

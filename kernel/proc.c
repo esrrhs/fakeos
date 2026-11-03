@@ -299,8 +299,8 @@ u64 sys_getsid(u64 pid) {
 }
 
 
-/* ioctl(2) TTY stubs: TIOCGPGRP / TIOCSPGRP / TCGETS / TCSETS.
- * Single console; fd is accepted but ignored for TTY ioctls. */
+/* ioctl(2) TTY: TIOCGPGRP / TIOCSPGRP / TCGETS / TCSETS.
+ * TCGETS/TCSETS read/write real termios (ICANON/ECHO/ISIG/c_cc). */
 u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     u64 as = sched_current_as_h();
     enum {
@@ -336,22 +336,30 @@ u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
         return 0;
     }
     if (req == TCGETS_R) {
-        /* termios is 36+ bytes on Linux x86_64; zero a 64-byte window. */
+        u8 tmp[64];
         u32 i;
+        extern void tty_termios_get(u8 *dst, u32 n);
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 64)) {
+            return (u64)(-1);
+        }
+        tty_termios_get(tmp, 64);
+        for (i = 0; i < 64; i++) {
+            ((volatile u8 *)arg)[i] = tmp[i];
+        }
+        return 0;
+    }
+    if (req == TCSETS_R) {
+        u8 tmp[64];
+        u32 i;
+        extern void tty_termios_set(const u8 *src, u32 n);
         if (as == 0 || !mem.as_user_range_ok(as, arg, 64)) {
             return (u64)(-1);
         }
         for (i = 0; i < 64; i++) {
-            ((volatile u8 *)arg)[i] = 0;
+            tmp[i] = ((volatile u8 *)arg)[i];
         }
-        /* c_lflag ICANON|ECHO|ISIG-ish nibbles left 0; shell uses raw TTY path. */
+        tty_termios_set(tmp, 64);
         return 0;
-    }
-    if (req == TCSETS_R) {
-        if (as == 0 || !mem.as_user_range_ok(as, arg, 64)) {
-            return (u64)(-1);
-        }
-        return 0; /* accept and ignore */
     }
     return ENOTTY_NEG;
 }

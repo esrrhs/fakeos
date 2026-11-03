@@ -182,15 +182,15 @@ flowchart TD
 - [x] **进程组 / 会话**：`setpgid`/`getpgid`/`setsid`/`getsid`；`kill(0/-pgid)` 广播；TTY Ctrl-C/Z 投递到前台 **pgid**；shell 管道共用一组以便整组停止；`wait4(WCONTINUED)`。
 - [x] **Demand paging 抛光**：匿名读缺页共享全局 zero 页（只读映射），写时再私有分配/COW；卸载时钉住 zero 页。
 - [x] **更丰富套接字**：`shutdown`/`getsockname`/`getpeername`（TCP 半关闭；UDP mute）。
-- [x] **AHCI / modern virtio 笔记**：`docs/blk-modern-path.md`；启动时 PCI `01.06` AHCI 探测日志（仍无驱动；默认 legacy virtio-blk/ATA）。
+- [x] **AHCI / modern virtio 笔记**：`docs/blk-modern-path.md`；启动时 PCI `01.06` AHCI 探测日志；默认 legacy virtio-blk/ATA。
 - [x] **tcsetpgrp / tcgetpgrp + SIGTTOU/SIGTTIN**：自定义 nr 501/502（`u_tcsetpgrp`/`u_tcgetpgrp`）；后台读/写控制台与 `tcsetpgrp` 投递停止信号；shell 用 `tcsetpgrp` 切前台。
-- [x] **setsockopt / getsockopt + select stub**：`SO_REUSEADDR`/`SO_TYPE`/`SO_ERROR`；`select`（nfds≤64）对 socket/console 就绪轮询。
-- [x] **AHCI/modern virtio 探测加深**：`pci_bar(n)`、AHCI ABAR+CAP/VS 窥视、virtio modern cap 日志（仍无 DMA 驱动）。
+- [x] **setsockopt / getsockopt + select**：`SO_REUSEADDR`/`SO_TYPE`/`SO_ERROR`；`select`/`poll`（nfds≤64）。
+- [x] **AHCI/modern virtio 探测加深**：`pci_bar(n)`/`pci_bar64`、AHCI ABAR+CAP/VS、virtio modern cap 映射、`pci_msi_enable`。
 - [x] **AHCI 单端口 DMA**：`drivers/ahci.c`（IDENTIFY / READ·WRITE DMA EXT / FLUSH，轮询 CI）；`blk` 优先 virtio→AHCI→ATA；`make qemu-ahci`。
-- [x] **poll(2) + 可中断 select**：`poll`（nr 7，nfds≤64）；`select` 在阻塞循环中检查 `sched_should_eintr`。
-- [x] **ioctl TTY stubs**：nr 16，`TIOCGPGRP`/`TIOCSPGRP`/`TCGETS`/`TCSETS`（接受并忽略 termios）。
+- [x] **poll(2) + select channel-sleep**：阻塞时 `sched_sleep` 在 select 通道上；tty/pipe/sock `select_kick` 唤醒；可中断 EINTR。
+- [x] **ioctl TTY termios**：nr 16，`TIOCGPGRP`/`TIOCSPGRP`/`TCGETS`/`TCSETS`；真实 ICANON/ECHO/ISIG/ICRNL + `c_cc`；非 ICANON 走 raw 读。
 - [x] **shell session-leader / fg**：`setsid` + 本 pgid 前台（不再清成 0）；回收 TTY 走 ioctl/tcsetpgrp。
-- [x] **mmap 文件 MAP_PRIVATE（eager）**：非匿名 `MAP_PRIVATE` 经 `as_copy_in_h` 预填；无 `VMA_FILE`/MAP_SHARED。
+- [x] **VMA_FILE 按需分页 + MAP_SHARED**：文件 `mmap` 建 `VMA_FILE`，缺页时从 ramfs/Ext2 inode 填充；`MAP_SHARED` 跨 fork 保写（尚无写回磁盘）；`make qemu-modern` 试现代 virtio-blk。
 
 
 

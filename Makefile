@@ -57,6 +57,9 @@ QEMUFLAGS := -m 128M -serial stdio
 DISK_IMG  := $(BUILD_DIR)/disk.img
 # Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
 QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
+# Modern VirtIO (no disable-modern): exercises MMIO common/notify/ISR/device caps.
+QEMU_DISK_MODERN := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none -device virtio-blk-pci,disable-legacy=on,drive=disk0
+QEMU_NET_MODERN  := -netdev user,id=net0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-pci,disable-legacy=on,netdev=net0
 # AHCI (SATA) path for drivers/ahci.c bring-up (no virtio-blk).
 QEMU_AHCI := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none -device ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0
 # Legacy/transitional VirtIO-net + QEMU user-mode stack.
@@ -116,7 +119,7 @@ OBJS := \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
 
-.PHONY: all build run qemu qemu-gui qemu-disk qemu-ahci disk clean help
+.PHONY: all build run qemu qemu-gui qemu-disk qemu-ahci qemu-modern disk clean help
 
 all: build
 
@@ -433,6 +436,10 @@ qemu-disk: build $(DISK_IMG)
 qemu-ahci: build $(DISK_IMG)
 	@echo "Launching fakeos + AHCI disk (Ctrl-A X to exit)..."
 	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_AHCI) $(QEMU_NET) -display none -no-reboot
+
+qemu-modern: build $(DISK_IMG)
+	@echo "Launching fakeos + modern VirtIO-blk/net (Ctrl-A X to exit)..."
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK_MODERN) $(QEMU_NET_MODERN) -display none -no-reboot
 
 clean:
 	@echo "Cleaning build artifacts..."

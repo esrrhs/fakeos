@@ -16,16 +16,21 @@ extern void pci_enable_busmaster(u8 bus, u8 slot, u8 func);
 extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
 extern u16 pci_read16(u8 bus, u8 slot, u8 func, u8 offset);
 extern u32 pci_read32(u8 bus, u8 slot, u8 func, u8 offset);
+extern u32 pci_virtio_map_cap(u8 bus, u8 slot, u8 func, u8 cfg_type,
+                              u64 *mmio_phys, u32 *len, u32 *notify_mult);
+extern u32 pci_msi_enable(u8 bus, u8 slot, u8 func, u8 vector);
 extern void cpu_pause(void);
 extern void io_wait(void);
 
 /* ---------------------------------------------------------------------------
- * VirtIO-blk legacy (transitional) PCI driver - polling completion.
+ * VirtIO-blk PCI driver - legacy I/O BAR + modern MMIO, polling completion.
  *
- * Target: QEMU `-device virtio-blk-pci,disable-modern=on,drive=...` which
- * exposes the legacy I/O BAR0 register set. Completion is still polled (no
- * blk IRQ yet). The poll loop re-notifies and does port I/O so QEMU/TCG can
- * retire async host writes; a pure HHDM spin starves the device model.
+ * Default `make qemu-disk` still uses disable-modern=on (legacy BAR). When the
+ * device exposes modern vendor caps (common/notify/ISR/device) and no usable
+ * legacy I/O BAR0, or when `make qemu-modern` omits disable-modern, the modern
+ * path maps those MMIO windows and programs queue_desc/driver/device. MSI is
+ * optional (pci_msi_enable); completion remains polled. Port I/O / MMIO peeks
+ * in the poll loop keep QEMU/TCG retiring host AIO.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -51,7 +56,31 @@ enum {
     STATUS_ACKNOWLEDGE  = 1,
     STATUS_DRIVER       = 2,
     STATUS_DRIVER_OK    = 4,
+    STATUS_FEATURES_OK  = 8,
     STATUS_FAILED       = 128,
+
+    /* Modern common-cfg offsets (VirtIO 1.0 §4.1.4.3). */
+    M_DEV_FEAT_SEL      = 0,
+    M_DEV_FEAT          = 4,
+    M_DRV_FEAT_SEL      = 8,
+    M_DRV_FEAT          = 12,
+    M_MSIX_CONFIG       = 16,
+    M_NUM_QUEUES        = 18,
+    M_STATUS            = 20,
+    M_CFG_GEN           = 21,
+    M_Q_SEL             = 22,
+    M_Q_SIZE            = 24,
+    M_Q_MSIX            = 26,
+    M_Q_ENABLE          = 28,
+    M_Q_NOTIFY_OFF      = 30,
+    M_Q_DESC            = 32,
+    M_Q_DRIVER          = 40,
+    M_Q_DEVICE          = 48,
+
+    VIRTIO_PCI_CAP_COMMON_CFG = 1,
+    VIRTIO_PCI_CAP_NOTIFY_CFG = 2,
+    VIRTIO_PCI_CAP_ISR_CFG    = 3,
+    VIRTIO_PCI_CAP_DEVICE_CFG = 4,
 
     VRING_DESC_F_NEXT   = 1,
     VRING_DESC_F_WRITE  = 2,
@@ -85,7 +114,8 @@ struct vring_desc {
 
 struct virtio_blk {
     u32 present;
-    u16 iobase;
+    u32 modern;                /* 1 = MMIO modern path */
+    u16 iobase;                /* legacy I/O BAR */
     u16 queue_size;
     u64 capacity;              /* sectors */
     u64 arena_phys;            /* contiguous DMA pages */
@@ -95,6 +125,13 @@ struct virtio_blk {
     u64 req_phys;              /* request header + status (+ sector bounce) */
     u16 free_head;
     u16 last_used_idx;
+    /* Modern MMIO windows (phys, accessed via HHDM). */
+    u64 common_phys;
+    u64 notify_phys;
+    u64 isr_phys;
+    u64 devcfg_phys;
+    u32 notify_mult;
+    u16 notify_off;
 };
 
 static struct virtio_blk vb;
@@ -114,6 +151,47 @@ static volatile u32 *hhdm32(u64 phys) {
 
 static volatile u64 *hhdm64(u64 phys) {
     return (volatile u64 *)(HHDM_BASE + phys);
+}
+
+static volatile u8 *m8(u64 phys, u32 off) {
+    return hhdm8(phys + (u64)off);
+}
+static volatile u16 *m16(u64 phys, u32 off) {
+    return hhdm16(phys + (u64)off);
+}
+static volatile u32 *m32(u64 phys, u32 off) {
+    return hhdm32(phys + (u64)off);
+}
+static volatile u64 *m64(u64 phys, u32 off) {
+    return hhdm64(phys + (u64)off);
+}
+
+static void status_write(u8 v) {
+    if (vb.modern) {
+        *m8(vb.common_phys, M_STATUS) = v;
+    } else {
+        arch.outb((u16)(vb.iobase + REG_STATUS), v);
+    }
+}
+static u8 status_read(void) {
+    if (vb.modern) {
+        return *m8(vb.common_phys, M_STATUS);
+    }
+    return arch.inb((u16)(vb.iobase + REG_STATUS));
+}
+static u8 isr_read(void) {
+    if (vb.modern) {
+        return *m8(vb.isr_phys, 0);
+    }
+    return arch.inb((u16)(vb.iobase + REG_ISR));
+}
+static void queue_notify(void) {
+    if (vb.modern) {
+        u32 off = (u32)vb.notify_off * vb.notify_mult;
+        *m16(vb.notify_phys, off) = 0; /* queue index 0 */
+    } else {
+        arch.outw((u16)(vb.iobase + REG_QUEUE_NOTIFY), 0);
+    }
 }
 
 static void iow8(u16 off, u8 v) {
@@ -163,22 +241,32 @@ static u32 setup_queue(void) {
     u16 i;
     u16 qsz;
 
-    iow16(REG_QUEUE_SEL, 0);
-    /* Legacy QueueNum is read-only; never write it (QEMU logs
-     * virtio_ioport_write unexpected address 0xc and ignores the store).
-     * Use the device size as-is. Cap only by refusing oversized rings. */
-    qsz = ior16(REG_QUEUE_NUM);
-    if (qsz == 0) {
-        kprintf("[VIRTIO] Queue Num is 0\n");
-        return 0;
-    }
-    if (qsz > QUEUE_MAX) {
-        kprintf("[VIRTIO] Queue Num %u exceeds driver max %u\n",
-                (u64)qsz, (u64)QUEUE_MAX);
-        return 0;
+    if (vb.modern) {
+        *m16(vb.common_phys, M_Q_SEL) = 0;
+        qsz = *m16(vb.common_phys, M_Q_SIZE);
+        if (qsz == 0 || qsz > QUEUE_MAX) {
+            /* Device offered 0 or huge: pick a sane size and program it. */
+            qsz = 256;
+            *m16(vb.common_phys, M_Q_SIZE) = qsz;
+        }
+    } else {
+        iow16(REG_QUEUE_SEL, 0);
+        /* Legacy QueueNum is read-only; never write it (QEMU logs
+         * virtio_ioport_write unexpected address 0xc and ignores the store).
+         * Use the device size as-is. Cap only by refusing oversized rings. */
+        qsz = ior16(REG_QUEUE_NUM);
+        if (qsz == 0) {
+            kprintf("[VIRTIO] Queue Num is 0\n");
+            return 0;
+        }
+        if (qsz > QUEUE_MAX) {
+            kprintf("[VIRTIO] Queue Num %u exceeds driver max %u\n",
+                    (u64)qsz, (u64)QUEUE_MAX);
+            return 0;
+        }
     }
     vb.queue_size = qsz;
-    kprintf("[VIRTIO] queue0 size=%u\n", (u64)qsz);
+    kprintf("[VIRTIO] queue0 size=%u modern=%u\n", (u64)qsz, (u64)vb.modern);
 
     desc_sz = (u64)qsz * 16;
     /* flags + idx + ring[qsz] + used_event */
@@ -216,8 +304,18 @@ static u32 setup_queue(void) {
     vb.free_head = 0;
     vb.last_used_idx = 0;
 
-    /* Tell the device the PFN (physical / 4096) of the queue. */
-    iow32(REG_QUEUE_PFN, (u32)(arena / 4096));
+    if (vb.modern) {
+        *m16(vb.common_phys, M_Q_SEL) = 0;
+        *m16(vb.common_phys, M_Q_SIZE) = qsz;
+        *m64(vb.common_phys, M_Q_DESC) = vb.desc_phys;
+        *m64(vb.common_phys, M_Q_DRIVER) = vb.avail_phys;
+        *m64(vb.common_phys, M_Q_DEVICE) = vb.used_phys;
+        vb.notify_off = *m16(vb.common_phys, M_Q_NOTIFY_OFF);
+        *m16(vb.common_phys, M_Q_ENABLE) = 1;
+    } else {
+        /* Tell the device the PFN (physical / 4096) of the queue. */
+        iow32(REG_QUEUE_PFN, (u32)(arena / 4096));
+    }
     return 1;
 }
 
@@ -298,11 +396,11 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
     avail_idx = *hhdm16(vb.avail_phys + 2);
     *hhdm16(vb.avail_phys + 4 + ((u64)(avail_idx % vb.queue_size)) * 2) = d0;
     /* Memory barrier substitute: a dummy ISR read forces ordering on x86. */
-    (void)ior8(REG_ISR);
+    (void)isr_read();
     *hhdm16(vb.avail_phys + 2) = (u16)(avail_idx + 1);
-    (void)ior8(REG_ISR);
+    (void)isr_read();
 
-    iow16(REG_QUEUE_NOTIFY, 0);
+    queue_notify();
 
     /* Poll the used ring; occasional port I/O yields to QEMU/TCG aio. */
     spins = 0;
@@ -323,7 +421,7 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
         }
     }
     vb.last_used_idx = used_idx;
-    (void)ior8(REG_ISR);               /* ack ISR */
+    (void)isr_read();               /* ack ISR */
 
     free_desc_chain(d0);
 
@@ -400,7 +498,7 @@ u32 virtio_blk_flush(void) {
     return 1;
 }
 
-static u32 try_init_at(u8 bus, u8 slot, u8 func) {
+static u32 try_init_legacy(u8 bus, u8 slot, u8 func) {
     u32 bar;
     u32 is_io;
     u32 lo;
@@ -408,27 +506,24 @@ static u32 try_init_at(u8 bus, u8 slot, u8 func) {
     u16 dev_id;
 
     if (!pci_bar0(bus, slot, func, &bar, &is_io) || !is_io || bar == 0) {
-        kprintf("[VIRTIO] blk at %u:%u.%u has no I/O BAR0 (need legacy/transitional)\n",
-                (u64)bus, (u64)slot, (u64)func);
         return 0;
     }
 
     pci_enable_busmaster(bus, slot, func);
+    vb.modern = 0;
     vb.iobase = (u16)bar;
     vb.present = 0;
 
-    /* Reset */
     iow8(REG_STATUS, 0);
     iow8(REG_STATUS, STATUS_ACKNOWLEDGE);
     iow8(REG_STATUS, (u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER));
 
-    /* Take no optional features for the first cut - vanilla read/write. */
     (void)ior32(REG_DEV_FEATURES);
     iow32(REG_DRV_FEATURES, 0);
 
     if (!setup_queue()) {
         iow8(REG_STATUS, STATUS_FAILED);
-        kprintf("[VIRTIO] blk queue setup failed\n");
+        kprintf("[VIRTIO] blk legacy queue setup failed\n");
         return 0;
     }
 
@@ -440,10 +535,105 @@ static u32 try_init_at(u8 bus, u8 slot, u8 func) {
     vb.present = 1;
 
     dev_id = pci_read16(bus, slot, func, 0x02);
-    kprintf("[VIRTIO] blk ready: pci %u:%u.%u io=0x%x id=0x%x capacity=%u sectors (%u KiB)\n",
+    kprintf("[VIRTIO] blk legacy ready: pci %u:%u.%u io=0x%x id=0x%x capacity=%u sectors (%u KiB)\n",
             (u64)bus, (u64)slot, (u64)func, (u64)vb.iobase, (u64)dev_id,
             vb.capacity, vb.capacity / 2);
     return 1;
+}
+
+static u32 try_init_modern(u8 bus, u8 slot, u8 func) {
+    u64 common = 0;
+    u64 notify = 0;
+    u64 isr = 0;
+    u64 devcfg = 0;
+    u32 clen = 0;
+    u32 nlen = 0;
+    u32 ilen = 0;
+    u32 dlen = 0;
+    u32 nmult = 0;
+    u32 lo;
+    u32 hi;
+    u16 dev_id;
+
+    if (!pci_virtio_map_cap(bus, slot, func, VIRTIO_PCI_CAP_COMMON_CFG,
+                            &common, &clen, 0)
+        || !pci_virtio_map_cap(bus, slot, func, VIRTIO_PCI_CAP_NOTIFY_CFG,
+                               &notify, &nlen, &nmult)
+        || !pci_virtio_map_cap(bus, slot, func, VIRTIO_PCI_CAP_ISR_CFG,
+                               &isr, &ilen, 0)
+        || !pci_virtio_map_cap(bus, slot, func, VIRTIO_PCI_CAP_DEVICE_CFG,
+                               &devcfg, &dlen, 0)) {
+        return 0;
+    }
+    if (common == 0 || notify == 0 || isr == 0 || devcfg == 0) {
+        return 0;
+    }
+
+    pci_enable_busmaster(bus, slot, func);
+    vb.modern = 1;
+    vb.iobase = 0;
+    vb.common_phys = common;
+    vb.notify_phys = notify;
+    vb.isr_phys = isr;
+    vb.devcfg_phys = devcfg;
+    vb.notify_mult = nmult != 0 ? nmult : 1;
+    vb.present = 0;
+
+    status_write(0);
+    status_write(STATUS_ACKNOWLEDGE);
+    status_write((u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER));
+
+    /* Feature select 0/1: accept nothing optional (vanilla R/W). */
+    *m32(vb.common_phys, M_DEV_FEAT_SEL) = 0;
+    (void)*m32(vb.common_phys, M_DEV_FEAT);
+    *m32(vb.common_phys, M_DRV_FEAT_SEL) = 0;
+    *m32(vb.common_phys, M_DRV_FEAT) = 0;
+    *m32(vb.common_phys, M_DEV_FEAT_SEL) = 1;
+    (void)*m32(vb.common_phys, M_DEV_FEAT);
+    *m32(vb.common_phys, M_DRV_FEAT_SEL) = 1;
+    *m32(vb.common_phys, M_DRV_FEAT) = 0;
+    status_write((u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK));
+    if ((status_read() & STATUS_FEATURES_OK) == 0) {
+        status_write(STATUS_FAILED);
+        kprintf("[VIRTIO] blk modern FEATURES_OK rejected\n");
+        return 0;
+    }
+
+    if (!setup_queue()) {
+        status_write(STATUS_FAILED);
+        kprintf("[VIRTIO] blk modern queue setup failed\n");
+        return 0;
+    }
+
+    lo = *m32(vb.devcfg_phys, 0);
+    hi = *m32(vb.devcfg_phys, 4);
+    vb.capacity = ((u64)hi << 32) | (u64)lo;
+
+    status_write((u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
+                      | STATUS_DRIVER_OK));
+    /* Best-effort MSI on vector 40 (same as virtio-net INTx); still polled. */
+    (void)pci_msi_enable(bus, slot, func, 40);
+    vb.present = 1;
+
+    dev_id = pci_read16(bus, slot, func, 0x02);
+    kprintf("[VIRTIO] blk modern ready: pci %u:%u.%u id=0x%x capacity=%u sectors (%u KiB) notify_mult=%u\n",
+            (u64)bus, (u64)slot, (u64)func, (u64)dev_id,
+            vb.capacity, vb.capacity / 2, (u64)vb.notify_mult);
+    (void)clen; (void)nlen; (void)ilen; (void)dlen;
+    return 1;
+}
+
+static u32 try_init_at(u8 bus, u8 slot, u8 func) {
+    /* Prefer legacy I/O BAR when present (disable-modern=on bring-up). */
+    if (try_init_legacy(bus, slot, func)) {
+        return 1;
+    }
+    if (try_init_modern(bus, slot, func)) {
+        return 1;
+    }
+    kprintf("[VIRTIO] blk at %u:%u.%u: neither legacy I/O nor modern caps usable\n",
+            (u64)bus, (u64)slot, (u64)func);
+    return 0;
 }
 
 void virtio_blk_init(void) {
@@ -452,12 +642,10 @@ void virtio_blk_init(void) {
     u8 func;
 
     vb.present = 0;
+    vb.modern = 0;
     vb.capacity = 0;
     vb.iobase = 0;
 
-    /* Prefer classic legacy device id, then any Red Hat vendor device with
-     * blk subsystem id (covers transitional 0x1001 and modern-range ids
-     * when modern is disabled and the legacy BAR is still exposed). */
     if (pci_find_device(VIRTIO_VENDOR, VIRTIO_DEV_BLK_LEGACY, &bus, &slot, &func)) {
         if (try_init_at(bus, slot, func)) {
             return;
@@ -468,5 +656,11 @@ void virtio_blk_init(void) {
             return;
         }
     }
-    kprintf("[VIRTIO] no legacy virtio-blk device\n");
+    /* Modern-only device ids: 0x1040 + virtio device id (blk = 2 -> 0x1042). */
+    if (pci_find_device(VIRTIO_VENDOR, 0x1042, &bus, &slot, &func)) {
+        if (try_init_modern(bus, slot, func)) {
+            return;
+        }
+    }
+    kprintf("[VIRTIO] no virtio-blk device\n");
 }

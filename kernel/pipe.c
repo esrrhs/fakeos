@@ -24,6 +24,7 @@ enum {
 
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
+extern void select_kick(void);
 
 struct pipe {
     u32 used;
@@ -150,6 +151,7 @@ u32 pipe_close(u32 fh) {
         /* Last writer gone: wake readers so they observe EOF. */
         if (p->nwriters == 0) {
             sched_wakeup((u64)p);
+        select_kick();
         }
     } else {
         if (p->nreaders > 0) {
@@ -157,6 +159,7 @@ u32 pipe_close(u32 fh) {
         }
         if (p->nreaders == 0) {
             sched_wakeup((u64)p);
+        select_kick();
         }
     }
     popens[s].used = 0;
@@ -165,6 +168,34 @@ u32 pipe_close(u32 fh) {
         p->used = 0;
     }
     return 1;
+}
+
+u32 pipe_can_read(u32 fh) {
+    u32 s;
+    u32 idx;
+    if (!pipe_fh_is(fh)) return 0;
+    s = pipe_slot(fh);
+    if (s >= MAX_POPENS) return 0;
+    if (!popens[s].used) return 0;
+    if (popens[s].writable) return 0;
+    idx = popens[s].pipe_idx;
+    if (pipes[idx].count > 0) return 1;
+    if (pipes[idx].nwriters == 0) return 1;
+    return 0;
+}
+
+u32 pipe_can_write(u32 fh) {
+    u32 s;
+    u32 idx;
+    if (!pipe_fh_is(fh)) return 0;
+    s = pipe_slot(fh);
+    if (s >= MAX_POPENS) return 0;
+    if (!popens[s].used) return 0;
+    if (!popens[s].writable) return 0;
+    idx = popens[s].pipe_idx;
+    if (pipes[idx].count < PIPE_SIZE) return 1;
+    if (pipes[idx].nreaders == 0) return 1;
+    return 0;
 }
 
 u64 pipe_read(u32 fh, char *kbuf, u64 len) {
@@ -201,6 +232,7 @@ u64 pipe_read(u32 fh, char *kbuf, u64 len) {
         }
         /* Data consumed: wake any blocked writers. */
         sched_wakeup((u64)p);
+        select_kick();
         if (done > 0) {
             return done;
         }
@@ -242,6 +274,7 @@ u64 pipe_write(u32 fh, const char *kbuf, u64 len) {
             done++;
         }
         sched_wakeup((u64)p);
+        select_kick();
     }
     return done;
 }

@@ -3,6 +3,7 @@ import drivers;
 import mem;
 import types;
 
+typedef types.uint8_t  u8;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
@@ -16,7 +17,9 @@ typedef types.uint64_t u64;
  * poll and sleep. Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
  * provide basic readline-style editing. ISIG: Ctrl-C/Ctrl-Z are intercepted
- * on input (UART IRQ + PS/2) even while the shell is blocked in wait4.
+ * on input (UART IRQ + PS/2) even while the shell is blocked in wait4 when
+ * termios c_lflag has ISIG. TCGETS/TCSETS expose ICANON/ECHO/ISIG/ICRNL +
+ * c_cc; clearing ICANON switches console read to raw byte mode.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -40,12 +43,109 @@ static u32 tty_in_count;
 extern u64 sched_current_as_h(void);
 extern void sched_sleep_cli(u64 chan);
 extern void sched_wakeup(u64 chan);
+extern void select_kick(void);
 extern void cpu_cli(void);
 extern void cpu_sti(void);
 
 static u32 tty_wait_token;
 static u32 tty_fg_pgid;         /* foreground process group for ISIG (0=none) */
 static u32 tty_got_intr;        /* Ctrl-C interrupted the current read */
+
+/* termios (Linux-ish): stored separately from the 64-byte user TCGETS blob. */
+enum {
+    TTY_ISIG   = 0x00000001,
+    TTY_ICANON = 0x00000002,
+    TTY_ECHO   = 0x00000008,
+    TTY_ICRNL  = 0x00000100,
+    TTY_OPOST  = 0x00000001,
+    TTY_ONLCR  = 0x00000004,
+    TTY_CS8    = 0x00000030,
+    TTY_CREAD  = 0x00000080,
+    TTY_VINTR  = 0,
+    TTY_VQUIT  = 1,
+    TTY_VERASE = 2,
+    TTY_VKILL  = 3,
+    TTY_VEOF   = 4,
+    TTY_VMIN   = 6,
+    TTY_VSUSP  = 10,
+    TTY_NCCS   = 20
+};
+static u32 tty_iflag = TTY_ICRNL;
+static u32 tty_oflag = TTY_OPOST | TTY_ONLCR;
+static u32 tty_cflag = TTY_CS8 | TTY_CREAD;
+static u32 tty_lflag = TTY_ISIG | TTY_ICANON | TTY_ECHO;
+static u8 tty_cc[TTY_NCCS];
+static u32 tty_termios_inited;
+
+static void tty_termios_ensure(void) {
+    u32 i;
+    if (tty_termios_inited) {
+        return;
+    }
+    for (i = 0; i < TTY_NCCS; i++) {
+        tty_cc[i] = 0;
+    }
+    tty_cc[TTY_VINTR] = 0x03;
+    tty_cc[TTY_VQUIT] = 0x1C;
+    tty_cc[TTY_VERASE] = 0x7F;
+    tty_cc[TTY_VKILL] = 0x15;
+    tty_cc[TTY_VEOF] = 0x04;
+    tty_cc[TTY_VMIN] = 1;
+    tty_cc[TTY_VSUSP] = 0x1A;
+    tty_termios_inited = 1;
+}
+
+void tty_termios_get(u8 *dst, u32 n) {
+    u32 i;
+    tty_termios_ensure();
+    for (i = 0; i < n; i++) {
+        dst[i] = 0;
+    }
+    if (n < 16) {
+        return;
+    }
+    dst[0] = (u8)(tty_iflag & 0xFF);
+    dst[1] = (u8)((tty_iflag >> 8) & 0xFF);
+    dst[2] = (u8)((tty_iflag >> 16) & 0xFF);
+    dst[3] = (u8)((tty_iflag >> 24) & 0xFF);
+    dst[4] = (u8)(tty_oflag & 0xFF);
+    dst[5] = (u8)((tty_oflag >> 8) & 0xFF);
+    dst[6] = (u8)((tty_oflag >> 16) & 0xFF);
+    dst[7] = (u8)((tty_oflag >> 24) & 0xFF);
+    dst[8] = (u8)(tty_cflag & 0xFF);
+    dst[9] = (u8)((tty_cflag >> 8) & 0xFF);
+    dst[10] = (u8)((tty_cflag >> 16) & 0xFF);
+    dst[11] = (u8)((tty_cflag >> 24) & 0xFF);
+    dst[12] = (u8)(tty_lflag & 0xFF);
+    dst[13] = (u8)((tty_lflag >> 8) & 0xFF);
+    dst[14] = (u8)((tty_lflag >> 16) & 0xFF);
+    dst[15] = (u8)((tty_lflag >> 24) & 0xFF);
+    if (n > 16) {
+        dst[16] = 0;
+    }
+    for (i = 0; i < TTY_NCCS && (17 + i) < n; i++) {
+        dst[17 + i] = tty_cc[i];
+    }
+}
+
+void tty_termios_set(const u8 *src, u32 n) {
+    u32 i;
+    tty_termios_ensure();
+    if (n < 16) {
+        return;
+    }
+    tty_iflag = (u32)src[0] | ((u32)src[1] << 8)
+              | ((u32)src[2] << 16) | ((u32)src[3] << 24);
+    tty_oflag = (u32)src[4] | ((u32)src[5] << 8)
+              | ((u32)src[6] << 16) | ((u32)src[7] << 24);
+    tty_cflag = (u32)src[8] | ((u32)src[9] << 8)
+              | ((u32)src[10] << 16) | ((u32)src[11] << 24);
+    tty_lflag = (u32)src[12] | ((u32)src[13] << 8)
+              | ((u32)src[14] << 16) | ((u32)src[15] << 24);
+    for (i = 0; i < TTY_NCCS && (17 + i) < n; i++) {
+        tty_cc[i] = src[17 + i];
+    }
+}
 
 /* Arrow-key history: completed lines recalled with CSI A/B (Up/Down). */
 enum { TTY_HIST_MAX = 32 };
@@ -178,13 +278,20 @@ static void tty_queue_byte(char c) {
 
 /* ISIG processing for UART + keyboard. Control chars never enter the line buf. */
 static void tty_ingest_byte(char c) {
-    if (c == 0x03) { /* Ctrl-C -> SIGINT */
-        drivers.uart_putc('^');
-        drivers.uart_putc('C');
-        drivers.uart_putc('\n');
-        drivers.vga_putc('^');
-        drivers.vga_putc('C');
-        drivers.vga_putc('\n');
+    u8 vintr;
+    u8 vsusp;
+    tty_termios_ensure();
+    vintr = tty_cc[TTY_VINTR] != 0 ? tty_cc[TTY_VINTR] : 0x03;
+    vsusp = tty_cc[TTY_VSUSP] != 0 ? tty_cc[TTY_VSUSP] : 0x1A;
+    if ((tty_lflag & TTY_ISIG) != 0 && (u8)c == vintr) {
+        if (tty_lflag & TTY_ECHO) {
+            drivers.uart_putc('^');
+            drivers.uart_putc('C');
+            drivers.uart_putc('\n');
+            drivers.vga_putc('^');
+            drivers.vga_putc('C');
+            drivers.vga_putc('\n');
+        }
         tty_editing = 0;
         tty_cursor = 0;
         tty_line_len = 0;
@@ -192,22 +299,31 @@ static void tty_ingest_byte(char c) {
         tty_got_intr = 1;
         tty_signal_fg(SIGINT_N);
         sched_wakeup((u64)&tty_wait_token);
+        select_kick();
         return;
     }
-    if (c == 0x1A) { /* Ctrl-Z -> SIGTSTP */
-        drivers.uart_putc('^');
-        drivers.uart_putc('Z');
-        drivers.uart_putc('\n');
-        drivers.vga_putc('^');
-        drivers.vga_putc('Z');
-        drivers.vga_putc('\n');
+    if ((tty_lflag & TTY_ISIG) != 0 && (u8)c == vsusp) {
+        if (tty_lflag & TTY_ECHO) {
+            drivers.uart_putc('^');
+            drivers.uart_putc('Z');
+            drivers.uart_putc('\n');
+            drivers.vga_putc('^');
+            drivers.vga_putc('Z');
+            drivers.vga_putc('\n');
+        }
         tty_signal_fg(SIGTSTP_N);
         sched_wakeup((u64)&tty_wait_token);
+        select_kick();
         return;
+    }
+    if ((tty_iflag & TTY_ICRNL) != 0 && c == '\r') {
+        c = '\n';
     }
     tty_queue_byte(c);
     sched_wakeup((u64)&tty_wait_token);
+    select_kick();
 }
+
 
 void tty_on_uart_byte(void) {
     /* Drain the UART IRQ ring through ISIG so Ctrl-C/Z work during wait4. */
@@ -276,6 +392,10 @@ static int tty_getc_block(void) {
 }
 
 static void tty_echo_ch(char c) {
+    tty_termios_ensure();
+    if ((tty_lflag & TTY_ECHO) == 0) {
+        return;
+    }
     drivers.uart_putc(c);
     drivers.vga_putc(c);
 }
@@ -537,6 +657,7 @@ u64 tty_console_read(u64 ubuf, u64 len) {
     u64 as = sched_current_as_h();
     u64 done = 0;
     u64 jc;
+    tty_termios_ensure();
     if (as == 0 || len == 0) {
         return (u64)(-1);
     }
@@ -548,6 +669,37 @@ u64 tty_console_read(u64 ubuf, u64 len) {
         return jc;
     }
     tty_got_intr = 0;
+
+    if ((tty_lflag & TTY_ICANON) == 0) {
+        while (done < len) {
+            int c;
+            if (tty_got_intr || sched_should_eintr()) {
+                return done != 0 ? done : EINTR_NEG;
+            }
+            c = tty_in_pop();
+            if (c < 0) {
+                c = drivers.uart_getc_nonblock();
+            }
+            if (c < 0) {
+                if (done > 0 && tty_cc[TTY_VMIN] == 0) {
+                    break;
+                }
+                cpu_sti();
+                cpu_cli();
+                sched_sleep_cli((u64)&tty_wait_token);
+                cpu_sti();
+                sched_check_signals();
+                continue;
+            }
+            ((volatile char *)ubuf)[done] = (char)c;
+            done++;
+            if (tty_cc[TTY_VMIN] <= 1) {
+                break;
+            }
+        }
+        return done;
+    }
+
     while (done < len) {
         u64 n;
         u64 i;

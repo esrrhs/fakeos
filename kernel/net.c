@@ -16,6 +16,7 @@ extern u32 virtio_net_rx(void *frame, u32 maxlen);
 extern void sched_yield(void);
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
+extern void select_kick(void);
 extern u64 sched_tick_count(void);
 extern u64 sched_current_as_h(void);
 extern u32 sched_fd_alloc(void);
@@ -460,7 +461,7 @@ u32 sock_close(u32 fh) {
     sk->rx_tail = 0;
     sk->s_count = 0;
     sk->tcp_state = TCPS_CLOSED;
-    sched_wakeup((u64)sk);
+    sched_wakeup((u64)sk); select_kick();
     return 1;
 }
 
@@ -551,7 +552,7 @@ static void sock_enqueue(struct sock *sk, u32 src_ip, u16 src_port,
         sk->rx_tail = 0;
     }
     sk->rx_count++;
-    sched_wakeup((u64)sk);
+    sched_wakeup((u64)sk); select_kick();
 }
 
 /* Parse DHCP options; fill offer_* globals. msgtype 2=OFFER, 5=ACK. */
@@ -939,7 +940,7 @@ static void stream_push(struct sock *sk, const u8 *data, u16 plen) {
         sk->s_count++;
     }
     if (plen > 0) {
-        sched_wakeup((u64)sk);
+        sched_wakeup((u64)sk); select_kick();
     }
 }
 
@@ -967,7 +968,7 @@ static void accept_enqueue(struct sock *listener, u32 child_slot) {
         listener->accept_tail = 0;
     }
     listener->accept_count++;
-    sched_wakeup((u64)listener);
+    sched_wakeup((u64)listener); select_kick();
 }
 
 static u32 accept_dequeue(struct sock *listener) {
@@ -1101,11 +1102,11 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
             tcp_clear_rexmit(sk);
             tcp_tx_seg(sk->local_port, src_ip, sport,
                        sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
-            sched_wakeup((u64)sk);
+            sched_wakeup((u64)sk); select_kick();
         } else if (flags & TCPF_RST) {
             sk->tcp_state = TCPS_CLOSED;
             tcp_clear_rexmit(sk);
-            sched_wakeup((u64)sk);
+            sched_wakeup((u64)sk); select_kick();
         }
         return;
     }
@@ -1139,7 +1140,7 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
         sk->tcp_state = TCPS_CLOSED;
         sk->peer_fin = 1;
         tcp_clear_rexmit(sk);
-        sched_wakeup((u64)sk);
+        sched_wakeup((u64)sk); select_kick();
         return;
     }
 
@@ -1172,14 +1173,14 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
             } else if (sk->tcp_state == TCPS_FIN_WAIT) {
                 sk->tcp_state = TCPS_CLOSED;
             }
-            sched_wakeup((u64)sk);
+            sched_wakeup((u64)sk); select_kick();
         }
     }
 
     if ((flags & TCPF_ACK) && sk->tcp_state == TCPS_LAST_ACK) {
         if (ack == sk->snd_nxt) {
             sk->tcp_state = TCPS_CLOSED;
-            sched_wakeup((u64)sk);
+            sched_wakeup((u64)sk); select_kick();
         }
     }
 }

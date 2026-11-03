@@ -28,22 +28,63 @@ extern u32 sched_fd_get(u32 idx);
 extern u32 pipe_fh_is(u32 fh);
 extern u32 sock_fh_is(u32 fh);
 
+/* Fill one page for a VMA_FILE fault. Returns 1 on success (partial/EOF OK). */
+u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
+    char *dst = (char *)page_kva;
+    u32 i;
+    for (i = 0; i < 4096; i++) {
+        dst[i] = 0;
+    }
+    if (fs_kind == 1) {
+        /* Ext2 */
+        u64 n = fs.ext2_ino_pread(ino, file_off, dst, 4096);
+        if ((i64)n < 0) {
+            return 0;
+        }
+        return 1;
+    }
+    /* Ramfs: direct inode data window. */
+    {
+        u64 sz = fs.fs_ino_size(ino);
+        u64 src = fs.fs_ino_data(ino);
+        u64 n;
+        u64 k;
+        if (src == 0 && sz != 0) {
+            return 0;
+        }
+        if (file_off >= sz) {
+            return 1; /* past EOF: leave zeros */
+        }
+        n = sz - file_off;
+        if (n > 4096) {
+            n = 4096;
+        }
+        for (k = 0; k < n; k++) {
+            dst[k] = ((const char *)src)[file_off + k];
+        }
+        return 1;
+    }
+}
+
 /* void *mmap(addr, len, prot, flags, fd, off):
- *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window (existing path)
- *  - MAP_PRIVATE + regular file fd: eager MAP_PRIVATE file fill via
- *    as_copy_in_h (coherent with current VMA model; no VMA_FILE yet).
- * off must be page-aligned for file maps; MAP_SHARED is rejected. */
+ *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window
+ *  - MAP_PRIVATE / MAP_SHARED + regular file: VMA_FILE demand paging
+ *    (MAP_SHARED shares frames across fork; no writeback to disk yet).
+ * off must be page-aligned for file maps. */
 u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     u64 va;
     u64 as;
     u32 anon;
+    u32 shared;
+    u32 priv;
     if (len == 0) {
         return (u64)(-1);
     }
-    if ((flags & MAP_SHARED) != 0) {
-        return (u64)(-1);
-    }
-    if ((flags & MAP_PRIVATE) == 0) {
+    shared = (flags & MAP_SHARED) != 0;
+    priv = (flags & MAP_PRIVATE) != 0;
+    if (shared == priv) {
+        /* Exactly one of SHARED/PRIVATE required (Linux allows neither as
+         * EINVAL; both is also invalid). */
         return (u64)(-1);
     }
     anon = (flags & MAP_ANONYMOUS) != 0;
@@ -53,6 +94,9 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     }
 
     if (anon) {
+        if (shared) {
+            return (u64)(-1); /* no anonymous MAP_SHARED / shm yet */
+        }
         if (off != 0) {
             return (u64)(-1);
         }
@@ -72,12 +116,12 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         return va == 0 ? (u64)(-1) : va;
     }
 
-    /* File-backed MAP_PRIVATE: eager read into anonymous pages. */
+    /* File-backed: true VMA_FILE demand paging. */
     {
         u32 fh;
-        u64 file_off = off;
-        u64 filled = 0;
-        char kbuf[4096];
+        u32 ino;
+        u32 fs_kind;
+        u64 alen;
         if ((off & 0xFFF) != 0) {
             return (u64)(-1);
         }
@@ -100,41 +144,22 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
             return (u64)(-1);
         }
-        va = mem.as_mmap_anon_h(as, len, (u32)prot);
-        if (va == 0) {
+        alen = (len + 0xFFF) & ~0xFFFULL;
+        if (alen == 0) {
             return (u64)(-1);
         }
         if (fs.ext2_fh_is(fh)) {
-            fs.ext2_lseek(fh, file_off, 0);
+            fs_kind = 1;
+            ino = fs.ext2_fh_ino(fh);
         } else {
-            fs.fs_lseek_h(fh, file_off, 0);
+            fs_kind = 0;
+            ino = fs.fs_file_ino(fh);
         }
-        while (filled < len) {
-            u64 want = len - filled;
-            u64 n;
-            u32 i;
-            if (want > 4096) {
-                want = 4096;
-            }
-            for (i = 0; i < 4096; i++) {
-                kbuf[i] = 0;
-            }
-            n = fs.ext2_fh_is(fh)
-                ? fs.ext2_read(fh, kbuf, want)
-                : fs.fs_read_h(fh, kbuf, want);
-            if ((i64)n <= 0) {
-                break; /* EOF or error: leave remaining demand-zero */
-            }
-            if (!mem.as_copy_in_h(as, va + filled, kbuf, n)) {
-                mem.as_munmap_h(as, va, len);
-                return (u64)(-1);
-            }
-            filled += n;
-            if (n < want) {
-                break;
-            }
+        if (ino == 0) {
+            return (u64)(-1);
         }
-        return va;
+        va = mem.as_mmap_file_h(as, alen, (u32)prot, shared, fs_kind, ino, off);
+        return va == 0 ? (u64)(-1) : va;
     }
 }
 
