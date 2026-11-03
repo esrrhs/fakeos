@@ -116,7 +116,7 @@ def decode_dumpbin(captured):
 def second_boot_checks(disk):
     """Boot the in-OS linked kernel and run a reduced shell session."""
     print("\n==> Phase 5b: second boot of the in-OS rebuilt kernel...")
-    vm = VM(REBUILT, extra_args=disk_args(disk))
+    vm = VM(REBUILT, extra_args=disk_args(disk) + net_args())
     boot = vm.wait_for("fakeos:~$", 30.0)
     session = ""
     for c in ["hello", "echo $?", "pid", "echo INPUT123", "cat /etc/motd",
@@ -136,6 +136,9 @@ def second_boot_checks(disk):
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
         "[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB",
         "m6-ext2-persistent-ok",
+        "[VNET] ready:",
+        "[NET] up: ip=10.0.2.15/24",
+        "[PASS] ICMP echo reply from gateway",
         "fakeos:~$",
         "hello from /bin/hello",
         "exited (code 42)",
@@ -166,6 +169,12 @@ def ensure_disk():
     return disk
 
 
+def net_args():
+    # Legacy VirtIO-net + QEMU user networking (guest 10.0.2.15, gw 10.0.2.2).
+    return ["-netdev", "user,id=net0",
+            "-device", "virtio-net-pci,disable-modern=on,netdev=net0"]
+
+
 def disk_args(disk):
     # Prefer IDE so tests exercise the ATA PIO backend; guest still probes
     # VirtIO first and falls through when no virtio-blk device is present.
@@ -175,7 +184,7 @@ def disk_args(disk):
 def main():
     print("==> Phase 1-6: boot stock kernel (+IDE disk) and run the interactive shell...")
     disk = ensure_disk()
-    vm = VM(KERNEL, extra_args=disk_args(disk))
+    vm = VM(KERNEL, extra_args=disk_args(disk) + net_args())
 
     # 1. Boot + kernel self-tests + init userspace tests -> first prompt.
     boot = vm.wait_for("fakeos:~$", 30.0)
@@ -340,7 +349,7 @@ def main():
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 33 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 35 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -397,10 +406,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 33 modules accounted for",
-         identical + mismatches == 33),
-        (f"all 33 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 33 and mismatches == 0),
+        ("all 35 modules accounted for",
+         identical + mismatches == 35),
+        (f"all 35 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 35 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

@@ -26,6 +26,8 @@ extern void uproc_selftest(void);
 extern void vfs_selftest(void);
 extern void rootfs_publish(void);
 extern void sched_yield(void);
+extern void net_init(void);
+extern void net_selftest(void);
 
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
@@ -40,7 +42,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (Milestone 6: Block device + Ext2 persistent /mnt)\n");
+    kprintf(" Welcome to fakeos! (Milestone 6/7: Ext2 /mnt + VirtIO-net ICMP)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -137,6 +139,10 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     if (fs.ext2_mount()) {
         fs.ext2_selftest();
     }
+
+    /* Milestone 7 scaffolding: VirtIO-net + ARP/IPv4/ICMP (QEMU user net). */
+    net_init();
+    net_selftest();
 
     // Kernel threads, round-robin preemptive scheduling and spinlocks; then
     // per-process address spaces with VMA demand paging and COW forks.

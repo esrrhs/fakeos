@@ -83,6 +83,7 @@ static const struct mod_entry modules[] = {
     { "drivers", "vga" },
     { "drivers", "pci" },
     { "drivers", "virtio_blk" },
+    { "drivers", "virtio_net" },
     { "drivers", "ata" },
     { "drivers", "blk" },
     { "kernel",  "kprintf" },
@@ -101,6 +102,7 @@ static const struct mod_entry modules[] = {
     { "kernel",  "sysproc" },
     { "kernel",  "proc" },
     { "kernel",  "pipe" },
+    { "kernel",  "net" },
     { "kernel",  "tty" },
     { "kernel",  "uproc" },
     { "kernel",  "rootfs" },
@@ -203,7 +205,7 @@ int main(void) {
     }
     puts("[kbuild] ping compile+run OK");
 
-    unsigned long nmod = 33;
+    unsigned long nmod = 35;
     unsigned long ok = 0;
     unsigned long diff = 0;
     char got_buf[READ_CAP];
@@ -318,7 +320,7 @@ int main(void) {
     /* Final link. execve passes at most 8 argv slots, so the
      * object list goes through an @response file:
      *   ldfake -o /tmp/fakeos-new @/tmp/ldfake.args
-     * boot.o leads (low-address multiboot entry); then the 33 C
+     * boot.o leads (low-address multiboot entry); then the 35 C
      * objects, the other 4 nasm objects, and the userblob + empty
      * m5-blob stub. */
     {

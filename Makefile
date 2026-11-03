@@ -48,6 +48,8 @@ QEMUFLAGS := -m 128M -serial stdio
 DISK_IMG  := $(BUILD_DIR)/disk.img
 # Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
 QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
+# Legacy/transitional VirtIO-net + QEMU user-mode stack (guest 10.0.2.15).
+QEMU_NET  := -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0
 
 # Target ELF files
 KERNEL_64  := $(BUILD_DIR)/fakeos64.elf
@@ -70,6 +72,7 @@ OBJS := \
 	$(BUILD_DIR)/vga.o \
 	$(BUILD_DIR)/pci.o \
 	$(BUILD_DIR)/virtio_blk.o \
+	$(BUILD_DIR)/virtio_net.o \
 	$(BUILD_DIR)/ata.o \
 	$(BUILD_DIR)/blk.o \
 	$(BUILD_DIR)/kprintf.o \
@@ -88,6 +91,7 @@ OBJS := \
 	$(BUILD_DIR)/sysproc.o \
 	$(BUILD_DIR)/proc.o \
 	$(BUILD_DIR)/pipe.o \
+	$(BUILD_DIR)/net.o \
 	$(BUILD_DIR)/tty.o \
 	$(BUILD_DIR)/uproc.o \
 	$(BUILD_DIR)/rootfs.o \
@@ -249,6 +253,11 @@ $(BUILD_DIR)/virtio_blk.o: drivers/virtio_blk.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/virtio_net.o: drivers/virtio_net.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/ata.o: drivers/ata.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -339,6 +348,11 @@ $(BUILD_DIR)/pipe.o: kernel/pipe.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/net.o: kernel/net.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/uproc.o: kernel/uproc.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -371,12 +385,12 @@ test: build
 # Run in QEMU (Headless terminal mode: standard I/O hooked to UART serial port)
 qemu run: build
 	@echo "Launching fakeos in QEMU (Press Ctrl-A then X to exit)..."
-	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) -display none -no-reboot
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_NET) -display none -no-reboot
 
 # Run in QEMU with graphical VGA window
 qemu-gui: build
 	@echo "Launching fakeos in QEMU graphical window..."
-	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS)
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_NET)
 
 # Minimal Ext2 disk image for VirtIO-blk persistence tests.
 disk: $(DISK_IMG)
@@ -388,7 +402,7 @@ $(DISK_IMG): tools/mkext2.py
 # Headless QEMU with a persistent Ext2 disk at /mnt
 qemu-disk: build $(DISK_IMG)
 	@echo "Launching fakeos + VirtIO-blk disk (Ctrl-A X to exit)..."
-	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK) -display none -no-reboot
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK) $(QEMU_NET) -display none -no-reboot
 
 clean:
 	@echo "Cleaning build artifacts..."
