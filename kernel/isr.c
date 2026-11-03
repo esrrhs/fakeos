@@ -167,11 +167,18 @@ void isr_dispatch(struct trap_frame *f) {
         return;
     }
 
-    /* Vector 40: VirtIO-net PCI INTx (level). Ack device then drain RX. */
+    /* Vector 40: VirtIO-net MSI/MSI-X or PCI INTx. Ack then drain RX. */
     if (v == 40) {
         if (drivers.virtio_net_irq()) {
             net_poll();
         }
+        arch.lapic_send_eoi();
+        return;
+    }
+
+    /* Vector 41: VirtIO-blk MSI/MSI-X or PCI INTx; wake request waiters. */
+    if (v == 41) {
+        (void)drivers.virtio_blk_irq();
         arch.lapic_send_eoi();
         return;
     }

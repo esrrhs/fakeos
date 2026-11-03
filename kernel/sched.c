@@ -101,6 +101,10 @@ static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
  * Initialization
  * ------------------------------------------------------------------------- */
 
+u32 sched_is_active(void) {
+    return active;
+}
+
 void sched_init(void) {
     u32 i;
     for (i = 0; i < MAX_THREADS; i++) {

@@ -19,8 +19,14 @@ extern u32 pci_read32(u8 bus, u8 slot, u8 func, u8 offset);
 extern u32 pci_virtio_map_cap(u8 bus, u8 slot, u8 func, u8 cfg_type,
                               u64 *mmio_phys, u32 *len, u32 *notify_mult);
 extern u32 pci_msi_enable(u8 bus, u8 slot, u8 func, u8 vector);
+extern u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector);
+extern u8 pci_read8(u8 bus, u8 slot, u8 func, u8 offset);
+extern void ioapic_route_irq_level(u32 irq, u32 vector);
 extern void cpu_pause(void);
 extern void io_wait(void);
+extern void sched_sleep(u64 chan);
+extern void sched_wakeup(u64 chan);
+extern u32 sched_is_active(void);
 
 /* ---------------------------------------------------------------------------
  * VirtIO-blk PCI driver - legacy I/O BAR + modern MMIO, polling completion.
@@ -28,9 +34,10 @@ extern void io_wait(void);
  * Default `make qemu-disk` still uses disable-modern=on (legacy BAR). When the
  * device exposes modern vendor caps (common/notify/ISR/device) and no usable
  * legacy I/O BAR0, or when `make qemu-modern` omits disable-modern, the modern
- * path maps those MMIO windows and programs queue_desc/driver/device. MSI is
- * optional (pci_msi_enable); completion remains polled. Port I/O / MMIO peeks
- * in the poll loop keep QEMU/TCG retiring host AIO.
+ * path maps those MMIO windows and programs queue_desc/driver/device. MSI-X
+ * (preferred) or MSI on vector 41 drives used-ring completion; the request
+ * path sleeps on a channel when the scheduler is live, with a polled fallback.
+ * Port I/O / MMIO peeks in the poll loop keep QEMU/TCG retiring host AIO.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -100,8 +107,14 @@ enum {
      * order 4 = 16 pages = 64 KiB: queue (~28 KiB at 1024 descs) + req/bounce. */
     ARENA_ORDER         = 4,
     ARENA_BYTES         = 65536,
-    POLL_SPINS_MAX      = 2000000
+    POLL_SPINS_MAX      = 2000000,
+    VBLK_IRQ_VECTOR     = 41,
+    PCI_INTERRUPT_LINE  = 0x3C,
+    VIRTIO_MSI_NO_VECTOR = 0xFFFF
 };
+
+/* Sleep channel for used-ring IRQ wakeup (ASCII "VBLK" in high bits). */
+static const u64 VBLK_WAIT_CHAN = 0x56424C4B00000001ULL;
 
 /* Virtqueue descriptor (16 bytes) - laid out manually as bytes to avoid any
  * compiler padding surprises under fakecc. */
@@ -115,6 +128,9 @@ struct vring_desc {
 struct virtio_blk {
     u32 present;
     u32 modern;                /* 1 = MMIO modern path */
+    u32 msi;                   /* 1 = MSI/MSI-X armed */
+    u32 irq_armed;
+    u8  pci_irq;
     u16 iobase;                /* legacy I/O BAR */
     u16 queue_size;
     u64 capacity;              /* sectors */
@@ -311,6 +327,10 @@ static u32 setup_queue(void) {
         *m64(vb.common_phys, M_Q_DRIVER) = vb.avail_phys;
         *m64(vb.common_phys, M_Q_DEVICE) = vb.used_phys;
         vb.notify_off = *m16(vb.common_phys, M_Q_NOTIFY_OFF);
+        if (vb.msi) {
+            *m16(vb.common_phys, M_Q_MSIX) = 0;
+            *m16(vb.common_phys, M_MSIX_CONFIG) = (u16)VIRTIO_MSI_NO_VECTOR;
+        }
         *m16(vb.common_phys, M_Q_ENABLE) = 1;
     } else {
         /* Tell the device the PFN (physical / 4096) of the queue. */
@@ -402,7 +422,8 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
 
     queue_notify();
 
-    /* Poll the used ring; occasional port I/O yields to QEMU/TCG aio. */
+    /* Wait for used-ring advance: IRQ sleep when armed + scheduler live,
+     * else spin with occasional port I/O so QEMU/TCG retires host AIO. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vb.used_phys + 2);
@@ -410,7 +431,9 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
             break;
         }
         spins++;
-        if ((spins & 255) == 0) {
+        if (vb.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(VBLK_WAIT_CHAN);
+        } else if ((spins & 255) == 0) {
             io_wait();
         }
         if (spins > POLL_SPINS_MAX) {
@@ -431,6 +454,25 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
         return 0;
     }
     return 1;
+}
+
+
+u32 virtio_blk_irq(void) {
+    if (!vb.present) {
+        return 0;
+    }
+    if (vb.msi) {
+        sched_wakeup(VBLK_WAIT_CHAN);
+        return 1;
+    }
+    {
+        u8 isr = isr_read();
+        if (isr == 0) {
+            return 0;
+        }
+        sched_wakeup(VBLK_WAIT_CHAN);
+        return 1;
+    }
 }
 
 u32 virtio_blk_present(void) {
@@ -498,6 +540,28 @@ u32 virtio_blk_flush(void) {
     return 1;
 }
 
+
+static void arm_blk_irq(u8 bus, u8 slot, u8 func) {
+    vb.msi = 0;
+    vb.irq_armed = 0;
+    vb.pci_irq = 0;
+    /* MSI first (config-space only). MSI-X needs a BAR inside boot HHDM. */
+    if (pci_msi_enable(bus, slot, func, VBLK_IRQ_VECTOR)
+        || pci_msix_enable_one(bus, slot, func, VBLK_IRQ_VECTOR)) {
+        vb.msi = 1;
+        vb.irq_armed = 1;
+        kprintf("[VIRTIO] blk MSI/MSI-X armed (vector %u)\n", (u64)VBLK_IRQ_VECTOR);
+        return;
+    }
+    vb.pci_irq = pci_read8(bus, slot, func, PCI_INTERRUPT_LINE);
+    if (vb.pci_irq != 0 && vb.pci_irq != 0xFF) {
+        ioapic_route_irq_level((u32)vb.pci_irq, VBLK_IRQ_VECTOR);
+        vb.irq_armed = 1;
+        kprintf("[VIRTIO] blk INTx armed (irq %u -> vector %u)\n",
+                (u64)vb.pci_irq, (u64)VBLK_IRQ_VECTOR);
+    }
+}
+
 static u32 try_init_legacy(u8 bus, u8 slot, u8 func) {
     u32 bar;
     u32 is_io;
@@ -532,6 +596,7 @@ static u32 try_init_legacy(u8 bus, u8 slot, u8 func) {
     vb.capacity = ((u64)hi << 32) | (u64)lo;
 
     iow8(REG_STATUS, (u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK));
+    arm_blk_irq(bus, slot, func);
     vb.present = 1;
 
     dev_id = pci_read16(bus, slot, func, 0x02);
@@ -599,6 +664,8 @@ static u32 try_init_modern(u8 bus, u8 slot, u8 func) {
         return 0;
     }
 
+    arm_blk_irq(bus, slot, func);
+
     if (!setup_queue()) {
         status_write(STATUS_FAILED);
         kprintf("[VIRTIO] blk modern queue setup failed\n");
@@ -611,14 +678,12 @@ static u32 try_init_modern(u8 bus, u8 slot, u8 func) {
 
     status_write((u8)(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
                       | STATUS_DRIVER_OK));
-    /* Best-effort MSI on vector 40 (same as virtio-net INTx); still polled. */
-    (void)pci_msi_enable(bus, slot, func, 40);
     vb.present = 1;
 
     dev_id = pci_read16(bus, slot, func, 0x02);
-    kprintf("[VIRTIO] blk modern ready: pci %u:%u.%u id=0x%x capacity=%u sectors (%u KiB) notify_mult=%u\n",
+    kprintf("[VIRTIO] blk modern ready: pci %u:%u.%u id=0x%x capacity=%u sectors (%u KiB) notify_mult=%u msi=%u\n",
             (u64)bus, (u64)slot, (u64)func, (u64)dev_id,
-            vb.capacity, vb.capacity / 2, (u64)vb.notify_mult);
+            vb.capacity, vb.capacity / 2, (u64)vb.notify_mult, (u64)vb.msi);
     (void)clen; (void)nlen; (void)ilen; (void)dlen;
     return 1;
 }
@@ -643,6 +708,9 @@ void virtio_blk_init(void) {
 
     vb.present = 0;
     vb.modern = 0;
+    vb.msi = 0;
+    vb.irq_armed = 0;
+    vb.pci_irq = 0;
     vb.capacity = 0;
     vb.iobase = 0;
 

@@ -266,6 +266,33 @@ void vmm_hhdm_extend(u64 root, u64 start_pa, u64 end_pa) {
     }
 }
 
+
+/* Map `len` bytes of physical MMIO into the HHDM window with PCD|PWT so PCI
+ * BAR pages outside the RAM direct-map (e.g. VirtIO modern caps, MSI-X
+ * tables in the PCI hole) become reachable as HHDM_BASE + phys. Idempotent
+ * for already-present leaves. Returns 1 on success. */
+u32 vmm_map_mmio(u64 phys, u64 len) {
+    u64 root = vmm_kernel_root();
+    u64 start = phys & ~0xFFFULL;
+    u64 end = (phys + len + 0xFFF) & ~0xFFFULL;
+    u64 cur;
+    u64 flags = VMM_PRESENT | VMM_WRITABLE | VMM_PWT | VMM_PCD | VMM_NX;
+    if (len == 0) {
+        return 0;
+    }
+    for (cur = start; cur < end; cur += PAGE_SIZE) {
+        u64 va = HHDM_BASE + cur;
+        /* Already mapped (RAM HHDM or prior MMIO): skip. */
+        if (vmm_translate(root, va) != 0) {
+            continue;
+        }
+        if (!vmm_map(root, va, cur, flags)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 u64 vmm_read_cr3(void) {
     return cr3_read();
 }

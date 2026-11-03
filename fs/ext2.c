@@ -1252,6 +1252,57 @@ u64 ext2_ino_pread(u32 ino, u64 off, char *kbuf, u64 len) {
     return done;
 }
 
+
+/* Write up to `len` bytes into inode at absolute file offset from kbuf.
+ * Grows the file when writing past EOF. Returns bytes written. */
+u64 ext2_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
+    u8 raw[128];
+    u64 done = 0;
+    u64 size;
+    if (ino == 0 || kbuf == 0 || sb.block_size == 0 || len == 0) return (u64)(-1);
+    if (!inode_read(ino, raw)) return (u64)(-1);
+    size = rd32(raw + I_SIZE_LO);
+    jl_begin();
+    while (done < len) {
+        u64 pos = off + done;
+        u32 fblk = (u32)(pos / sb.block_size);
+        u32 boff = (u32)(pos % sb.block_size);
+        u32 phys = inode_map(raw, fblk, 1);
+        u64 can = sb.block_size - boff;
+        u64 take = len - done;
+        u64 k;
+        if (phys == 0) {
+            jl_commit();
+            return done != 0 ? done : (u64)(-1);
+        }
+        if (take > can) take = can;
+        if (boff != 0 || take != sb.block_size) {
+            if (!bread(phys, blk_buf)) {
+                jl_commit();
+                return done != 0 ? done : (u64)(-1);
+            }
+        }
+        for (k = 0; k < take; k++) {
+            blk_buf[boff + k] = (u8)kbuf[done + k];
+        }
+        if (!bwrite(phys, blk_buf)) {
+            jl_commit();
+            return done != 0 ? done : (u64)(-1);
+        }
+        done += take;
+        if (pos + take > size) {
+            size = pos + take;
+            wr32(raw + I_SIZE_LO, (u32)size);
+        }
+    }
+    if (!inode_write(ino, raw)) {
+        jl_commit();
+        return done != 0 ? done : (u64)(-1);
+    }
+    jl_commit();
+    return done;
+}
+
 u64 ext2_lseek(u32 fh, u64 off, u32 whence) {
     u32 s;
     u64 neu;

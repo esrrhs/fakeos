@@ -40,6 +40,7 @@ enum {
     PTE_P      = 1,
     PTE_W      = 2,
     PTE_U      = 4,
+    PTE_D      = 0x40,           /* Dirty */
     PTE_NX     = 1u << 31,
     PT_ENTRIES = 512,
     MAX_VMA    = 64,
@@ -249,6 +250,9 @@ static struct vma *find_vma(struct address_space *as, u64 vaddr) {
     return 0;
 }
 
+static void unmap_present_pages(struct address_space *as, u64 va, u64 len,
+                                 struct vma *vma);
+
 static u64 leaf_perms(struct vma *vma) {
     u64 e = PTE_P | PTE_U;            /* Anon user pages */
     if (vma->prot & PROT_WRITE) {
@@ -269,6 +273,7 @@ static u64 leaf_perms(struct vma *vma) {
 extern void kprintf(const char *fmt, ...);
 /* Provided by kernel/sysproc.c: fill one page from a file inode. */
 extern u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva);
+extern u32 as_file_page_writeback(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva);
 
 static u32 ensure_zero_frame(void) {
     if (zero_frame != 0) {
@@ -568,7 +573,15 @@ static void release_pdpt(volatile u64 *pdpt, u64 pdpt_phys) {
 
 void as_destroy(struct address_space *as) {
     u32 i;
-    volatile u64 *p = table(as->pml4);
+    volatile u64 *p;
+    /* Flush MAP_SHARED dirty file pages before page tables go away. */
+    for (i = 0; i < as->nvma; i++) {
+        struct vma *v = &as->vmas[i];
+        if (v->kind == VMA_FILE && v->shared != 0) {
+            unmap_present_pages(as, v->start, v->end - v->start, v);
+        }
+    }
+    p = table(as->pml4);
     for (i = 0; i < 256; i++) {
         u64 e = p[i];
         if (!(e & PTE_P)) {
@@ -929,7 +942,8 @@ u64 as_mmap_file_h(u64 handle, u64 len, u32 prot, u32 shared,
  * Page-table frames themselves stay behind (empty tables are harmless and
  * reused by later demand faults). Shared COW frames drop one reference and
  * are returned to the buddy only when the last owner goes away. */
-static void unmap_present_pages(struct address_space *as, u64 va, u64 len) {
+static void unmap_present_pages(struct address_space *as, u64 va, u64 len,
+                                 struct vma *vma) {
     u64 off = 0;
     while (off < len) {
         u64 page_va = (va + off) & ~0xFFFULL;
@@ -938,6 +952,14 @@ static void unmap_present_pages(struct address_space *as, u64 va, u64 len) {
             u64 e = pt[pt_i(page_va)];
             if (e & PTE_P) {
                 u64 frame = entry_phys(e);
+                /* MAP_SHARED file: write dirty (or any W-mapped) pages back. */
+                if (vma != 0 && vma->kind == VMA_FILE && vma->shared != 0
+                    && (e & PTE_W) != 0
+                    && (e & PTE_D) != 0) {
+                    u64 foff = vma->file_off + (page_va - vma->start);
+                    (void)as_file_page_writeback(vma->fs_kind, vma->ino, foff,
+                                                 HHDM_BASE + frame);
+                }
                 pt[pt_i(page_va)] = 0;
                 invlpg_page(page_va);
                 if (frame < (u64)MAX_FRAMES_AS * PAGE_SIZE
@@ -985,7 +1007,7 @@ int as_munmap_h(u64 handle, u64 uva, u64 len) {
         return 0;                      /* not fully covered by one VMA */
     }
     v = &as->vmas[idx];
-    unmap_present_pages(as, start, end - start);
+    unmap_present_pages(as, start, end - start, v);
 
     if (start == v->start && end == v->end) {
         /* Whole VMA: drop the reservation, keeping the array compact. */

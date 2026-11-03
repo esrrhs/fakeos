@@ -794,6 +794,38 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
  * directly without an open file)
  * ------------------------------------------------------------------------- */
 
+
+/* Absolute-offset write into a writable (non-ro) file inode. Grows size. */
+u64 fs_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
+    struct inode *ip;
+    u64 need;
+    u64 i;
+    if (ino == 0 || ino >= MAX_INODES || kbuf == 0 || len == 0) {
+        return (u64)(-1);
+    }
+    ip = &inodes[ino];
+    if (ip->type != INO_FILE || ip->ro) {
+        return (u64)(-1);
+    }
+    need = off + len;
+    if (need < off || need > FILE_MAX) {
+        return (u64)(-1);
+    }
+    if (!ensure_cap(ip, need)) {
+        return (u64)(-1);
+    }
+    for (i = ip->size; i < off; i++) {
+        ip->buf[i] = 0;
+    }
+    for (i = 0; i < len; i++) {
+        ip->buf[off + i] = kbuf[i];
+    }
+    if (off + len > ip->size) {
+        ip->size = off + len;
+    }
+    return len;
+}
+
 u32 fs_ino_kind(u32 ino) {
     if (ino == 0 || ino >= MAX_INODES || inodes[ino].type == INO_FREE) {
         return INO_FREE;

@@ -29,6 +29,23 @@ extern u32 pipe_fh_is(u32 fh);
 extern u32 sock_fh_is(u32 fh);
 
 /* Fill one page for a VMA_FILE fault. Returns 1 on success (partial/EOF OK). */
+
+/* Write one dirty MAP_SHARED file page back to its inode. */
+u32 as_file_page_writeback(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
+    const char *src = (const char *)page_kva;
+    if (ino == 0 || src == 0) {
+        return 0;
+    }
+    if (fs_kind == 1) {
+        u64 n = fs.ext2_ino_pwrite(ino, file_off, src, 4096);
+        return (i64)n >= 0 ? 1 : 0;
+    }
+    {
+        u64 n = fs.fs_ino_pwrite(ino, file_off, src, 4096);
+        return (i64)n >= 0 ? 1 : 0;
+    }
+}
+
 u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
     char *dst = (char *)page_kva;
     u32 i;
@@ -69,7 +86,7 @@ u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
 /* void *mmap(addr, len, prot, flags, fd, off):
  *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window
  *  - MAP_PRIVATE / MAP_SHARED + regular file: VMA_FILE demand paging
- *    (MAP_SHARED shares frames across fork; no writeback to disk yet).
+ *    (MAP_SHARED shares frames across fork; dirty pages write back on munmap).
  * off must be page-aligned for file maps. */
 u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     u64 va;

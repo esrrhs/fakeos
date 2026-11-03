@@ -383,7 +383,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: modern virtio-blk + VMA_FILE mmap + select-sleep + termios online!",
+        "[SUCCESS] fakeos: modern virtio-net/blk + MSI-X + MAP_SHARED writeback online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
