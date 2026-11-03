@@ -181,7 +181,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: modern virtio-net/blk + MSI-X + MAP_SHARED writeback online!\n");
+    kprintf(" [SUCCESS] fakeos: CFS-lite + anon MAP_SHARED + AHCI IRQ online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
@@ -196,12 +196,12 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - 4-level VMM toolchain (map/translate/unmap, NX): OK\n");
     kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
-    kprintf("           - Kernel threads + RR scheduler + spinlocks: OK\n");
+    kprintf("           - Kernel threads + CFS-lite (nice/vruntime) + spinlocks: OK\n");
     kprintf("           - VFS inode/dentry/open-file + Ramfs (static/dynamic): OK\n");
     kprintf("           - Embedded rootfs (/bin/init,sh,hello,cat,ls,/etc/motd): OK\n");
     kprintf("           - Ring-3 user processes (IRET entry, per-process PML4): OK\n");
     kprintf("           - SYSCALL/SYSRET (read/write/open/execve/wait4/mmap/...): OK\n");
-    kprintf("           - brk heap + anonymous mmap, getdents, chdir/getcwd: OK\n");
+    kprintf("           - brk heap + anon mmap (PRIVATE+SHARED), getdents, chdir/getcwd: OK\n");
     kprintf("           - Canonical serial TTY stdin + libc + interactive /bin/sh: OK\n");
     kprintf("           - Block device (VirtIO/ATA) + Ext2 persistent /mnt: OK\n");
     kprintf("================================================================================\n");

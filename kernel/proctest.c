@@ -4,6 +4,7 @@ import types;
 
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
+typedef types.int32_t s32;
 
 extern void kprintf(const char *fmt, ...);
 
@@ -18,6 +19,8 @@ extern void kthread_exit(void);
 extern void sched_init(void);
 extern u64 sched_tick_count(void);
 extern u32 sched_thread_state(u32 id);
+extern u32 sched_set_nice(u32 id, s32 nice);
+extern u32 sched_current_id(void);
 
 enum {
     LOCK_WORKERS = 4,
@@ -139,10 +142,76 @@ static int test_preemptive_spinners(void) {
     return 1;
 }
 
+
+/* Weighted fair: one nice-0 spinner and one nice+10 spinner. Over a shared
+ * tick window the nicer thread must accumulate fewer busy-loop iterations
+ * (CFS charges more vruntime per tick at lower weight). */
+static volatile u64 g_fair_counts[2];
+static volatile u64 g_fair_done;
+static volatile u64 g_fair_deadline;
+
+static void fair_spinner(u64 id) {
+    u64 n = 0;
+    while (sched_tick_count() < g_fair_deadline) {
+        n++;
+    }
+    g_fair_counts[id] = n;
+    g_fair_done = g_fair_done + 1;
+    kthread_exit();
+}
+
+static int test_weighted_fair(void) {
+    u32 id0;
+    u32 id1;
+    u64 hi;
+    u64 lo;
+    g_fair_done = 0;
+    g_fair_counts[0] = 0;
+    g_fair_counts[1] = 0;
+    g_fair_deadline = sched_tick_count() + 40;
+
+    id0 = kthread_create((u64)(&fair_spinner), 0);
+    id1 = kthread_create((u64)(&fair_spinner), 1);
+    if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF) {
+        kprintf("      [FAIL] could not create fair spinners\n");
+        return 0;
+    }
+    if (!sched_set_nice(id1, 10)) {
+        kprintf("      [FAIL] sched_set_nice(+10) failed\n");
+        return 0;
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 400;
+        while (g_fair_done != 2 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_fair_done != 2) {
+        kprintf("      [FAIL] fair spinners did not finish (%u)\n", g_fair_done);
+        return 0;
+    }
+    if (g_fair_counts[0] == 0 || g_fair_counts[1] == 0) {
+        kprintf("      [FAIL] fair spinner got zero work (0=%u 1=%u)\n",
+                g_fair_counts[0], g_fair_counts[1]);
+        return 0;
+    }
+    /* nice 0 weight 1024 vs nice+10 weight ~110 => expect ~9:1 share.
+     * Accept a loose bound: nice0 must beat nice10 by at least 2x. */
+    hi = g_fair_counts[0];
+    lo = g_fair_counts[1];
+    if (hi < lo * 2) {
+        kprintf("      [FAIL] weighted fair ratio too weak: nice0=%u nice+10=%u\n",
+                hi, lo);
+        return 0;
+    }
+    return 1;
+}
+
 void sched_selftest(void) {
-    kprintf("\n[SCHED] Kernel Threads & Round-Robin Scheduler Online:\n");
+    kprintf("\n[SCHED] Kernel Threads & CFS-lite Weighted Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
-    kprintf("      Switch       : callee-saved RSP context, timer + yield driven\n");
+    kprintf("      Switch       : callee-saved RSP context, min-vruntime + nice weights\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
 
     sched_init();
@@ -158,6 +227,9 @@ void sched_selftest(void) {
     if (test_preemptive_spinners()) {
         kprintf("      [PASS] Timer preemption: %u never-yielding threads all scheduled\n",
                 (u64)SPINNERS);
+    }
+    if (test_weighted_fair()) {
+        kprintf("      [PASS] CFS-lite: nice0 spinner got >=2x work of nice+10\n");
     }
     arch.cpu_cli();
 }

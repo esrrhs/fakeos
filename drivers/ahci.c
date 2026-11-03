@@ -15,14 +15,23 @@ extern void pci_enable_busmaster(u8 bus, u8 slot, u8 func);
 extern void pci_write32(u8 bus, u8 slot, u8 func, u8 offset, u32 value);
 extern u16 pci_read16(u8 bus, u8 slot, u8 func, u8 offset);
 extern void pci_write16(u8 bus, u8 slot, u8 func, u8 offset, u16 value);
+extern u8 pci_read8(u8 bus, u8 slot, u8 func, u8 offset);
+extern u32 pci_msi_enable(u8 bus, u8 slot, u8 func, u8 vector);
+extern u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector);
+extern void ioapic_route_irq_level(u32 irq, u32 vector);
 extern void cpu_pause(void);
+extern void sched_sleep(u64 chan);
+extern void sched_wakeup(u64 chan);
+extern u32 sched_is_active(void);
 
 /* ---------------------------------------------------------------------------
- * Minimal AHCI (SATA) driver: one port, one command slot, polled completion.
+ * Minimal AHCI (SATA) driver: one port, one command slot.
  *
  * Target: QEMU `-device ahci,id=ahci0 -device ide-hd,drive=...,bus=ahci0.0`
  * with PCI class 01.06 ABAR (BAR5). DMA via HHDM + low physical frames from
- * the buddy allocator. Falls through when no implemented port has a device.
+ * the buddy allocator. Completion: MSI/MSI-X (vector 42) or INTx with
+ * sched_sleep wakeup; poll fallback when IRQs are not armed / pre-sched.
+ * Falls through when no implemented port has a device.
  * See docs/blk-modern-path.md.
  * ------------------------------------------------------------------------- */
 
@@ -85,8 +94,18 @@ enum {
     BOUNCE_OFF      = 2048 + 512,
     BOUNCE_MAX_SEC  = 16,
 
-    POLL_SPINS      = 5000000
+    POLL_SPINS      = 5000000,
+
+    AHCI_IRQ_VECTOR = 42,
+    PCI_INTERRUPT_LINE = 0x3C,
+
+    /* Port IE: DHRE|PSE|DSE|SDBE|UFPE|DPE|PCE|PRCE (completion + errors) */
+    PxIE_MASK       = 0x07C0007Fu,
+    GHC_IE          = 0x00000002u
 };
+
+/* Sleep channel for command completion (ASCII "AHCI"). */
+static const u64 AHCI_WAIT_CHAN = 0x4148434900000000ULL;
 
 struct ahci {
     u32 present;
@@ -94,6 +113,9 @@ struct ahci {
     u64 abar_phys;
     u64 arena_phys;
     u64 capacity;                    /* sectors */
+    u32 msi;
+    u32 irq_armed;
+    u8  pci_irq;
 };
 
 static struct ahci ah;
@@ -151,6 +173,62 @@ static u32 ahci_start_port(void) {
     return 1;
 }
 
+
+/* Wait for CI bit 0 to clear. Prefer IRQ sleep when armed + scheduler live. */
+static u32 ahci_wait_ci(u8 ata_cmd) {
+    u32 spins = 0;
+    while ((*port_reg(PxCI) & 1u) != 0) {
+        u32 tfd = *port_reg(PxTFD);
+        u32 is = *port_reg(PxIS);
+        if ((tfd & 0x01) != 0) {     /* ERR */
+            kprintf("[AHCI] issue ERR cmd=0x%x TFD=0x%x IS=0x%x\n",
+                    (u64)ata_cmd, (u64)tfd, (u64)is);
+            *port_reg(PxIS) = 0xFFFFFFFFu;
+            *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+            return 0;
+        }
+        if ((is & 0x40000000u) != 0) { /* TFES */
+            kprintf("[AHCI] TFES cmd=0x%x IS=0x%x\n", (u64)ata_cmd, (u64)is);
+            *port_reg(PxIS) = 0xFFFFFFFFu;
+            *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+            return 0;
+        }
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            /* Port I/O so TCG advances the device model (same trick as virtio). */
+            arch.inb(0x80);
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            kprintf("[AHCI] timeout cmd=0x%x CI=0x%x\n",
+                    (u64)ata_cmd, (u64)(*port_reg(PxCI)));
+            return 0;
+        }
+    }
+    *port_reg(PxIS) = 0xFFFFFFFFu;
+    *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+    return 1;
+}
+
+u32 ahci_irq(void) {
+    u32 is;
+    u32 pis;
+    if (!ah.present) {
+        return 0;
+    }
+    is = *ghc_reg(GHC_IS);
+    pis = *port_reg(PxIS);
+    if (is == 0 && pis == 0) {
+        return 0;
+    }
+    *port_reg(PxIS) = pis;
+    *ghc_reg(GHC_IS) = is;
+    sched_wakeup(AHCI_WAIT_CHAN);
+    return 1;
+}
+
 /* Build a Register H2D FIS + one PRDT entry and ring CI bit 0. */
 static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
     u64 cl_phys = ah.arena_phys + CL_OFF;
@@ -160,7 +238,6 @@ static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
     u32 prdtl;
     u32 hdr0;
     u32 byte_count;
-    u32 spins;
     u32 i;
 
     if (count == 0) {
@@ -217,32 +294,9 @@ static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
     /* Issue slot 0. */
     *port_reg(PxCI) = 1;
 
-    spins = 0;
-    while ((*port_reg(PxCI) & 1u) != 0) {
-        u32 tfd = *port_reg(PxTFD);
-        u32 is = *port_reg(PxIS);
-        if ((tfd & 0x01) != 0) {     /* ERR */
-            kprintf("[AHCI] issue ERR cmd=0x%x TFD=0x%x IS=0x%x\n",
-                    (u64)ata_cmd, (u64)tfd, (u64)is);
-            *port_reg(PxIS) = 0xFFFFFFFFu;
-            return 0;
-        }
-        if ((is & 0x40000000u) != 0) { /* TFES */
-            kprintf("[AHCI] TFES cmd=0x%x IS=0x%x\n", (u64)ata_cmd, (u64)is);
-            *port_reg(PxIS) = 0xFFFFFFFFu;
-            return 0;
-        }
-        spins++;
-        if (spins > POLL_SPINS) {
-            kprintf("[AHCI] timeout cmd=0x%x CI=0x%x\n",
-                    (u64)ata_cmd, (u64)(*port_reg(PxCI)));
-            return 0;
-        }
-        /* Port I/O so TCG advances the device model (same trick as virtio). */
-        arch.inb(0x80);
-        cpu_pause();
+    if (!ahci_wait_ci(ata_cmd)) {
+        return 0;
     }
-    *port_reg(PxIS) = 0xFFFFFFFFu;
     return 1;
 }
 
@@ -326,7 +380,6 @@ u32 ahci_flush(void) {
         u64 fis_phys = ct_phys;
         u64 prdt_phys = ct_phys + 0x80;
         u32 i;
-        u32 spins;
         *port_reg(PxIS) = 0xFFFFFFFFu;
         for (i = 0; i < 256; i++) {
             hhdm8(ct_phys)[i] = 0;
@@ -346,19 +399,9 @@ u32 ahci_flush(void) {
         *hhdm32(cl_phys + 8) = (u32)(ct_phys & 0xFFFFFFFFu);
         *hhdm32(cl_phys + 12) = (u32)(ct_phys >> 32);
         *port_reg(PxCI) = 1;
-        spins = 0;
-        while ((*port_reg(PxCI) & 1u) != 0) {
-            if ((*port_reg(PxTFD) & 0x01) != 0) {
-                return 0;
-            }
-            spins++;
-            if (spins > POLL_SPINS) {
-                return 0;
-            }
-            arch.inb(0x80);
-            cpu_pause();
+        if (!ahci_wait_ci((u8)ATA_CMD_FLUSH)) {
+            return 0;
         }
-        *port_reg(PxIS) = 0xFFFFFFFFu;
     }
     return 1;
 }
@@ -384,6 +427,9 @@ void ahci_init(void) {
     ah.abar_phys = 0;
     ah.arena_phys = 0;
     ah.port = 0;
+    ah.msi = 0;
+    ah.irq_armed = 0;
+    ah.pci_irq = 0;
 
     if (!pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
         return;
@@ -484,7 +530,35 @@ void ahci_init(void) {
         return;
     }
 
+    /* Clear pending status, enable port + global interrupts. */
+    *port_reg(PxIS) = 0xFFFFFFFFu;
+    *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+    *port_reg(PxIE) = PxIE_MASK;
+    {
+        u32 g = *ghc_reg(GHC_GHC);
+        *ghc_reg(GHC_GHC) = g | GHC_AE | GHC_IE;
+    }
+
+    ah.msi = 0;
+    ah.irq_armed = 0;
+    ah.pci_irq = 0;
+    if (pci_msi_enable(bus, slot, func, (u8)AHCI_IRQ_VECTOR)
+        || pci_msix_enable_one(bus, slot, func, (u8)AHCI_IRQ_VECTOR)) {
+        ah.msi = 1;
+        ah.irq_armed = 1;
+        kprintf("[AHCI] MSI/MSI-X armed (vector %u)\n", (u64)AHCI_IRQ_VECTOR);
+    } else {
+        ah.pci_irq = pci_read8(bus, slot, func, (u8)PCI_INTERRUPT_LINE);
+        if (ah.pci_irq != 0 && ah.pci_irq != 0xFF) {
+            ioapic_route_irq_level((u32)ah.pci_irq, AHCI_IRQ_VECTOR);
+            ah.irq_armed = 1;
+            kprintf("[AHCI] INTx armed (irq %u -> vector %u)\n",
+                    (u64)ah.pci_irq, (u64)AHCI_IRQ_VECTOR);
+        }
+    }
+
     ah.present = 1;
-    kprintf("[AHCI] port %u ready: capacity=%u sectors (%u KiB)\n",
-            (u64)ah.port, ah.capacity, ah.capacity / 2);
+    kprintf("[AHCI] port %u ready: capacity=%u sectors (%u KiB)%s\n",
+            (u64)ah.port, ah.capacity, ah.capacity / 2,
+            ah.irq_armed ? " [IRQ]" : " [poll]");
 }

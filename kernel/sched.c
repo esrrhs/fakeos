@@ -5,6 +5,8 @@ import types;
 
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
+typedef types.int32_t s32;
+typedef types.int64_t s64;
 
 /* pipe.c / net.c (same package) */
 extern u32 pipe_fh_is(u32 fh);
@@ -81,6 +83,9 @@ struct tcb {
     u32 cont_notify;   /* 1 => parent may reap via wait4 WCONTINUED      */
     u32 pgid;          /* Process group id (setpgid / kill -pgid)        */
     u32 sid;           /* Session id (setsid); 0 = none                  */
+    s32 nice;          /* nice(-20..19); weight derived for CFS           */
+    u32 weight;        /* load weight (nice 0 => 1024)                    */
+    u64 vruntime;      /* CFS virtual runtime (nice-0 units)              */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -96,6 +101,96 @@ static u32 active;                   /* Scheduler online flag              */
 static volatile u64 sched_ticks;
 static u32 next_pid = 1;             /* User process id allocator          */
 static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
+static u64 cfs_min_vruntime;         /* min vruntime among runnable tasks  */
+
+enum {
+    NICE_WIDTH     = 40,             /* nice -20..19                      */
+    NICE0_WEIGHT   = 1024,           /* CFS weight at nice 0              */
+    VRUNTIME_SLICE = 1024            /* charge per tick/yield at nice 0   */
+};
+
+/* Approximate Linux nice->weight (each step ~1.25x). */
+static u32 nice_to_weight(s32 nice) {
+    s32 n;
+    u32 w;
+    if (nice < -20) {
+        nice = -20;
+    }
+    if (nice > 19) {
+        nice = 19;
+    }
+    w = NICE0_WEIGHT;
+    if (nice > 0) {
+        for (n = 0; n < nice; n++) {
+            w = (w * 4u) / 5u;
+            if (w < 15u) {
+                w = 15u;
+                break;
+            }
+        }
+    } else if (nice < 0) {
+        for (n = 0; n > nice; n--) {
+            w = (w * 5u) / 4u;
+            if (w > 80000u) {
+                w = 80000u;
+                break;
+            }
+        }
+    }
+    return w;
+}
+
+static void cfs_set_nice_fields(struct tcb *t, s32 nice) {
+    if (nice < -20) {
+        nice = -20;
+    }
+    if (nice > 19) {
+        nice = 19;
+    }
+    t->nice = nice;
+    t->weight = nice_to_weight(nice);
+}
+
+static void cfs_charge(u32 id, u64 units) {
+    u64 w;
+    if (id == 0 || id >= MAX_THREADS) {
+        return;
+    }
+    if (threads[id].state == TCB_FREE || threads[id].state == TCB_DEAD) {
+        return;
+    }
+    w = threads[id].weight;
+    if (w == 0) {
+        w = NICE0_WEIGHT;
+    }
+    threads[id].vruntime = threads[id].vruntime + (units * (u64)NICE0_WEIGHT) / w;
+}
+
+static void cfs_place_entity(u32 id) {
+    if (id == 0 || id >= MAX_THREADS) {
+        return;
+    }
+    if (threads[id].vruntime < cfs_min_vruntime) {
+        threads[id].vruntime = cfs_min_vruntime;
+    }
+}
+
+static void cfs_update_min(void) {
+    u32 i;
+    u64 minv = 0xFFFFFFFFFFFFFFFFULL;
+    u32 found = 0;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].state == TCB_RUNNABLE) {
+            if (!found || threads[i].vruntime < minv) {
+                minv = threads[i].vruntime;
+                found = 1;
+            }
+        }
+    }
+    if (found) {
+        cfs_min_vruntime = minv;
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * Initialization
@@ -126,6 +221,9 @@ void sched_init(void) {
         threads[i].cont_notify = 0;
         threads[i].pgid = 0;
         threads[i].sid = 0;
+        threads[i].nice = 0;
+        threads[i].weight = NICE0_WEIGHT;
+        threads[i].vruntime = 0;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -149,29 +247,34 @@ void sched_init(void) {
     current = 0;
     sched_ticks = 0;
     user_mode_ticks = 0;
+    cfs_min_vruntime = 0;
     /* Until the first user thread runs, SYSCALL/trap entries use the boot
      * RSP0 stack programmed by gdt_init(). */
     syscall_kstack_top = arch.gdt_get_rsp0();
     active = 1;
 }
 
-/* Find the lowest-indexed RUNNABLE thread after `from` in round-robin order,
- * wrapping around. Slot 0 is the boot/idle context: it is selected only when
- * no real kernel thread is runnable, so created threads are never starved by
- * the idle loop and user tests do not pay a 10 ms idle quantum per round.
- * Returns from if nothing else is runnable. */
+/* CFS-lite: pick the RUNNABLE thread (skip idle slot 0) with the lowest
+ * vruntime. Weights come from nice; each tick/yield charges
+ * VRUNTIME_SLICE * NICE0_WEIGHT / weight. Idle is selected only when no
+ * real thread is runnable. `from` is unused but kept for call-site shape. */
 static u32 pick_next(u32 from) {
-    u32 step;
-    for (step = 1; step <= MAX_THREADS; step++) {
-        u32 idx = (from + step) % MAX_THREADS;
-        if (idx == 0) {
-            continue;
-        }
-        if (threads[idx].state == TCB_RUNNABLE) {
-            return idx;
+    u32 i;
+    u32 best = 0xFFFFFFFF;
+    u64 best_vr = 0;
+    (void)from;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].state == TCB_RUNNABLE) {
+            if (best == 0xFFFFFFFF || threads[i].vruntime < best_vr) {
+                best = i;
+                best_vr = threads[i].vruntime;
+            }
         }
     }
-    return 0;
+    if (best == 0xFFFFFFFF) {
+        return 0;
+    }
+    return best;
 }
 
 /* ---------------------------------------------------------------------------
@@ -257,6 +360,8 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].sig_ignore = 0;
     fd_table_clear(&threads[i]);
     cwd_set_root(&threads[i]);
+    cfs_set_nice_fields(&threads[i], 0);
+    threads[i].vruntime = cfs_min_vruntime;
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -312,6 +417,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     }
     fd_table_install_console(&threads[i]);
     cwd_set_root(&threads[i]);
+    cfs_set_nice_fields(&threads[i], 0);
+    threads[i].vruntime = cfs_min_vruntime;
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -389,6 +496,8 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
         }
     }
     cwd_copy_from(&threads[i], threads[current].cwd);
+    cfs_set_nice_fields(&threads[i], threads[current].nice);
+    threads[i].vruntime = cfs_min_vruntime;
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = threads[current].sig_ignore;
     {
@@ -441,6 +550,8 @@ void sched_yield(void) {
         return;
     }
     arch.cpu_cli();
+    cfs_charge(current, VRUNTIME_SLICE);
+    cfs_update_min();
     sched_switch_to(pick_next(current));
     arch.cpu_sti();
 }
@@ -480,9 +591,11 @@ void sched_wakeup(u64 chan) {
     for (i = 0; i < MAX_THREADS; i++) {
         if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
             threads[i].wait_chan = 0;
+            cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
         }
     }
+    cfs_update_min();
 }
 
 /* Channel used by wait4 so an exiting child can wake its parent. */
@@ -520,6 +633,8 @@ void sched_tick(void) {
         return;
     }
     sched_ticks++;
+    cfs_charge(current, VRUNTIME_SLICE);
+    cfs_update_min();
     sched_switch_to(pick_next(current));
 }
 
@@ -553,6 +668,46 @@ void kthread_exit(void) {
         arch.cpu_halt();
         arch.cpu_cli();
     }
+}
+
+/* nice(2): add `inc` to the calling thread's nice (-20..19). Returns new nice
+ * or (u32)-1 on range error after clamp attempt. Also used by selftests via
+ * sched_set_nice. */
+s32 sched_get_nice(u32 id) {
+    if (id >= MAX_THREADS || threads[id].state == TCB_FREE) {
+        return 0;
+    }
+    return threads[id].nice;
+}
+
+u32 sched_set_nice(u32 id, s32 nice) {
+    if (id >= MAX_THREADS || threads[id].state == TCB_FREE
+        || threads[id].state == TCB_DEAD) {
+        return 0;
+    }
+    cfs_set_nice_fields(&threads[id], nice);
+    return 1;
+}
+
+u64 sched_vruntime(u32 id) {
+    if (id >= MAX_THREADS) {
+        return 0;
+    }
+    return threads[id].vruntime;
+}
+
+/* int nice(int inc): Linux nr 89. */
+u64 sys_nice(u64 inc) {
+    s32 cur = threads[current].nice;
+    s64 next = (s64)cur + (s64)(s32)inc;
+    if (next < -20) {
+        next = -20;
+    }
+    if (next > 19) {
+        next = 19;
+    }
+    cfs_set_nice_fields(&threads[current], (s32)next);
+    return (u64)(s64)threads[current].nice;
 }
 
 /* ---------------------------------------------------------------------------

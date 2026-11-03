@@ -321,8 +321,10 @@ def main():
         "[PASS] Demand paging",
         "[PASS] Permissions: read-only VMA",
         "[PASS] COW clone",
+        "[PASS] MAP_SHARED anon",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
+        "[PASS] CFS-lite",
         # Stage 4: VFS + Ramfs kernel self-test
         "[PASS] VFS path resolution",
         "[PASS] Ramfs file create/read/write/seek",
@@ -383,7 +385,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: modern virtio-net/blk + MSI-X + MAP_SHARED writeback online!",
+        "[SUCCESS] fakeos: CFS-lite + anon MAP_SHARED + AHCI IRQ online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

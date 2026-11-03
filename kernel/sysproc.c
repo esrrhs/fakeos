@@ -85,6 +85,7 @@ u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
 
 /* void *mmap(addr, len, prot, flags, fd, off):
  *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window
+ *  - MAP_SHARED|MAP_ANONYMOUS: shm-style shared anon (keep W across fork)
  *  - MAP_PRIVATE / MAP_SHARED + regular file: VMA_FILE demand paging
  *    (MAP_SHARED shares frames across fork; dirty pages write back on munmap).
  * off must be page-aligned for file maps. */
@@ -111,9 +112,6 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     }
 
     if (anon) {
-        if (shared) {
-            return (u64)(-1); /* no anonymous MAP_SHARED / shm yet */
-        }
         if (off != 0) {
             return (u64)(-1);
         }
@@ -123,13 +121,17 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
             return (u64)(-1);
         }
         if (flags & MAP_FIXED) {
+            /* ASAN shadow stays MAP_PRIVATE; reject SHARED+FIXED for now. */
+            if (shared) {
+                return (u64)(-1);
+            }
             va = mem.as_mmap_fixed_h(as, addr, len, (u32)prot);
             return va == 0 ? (u64)(-1) : va;
         }
         if (addr != 0) {
             return (u64)(-1);
         }
-        va = mem.as_mmap_anon_h(as, len, (u32)prot);
+        va = mem.as_mmap_anon_h(as, len, (u32)prot, shared);
         return va == 0 ? (u64)(-1) : va;
     }
 

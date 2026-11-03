@@ -24,13 +24,15 @@ extern void tlb_flush(void);
  * lower-half slots (0..255) are private per-process page tables.
  *
  * Anonymous VMAs reserve a range with permissions but map nothing; the first
- * touch raises #PF and as_handle_fault() demand-pages it. Read faults share a
- * global zero frame (mapped RO); the first write allocates a private page
- * (or COWs off the shared zero). VMA_FILE ranges demand-read from a ramfs /
- * Ext2 inode on first touch (true file mmap); MAP_SHARED file pages keep W
- * across fork (no COW demotion). as_cow_clone() shallow-copies an address
- * space, marking private shared leaves read-only and bumping a per-frame
- * refcount; the first write after that triggers a private copy.
+ * touch raises #PF and as_handle_fault() demand-pages it. MAP_PRIVATE anon
+ * read faults share a global zero frame (mapped RO); the first write
+ * allocates a private page (or COWs off the shared zero). MAP_SHARED anon
+ * never uses the zero page: first touch allocates a real frame kept writable
+ * across fork (shm-style). VMA_FILE ranges demand-read from a ramfs / Ext2
+ * inode on first touch; MAP_SHARED file pages keep W across fork (no COW
+ * demotion) and write dirty pages back on munmap/exit. as_cow_clone()
+ * shallow-copies an address space, marking private leaves read-only and
+ * bumping a per-frame refcount; the first private write triggers a copy.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -212,9 +214,11 @@ void as_activate(struct address_space *as) {
     }
 }
 
-/* Reserve an anonymous demand-paged range (page aligned). Returns 1 on
- * success; overlapping reservations are rejected. */
-int as_map_anon(struct address_space *as, u64 start, u64 size, u32 prot) {
+/* Reserve an anonymous demand-paged range (page aligned). shared!=0 marks
+ * MAP_SHARED (fork keeps W; no zero-page shortcut). Returns 1 on success;
+ * overlapping reservations are rejected. */
+int as_map_anon(struct address_space *as, u64 start, u64 size, u32 prot,
+                u32 shared) {
     if ((start & 0xFFF) != 0 || size == 0) {
         return 0;
     }
@@ -232,7 +236,7 @@ int as_map_anon(struct address_space *as, u64 start, u64 size, u32 prot) {
     as->vmas[as->nvma].end = end;
     as->vmas[as->nvma].prot = prot | PROT_READ;
     as->vmas[as->nvma].kind = VMA_ANON;
-    as->vmas[as->nvma].shared = 0;
+    as->vmas[as->nvma].shared = shared != 0 ? 1 : 0;
     as->vmas[as->nvma].fs_kind = 0;
     as->vmas[as->nvma].ino = 0;
     as->vmas[as->nvma].file_off = 0;
@@ -325,6 +329,23 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
             return 1;
         }
         /* Demand-zero anonymous page. */
+        if (vma->shared != 0) {
+            /* MAP_SHARED anon / shm: always a real frame so fork sharers see
+             * the same physical page (never the global zero shortcut). */
+            u64 frame = alloc_zero_frame();
+            if (frame == 0) {
+                return 0;
+            }
+            if ((err & 0x2) && !(vma->prot & PROT_WRITE)) {
+                pmm_free_page(frame);
+                return 0;
+            }
+            frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
+            pt[i] = frame | leaf_perms(vma);
+            private_faults++;
+            invlpg_page(page_va);
+            return 1;
+        }
         if (err & 0x2) {
             /* Write fault: private zero page. */
             u64 frame = alloc_zero_frame();
@@ -363,6 +384,13 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
         }
         u64 old_phys = entry_phys(pte);
         u32 pfn = (u32)(old_phys / PAGE_SIZE);
+        /* MAP_SHARED (anon or file): never COW; just restore W so all
+         * sharers observe the same store. Zero page still needs a real frame. */
+        if (vma->shared != 0 && old_phys != zero_frame) {
+            pt[i] = pte | PTE_W;
+            invlpg_page(page_va);
+            return 1;
+        }
         /* Shared zero must always COW; never promote it writable. */
         if (old_phys == zero_frame || frame_refs[pfn] > 1) {
             u64 fresh = alloc_zero_frame();
@@ -664,8 +692,8 @@ void as_selftest(void) {
     kprintf("\n[VMA] Running Address Space Self-Tests...\n");
 
     as_init(&as_parent);
-    if (!as_map_anon(&as_parent, RW_A, RW_END - RW_A, PROT_READ | PROT_WRITE)
-        || !as_map_anon(&as_parent, RO_A, PAGE_SIZE, PROT_READ)) {
+    if (!as_map_anon(&as_parent, RW_A, RW_END - RW_A, PROT_READ | PROT_WRITE, 0)
+        || !as_map_anon(&as_parent, RO_A, PAGE_SIZE, PROT_READ, 0)) {
         kprintf("      [FAIL] VMA reservation failed\n");
         return;
     }
@@ -784,10 +812,56 @@ void as_selftest(void) {
     as_destroy(&as_child);
     as_destroy(&as_parent);
 
+    /* MAP_SHARED anonymous: fork keeps W; child store visible to parent. */
+    {
+        static const u64 SHM_A = 0x0000000000400000ULL;
+        u64 sp, sc;
+        as_init(&as_parent);
+        if (!as_map_anon(&as_parent, SHM_A, PAGE_SIZE, PROT_READ | PROT_WRITE, 1)) {
+            kprintf("      [FAIL] MAP_SHARED anon reservation failed\n");
+            ok = 0;
+        } else {
+            as_activate(&as_parent);
+            va_ptr(SHM_A)[0] = 0xA5;
+            va_ptr(SHM_A)[1] = 0x5A;
+            sp = as_translate(&as_parent, SHM_A);
+            if ((sp & PTE_P) == 0 || (sp & PTE_W) == 0) {
+                kprintf("      [FAIL] MAP_SHARED anon not present/writable after touch\n");
+                ok = 0;
+            }
+            as_cow_clone(&as_child, &as_parent);
+            sp = as_translate(&as_parent, SHM_A);
+            sc = as_translate(&as_child, SHM_A);
+            if ((sc & ~0xFFFull) != (sp & ~0xFFFull)) {
+                kprintf("      [FAIL] MAP_SHARED anon child frame mismatch\n");
+                ok = 0;
+            }
+            if ((sc & PTE_W) == 0 || (sp & PTE_W) == 0) {
+                kprintf("      [FAIL] MAP_SHARED anon lost W across fork\n");
+                ok = 0;
+            }
+            if (as_frame_refs(sp & ~0xFFFull) != 2) {
+                kprintf("      [FAIL] MAP_SHARED anon refcount != 2\n");
+                ok = 0;
+            }
+            as_activate(&as_child);
+            va_ptr(SHM_A)[0] = 0x3C;
+            as_activate(&as_parent);
+            if (va_ptr(SHM_A)[0] != 0x3C || va_ptr(SHM_A)[1] != 0x5A) {
+                kprintf("      [FAIL] MAP_SHARED anon write not visible to parent\n");
+                ok = 0;
+            }
+            as_activate(0);
+            as_destroy(&as_child);
+            as_destroy(&as_parent);
+        }
+    }
+
     if (ok) {
         kprintf("      [PASS] Demand paging: first-touch allocation, data, zero-on-alloc\n");
         kprintf("      [PASS] Permissions: read-only VMA rejects writes, guard unmapped\n");
         kprintf("      [PASS] COW clone: shared RO frames (ref 2), private copy diverges, parent intact\n");
+        kprintf("      [PASS] MAP_SHARED anon: keep W across fork, child store visible to parent\n");
     }
 }
 
@@ -802,7 +876,9 @@ extern void kfree(void *ptr);
 
 /* Allocate and initialize a fresh address space. Returns 0 on OOM. */
 u64 as_create(void) {
-    struct address_space *as = (struct address_space *)kmalloc(8 + 8 + MAX_VMA * 24 + 8);
+    /* pml4 + vmas[MAX_VMA] (48B each) + nvma/pad + brk_base/cur + mmap_next */
+    struct address_space *as = (struct address_space *)kmalloc(
+        8 + MAX_VMA * 48 + 8 + 8 + 8 + 8);
     if (as == 0) {
         return 0;
     }
@@ -821,7 +897,7 @@ void as_activate_h(u64 handle) {
 
 /* Reserve a demand-paged anonymous range in the target space. */
 int as_map_anon_h(u64 handle, u64 start, u64 size, u32 prot) {
-    return as_map_anon(as_of(handle), start, size, prot);
+    return as_map_anon(as_of(handle), start, size, prot, 0);
 }
 
 /* brk(): lazily reserve the fixed 4 MiB heap VMA on first use and move the
@@ -833,7 +909,7 @@ u64 as_brk_h(u64 handle, u64 newbrk) {
         return (u64)(-1);
     }
     if (as->brk_base == 0) {
-        if (!as_map_anon(as, HEAP_BASE, HEAP_SIZE, PROT_READ | PROT_WRITE)) {
+        if (!as_map_anon(as, HEAP_BASE, HEAP_SIZE, PROT_READ | PROT_WRITE, 0)) {
             return (u64)(-1);
         }
         as->brk_base = HEAP_BASE;
@@ -849,9 +925,9 @@ u64 as_brk_h(u64 handle, u64 newbrk) {
     return newbrk;
 }
 
-/* Anonymous MAP_PRIVATE mapping: page-aligned reservation grown upward from
- * MMAP_BASE, stopping below the demand stack. Returns the start VA or 0. */
-u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot) {
+/* Anonymous mmap: page-aligned reservation grown upward from MMAP_BASE.
+ * shared!=0 => MAP_SHARED (fork keeps W; shm-style). Returns start VA or 0. */
+u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot, u32 shared) {
     struct address_space *as = as_of(handle);
     u64 hint;
     if (as == 0 || len == 0) {
@@ -865,7 +941,7 @@ u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot) {
     if (hint + len < hint || hint + len > MMAP_LIMIT) {
         return 0;
     }
-    if (!as_map_anon(as, hint, len, prot)) {
+    if (!as_map_anon(as, hint, len, prot, shared)) {
         return 0;
     }
     as->mmap_next = hint + len;
@@ -892,7 +968,7 @@ u64 as_mmap_fixed_h(u64 handle, u64 addr, u64 len, u32 prot) {
     if (end <= addr || end > 0x0000800000000000ULL) {
         return 0;                    /* wrap or non-canonical user address */
     }
-    if (!as_map_anon(as, addr, len, prot)) {
+    if (!as_map_anon(as, addr, len, prot, 0)) {
         return 0;
     }
     return addr;
@@ -1115,7 +1191,7 @@ int as_copy_in_h(u64 handle, u64 uva, const char *src, u64 len) {
  * past filesz (e.g. .bss) stay unmapped and demand-zero fault in later. */
 int as_map_preload(u64 handle, u64 va, u64 memsz, u32 prot, u64 src_kva, u64 filesz) {
     struct address_space *as = as_of(handle);
-    if (!as_map_anon(as, va, memsz, prot)) {
+    if (!as_map_anon(as, va, memsz, prot, 0)) {
         return 0;
     }
     struct vma *vma = find_vma(as, va);

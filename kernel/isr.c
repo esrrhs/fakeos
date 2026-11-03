@@ -183,6 +183,13 @@ void isr_dispatch(struct trap_frame *f) {
         return;
     }
 
+    /* Vector 42: AHCI MSI/MSI-X or PCI INTx; wake command waiters. */
+    if (v == 42) {
+        (void)drivers.ahci_irq();
+        arch.lapic_send_eoi();
+        return;
+    }
+
     /* Vector 255: Local APIC spurious interrupt. A genuine spurious delivery
      * leaves ISR clear and requires no EOI; but a stray pulse accepted as a
      * fixed interrupt at 255 sets ISR[255] and would pin PPR at priority 15,

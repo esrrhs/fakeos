@@ -53,6 +53,7 @@ extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
 extern u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
+extern u64 sys_nice(u64 inc);
 extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
 extern u64 sys_gettid(void);
@@ -160,7 +161,8 @@ enum {
     SC_TTY_SETFG = 501,   /* tcsetpgrp */
     SC_TTY_GETFG = 502,   /* tcgetpgrp */
     SC_RT_SIGACTION = 13,
-    SC_RT_SIGRETURN = 15
+    SC_RT_SIGRETURN = 15,
+    SC_NICE = 89
 };
 
 enum {
@@ -330,6 +332,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_YIELD) {
         sched_yield();
         return 0;
+    }
+    if (f->rax == SC_NICE) {
+        return sys_nice(f->rdi);
     }
     if (f->rax == SC_GETPID) {
         return (u64)sched_current_pid();
