@@ -738,7 +738,11 @@ char *strtok_sh(char **save) {
 }
 
 /* ---- signals (delivery frames + restorer) ------------------------------- */
-enum { SIG_DFL_V = 0, SIG_IGN_V = 1 };
+enum {
+    SIG_DFL_V = 0,
+    SIG_IGN_V = 1,
+    SA_RESTART = 0x10000000
+};
 
 extern long u_rt_sigreturn(void);
 
@@ -780,9 +784,9 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
     }
     if (oldact) {
         oldact->sa_handler = old.sa_handler;
-        oldact->sa_flags = 0;
-        oldact->sa_restorer = 0;
-        oldact->sa_mask = 0;
+        oldact->sa_flags = old.sa_flags;
+        oldact->sa_restorer = old.sa_restorer;
+        oldact->sa_mask = old.sa_mask;
     }
     return 0;
 }

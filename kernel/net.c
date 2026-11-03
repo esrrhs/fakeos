@@ -27,6 +27,7 @@ extern u32 sched_fd_get(u32 idx);
  *
  * Addressing: DHCP DISCOVER/REQUEST against QEMU user-net (fallback to
  *   static 10.0.2.15/24, gw 10.0.2.2, dns 10.0.2.2 if lease fails).
+ *   Lease option 51 arms T1/T2 renew/rebind timers on the 100Hz tick.
  * ICMP echo (sys_ping); UDP socket/bind/connect/sendto/recvfrom;
  * TCP 3-way handshake, listen/accept, and byte-stream send/recv
  * (loopback fully exercised; SYN/data retransmit via 100Hz timer).
@@ -146,7 +147,7 @@ static u32 local_ip;                 /* host order */
 static u32 netmask;
 static u32 gateway_ip;
 static u32 dns_ip;                   /* host order; from DHCP or default */
-static u32 dhcp_pending;             /* accept DHCP replies before lease */
+static u32 dhcp_pending;             /* accept DHCP replies (init/renew) */
 static u32 dhcp_xid;
 static u32 dhcp_offer_ip;
 static u32 dhcp_server_ip;
@@ -155,6 +156,12 @@ static u32 dhcp_got_ack;
 static u32 dhcp_offer_mask;
 static u32 dhcp_offer_gw;
 static u32 dhcp_offer_dns;
+static u32 dhcp_offer_lease;         /* option 51 seconds; 0 = default */
+static u32 dhcp_state;               /* 0 idle/static, 1 bound, 2 renew, 3 rebind */
+static u32 dhcp_t1_tick;             /* sched_ticks deadline for T1 */
+static u32 dhcp_t2_tick;
+static u32 dhcp_exp_tick;            /* lease expiry */
+static u32 dhcp_next_xmit_tick;      /* renew/rebind retransmit pacing */
 static u32 net_up;
 static struct arp_entry arp_tab[ARP_CACHE];
 static u8  rx_frame[FRAME_MAX];
@@ -554,9 +561,36 @@ static void dhcp_parse_options(const u8 *opt, u32 len, u8 *msgtype_out) {
             dhcp_offer_dns = get32(opt + i + 2);
         } else if (tag == 54 && l >= 4) {
             dhcp_server_ip = get32(opt + i + 2);
+        } else if (tag == 51 && l >= 4) {
+            dhcp_offer_lease = get32(opt + i + 2);
         }
         i += 2 + l;
     }
+}
+
+static void dhcp_apply_static_fallback(void);
+static void dhcp_arm_lease_timers(u32 lease_secs) {
+    u32 now = (u32)sched_tick_count();
+    u32 secs = lease_secs;
+    if (secs < 60) secs = 60;                  /* floor for timer math */
+    if (secs > 86400u * 7u) secs = 86400u * 7u;
+    dhcp_offer_lease = secs;
+    /* 100 Hz ticks. */
+    dhcp_t1_tick = now + (secs / 2u) * 100u;
+    dhcp_t2_tick = now + ((secs * 7u) / 8u) * 100u;
+    dhcp_exp_tick = now + secs * 100u;
+    dhcp_next_xmit_tick = 0;
+    dhcp_state = 1;                            /* BOUND */
+    kprintf("[NET] DHCP timers T1=%us T2=%us expiry=%us\n",
+            (u64)(secs / 2u), (u64)((secs * 7u) / 8u), (u64)secs);
+}
+
+static void dhcp_apply_ack(void) {
+    local_ip = dhcp_offer_ip;
+    netmask = dhcp_offer_mask ? dhcp_offer_mask : 0xFFFFFF00u;
+    gateway_ip = dhcp_offer_gw ? dhcp_offer_gw : 0x0A000202u;
+    dns_ip = dhcp_offer_dns ? dhcp_offer_dns : gateway_ip;
+    dhcp_arm_lease_timers(dhcp_offer_lease ? dhcp_offer_lease : 3600u);
 }
 
 static void dhcp_handle_bootp(u32 src_ip, const u8 *bootp, u16 plen) {
@@ -575,15 +609,28 @@ static void dhcp_handle_bootp(u32 src_ip, const u8 *bootp, u16 plen) {
     dhcp_offer_mask = 0xFFFFFF00u;
     dhcp_offer_gw = 0;
     dhcp_offer_dns = 0;
+    dhcp_offer_lease = 0;
     dhcp_parse_options(bootp + 240, (u32)(plen - 240), &msgtype);
     if (msgtype == 2) {                        /* DHCPOFFER */
         dhcp_offer_ip = yiaddr;
         if (dhcp_server_ip == 0) dhcp_server_ip = src_ip;
         dhcp_got_offer = 1;
-    } else if (msgtype == 5 || msgtype == 6) { /* ACK / NAK->treat ACK only */
-        if (msgtype == 5) {
-            dhcp_offer_ip = yiaddr;
-            dhcp_got_ack = 1;
+    } else if (msgtype == 5) {                 /* ACK */
+        if (yiaddr != 0) dhcp_offer_ip = yiaddr;
+        dhcp_got_ack = 1;
+        if (dhcp_state == 2 || dhcp_state == 3) {
+            /* Renew/rebind success: re-arm without dropping traffic. */
+            dhcp_pending = 0;
+            dhcp_apply_ack();
+            kprintf("[NET] DHCP lease renewed ip=%u.%u.%u.%u\n",
+                    (u64)((local_ip >> 24) & 0xFF), (u64)((local_ip >> 16) & 0xFF),
+                    (u64)((local_ip >> 8) & 0xFF), (u64)(local_ip & 0xFF));
+        }
+    } else if (msgtype == 6) {                 /* NAK */
+        if (dhcp_state == 2 || dhcp_state == 3) {
+            dhcp_state = 0;
+            dhcp_pending = 0;
+            dhcp_apply_static_fallback();
         }
     }
 }
@@ -691,7 +738,9 @@ static void tcp_clear_rexmit(struct sock *sk) {
 }
 
 /* Called from the APIC timer ISR path: retransmit unacked SYN/data. */
+static void dhcp_timer_tick(void);
 void net_tcp_timer(void) {
+    dhcp_timer_tick();
     u32 i;
     u32 now;
     if (!net_up) {
@@ -1880,10 +1929,11 @@ static u32 dhcp_build_discover(u8 *bootp, u32 xid) {
     bootp[236] = 0x63; bootp[237] = 0x82;
     bootp[238] = 0x53; bootp[239] = 0x63;
     bootp[240] = 53; bootp[241] = 1; bootp[242] = 1; /* DISCOVER */
-    bootp[243] = 55; bootp[244] = 4;                 /* param list */
+    bootp[243] = 55; bootp[244] = 5;                 /* param list */
     bootp[245] = 1; bootp[246] = 3; bootp[247] = 6; bootp[248] = 15;
-    bootp[249] = 0xFF;
-    return 250;
+    bootp[249] = 51;                                 /* lease time */
+    bootp[250] = 0xFF;
+    return 251;
 }
 
 static u32 dhcp_build_request(u8 *bootp, u32 xid, u32 req_ip, u32 srv_ip) {
@@ -1900,10 +1950,36 @@ static u32 dhcp_build_request(u8 *bootp, u32 xid, u32 req_ip, u32 srv_ip) {
     bootp[240] = 53; bootp[241] = 1; bootp[242] = 3; /* REQUEST */
     bootp[243] = 50; bootp[244] = 4; put32(bootp + 245, req_ip);
     bootp[249] = 54; bootp[250] = 4; put32(bootp + 251, srv_ip);
-    bootp[255] = 55; bootp[256] = 4;
+    bootp[255] = 55; bootp[256] = 5;
     bootp[257] = 1; bootp[258] = 3; bootp[259] = 6; bootp[260] = 15;
-    bootp[261] = 0xFF;
-    return 262;
+    bootp[261] = 51;
+    bootp[262] = 0xFF;
+    return 263;
+}
+
+/* Renew/rebind REQUEST: ciaddr set, broadcast flag clear for renew. */
+static u32 dhcp_build_renew(u8 *bootp, u32 xid, u32 ciaddr, u32 srv_ip, u32 rebind) {
+    u32 i;
+    for (i = 0; i < 300; i++) bootp[i] = 0;
+    bootp[0] = 1;
+    bootp[1] = 1;
+    bootp[2] = 6;
+    put32(bootp + 4, xid);
+    if (rebind) put16(bootp + 10, 0x8000);
+    put32(bootp + 12, ciaddr);                     /* ciaddr */
+    mac_copy(bootp + 28, local_mac);
+    bootp[236] = 0x63; bootp[237] = 0x82;
+    bootp[238] = 0x53; bootp[239] = 0x63;
+    bootp[240] = 53; bootp[241] = 1; bootp[242] = 3; /* REQUEST */
+    i = 243;
+    if (srv_ip != 0 && !rebind) {
+        bootp[i++] = 54; bootp[i++] = 4; put32(bootp + i, srv_ip); i += 4;
+    }
+    bootp[i++] = 55; bootp[i++] = 5;
+    bootp[i++] = 1; bootp[i++] = 3; bootp[i++] = 6; bootp[i++] = 15;
+    bootp[i++] = 51;
+    bootp[i++] = 0xFF;
+    return i;
 }
 
 /* Send UDP from src_ip (may be 0) to dst, bypassing socket table. */
@@ -1926,11 +2002,51 @@ static u32 dhcp_udp_xmit(u32 src_ip, u16 sport, u32 dst_ip, u16 dport,
     return i;
 }
 
+static void dhcp_timer_tick(void) {
+    u8 bootp[300];
+    u32 blen;
+    u32 now;
+    if (!net_up || dhcp_state == 0) return;
+    now = (u32)sched_tick_count();
+    if (dhcp_state == 1 && now >= dhcp_t1_tick) {
+        dhcp_state = 2;
+        dhcp_pending = 1;
+        dhcp_got_ack = 0;
+        dhcp_next_xmit_tick = now;
+        kprintf("[NET] DHCP T1 reached; renewing lease\n");
+    }
+    if (dhcp_state == 2 && now >= dhcp_t2_tick) {
+        dhcp_state = 3;
+        dhcp_got_ack = 0;
+        dhcp_next_xmit_tick = now;
+        kprintf("[NET] DHCP T2 reached; rebinding\n");
+    }
+    if ((dhcp_state == 2 || dhcp_state == 3) && now >= dhcp_exp_tick) {
+        dhcp_state = 0;
+        dhcp_pending = 0;
+        kprintf("[NET] DHCP lease expired\n");
+        dhcp_apply_static_fallback();
+        return;
+    }
+    if (dhcp_state != 2 && dhcp_state != 3) return;
+    if (dhcp_next_xmit_tick != 0 && now < dhcp_next_xmit_tick) return;
+    blen = dhcp_build_renew(bootp, dhcp_xid, local_ip, dhcp_server_ip,
+                            dhcp_state == 3 ? 1u : 0u);
+    if (dhcp_state == 2 && dhcp_server_ip != 0) {
+        dhcp_udp_xmit(local_ip, 68, dhcp_server_ip, 67, bootp, (u16)blen);
+    } else {
+        dhcp_udp_xmit(local_ip, 68, 0xFFFFFFFFu, 67, bootp, (u16)blen);
+    }
+    dhcp_next_xmit_tick = now + 500;
+}
+
 static void dhcp_apply_static_fallback(void) {
     local_ip = 0x0A00020Fu;
     netmask = 0xFFFFFF00u;
     gateway_ip = 0x0A000202u;
     dns_ip = 0x0A000202u;
+    dhcp_state = 0;
+    dhcp_pending = 0;
     kprintf("[NET] DHCP timeout; static fallback 10.0.2.15/24 gw/dns 10.0.2.2\n");
 }
 
@@ -1940,12 +2056,14 @@ static void dhcp_run(void) {
     u32 spins;
     u32 tries;
     dhcp_pending = 1;
+    dhcp_state = 0;
     dhcp_xid = 0xFACE0001u ^ (u32)sched_tick_count();
     if (dhcp_xid == 0) dhcp_xid = 0xFACE0001u;
     dhcp_got_offer = 0;
     dhcp_got_ack = 0;
     dhcp_offer_ip = 0;
     dhcp_server_ip = 0;
+    dhcp_offer_lease = 0;
     local_ip = 0;
     netmask = 0xFFFFFF00u;
     gateway_ip = 0;
@@ -1974,13 +2092,11 @@ static void dhcp_run(void) {
     }
     dhcp_pending = 0;
     if (!dhcp_got_ack) {
+        dhcp_state = 0;
         dhcp_apply_static_fallback();
         return;
     }
-    local_ip = dhcp_offer_ip;
-    netmask = dhcp_offer_mask ? dhcp_offer_mask : 0xFFFFFF00u;
-    gateway_ip = dhcp_offer_gw ? dhcp_offer_gw : 0x0A000202u;
-    dns_ip = dhcp_offer_dns ? dhcp_offer_dns : gateway_ip;
+    dhcp_apply_ack();
     kprintf("[NET] DHCP lease ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u dns=%u.%u.%u.%u\n",
             (u64)((local_ip >> 24) & 0xFF), (u64)((local_ip >> 16) & 0xFF),
             (u64)((local_ip >> 8) & 0xFF), (u64)(local_ip & 0xFF),
@@ -2016,6 +2132,12 @@ void net_init(void) {
     gateway_ip = 0x0A000202u;
     dns_ip = 0x0A000202u;
     dhcp_pending = 0;
+    dhcp_state = 0;
+    dhcp_offer_lease = 0;
+    dhcp_t1_tick = 0;
+    dhcp_t2_tick = 0;
+    dhcp_exp_tick = 0;
+    dhcp_next_xmit_tick = 0;
     ping_id = 1;
     ping_seq = 0;
     ping_waiting = 0;

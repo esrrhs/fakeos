@@ -14,7 +14,7 @@ extern void kprintf(const char *fmt, ...);
  *
  * Mount, path lookup, open/read/write/lseek, create, mkdir, getdents,
  * unlink (regular files), sync. Block size 1024/2048/4096. Multi block
- * group (BGDT indexed). Direct + single- and double-indirect maps.
+ * group (BGDT indexed). Direct + single-/double-/triple-indirect maps.
  * Hardening: free-count bookkeeping in SB/BGDT, s_state dirty-on-mount /
  * clean-on-sync (not a full journal).
  *
@@ -100,6 +100,7 @@ static struct ext2_sb sb;
 static struct ext2_open opens[MAX_OPEN];
 static u8 blk_buf[4096];
 static u8 ind_buf[4096];
+static u8 tind_buf[4096];
 static u8 ino_raw[128];
 
 static u16 rd16(const u8 *p) {
@@ -227,6 +228,23 @@ static u32 alloc_block(void) {
             if (sb.groups_count == 1) {
                 local = i;
             }
+            /* Never hand out SB/BGDT/bitmap/itable blocks even if a bit
+             * was wrongly cleared (multi-bg relative bit0 == SB). */
+            {
+                u32 it_blocks = (sb.inodes_per_group * sb.inode_size + sb.block_size - 1)
+                                / sb.block_size;
+                u32 meta = 0;
+                if (i <= sb.bg_block) meta = 1;
+                if (i == bg.block_bitmap || i == bg.inode_bitmap) meta = 1;
+                if (i >= bg.inode_table && i < bg.inode_table + it_blocks) meta = 1;
+                if (meta) {
+                    if (!bitmap_test(blk_buf, local)) {
+                        bitmap_set(blk_buf, local);
+                        bwrite(bg.block_bitmap, blk_buf);
+                    }
+                    continue;
+                }
+            }
             if (!bitmap_test(blk_buf, local)) {
                 bitmap_set(blk_buf, local);
                 if (!bwrite(bg.block_bitmap, blk_buf)) return 0;
@@ -295,8 +313,15 @@ static void free_block_bit(u32 blk) {
     u32 local;
     u32 base;
     if (blk < sb.first_data_block || blk >= sb.blocks_count) return;
+    if (blk <= sb.bg_block) return;          /* never free SB / BGDT */
     g = group_of_block(blk);
     if (!bg_load(g, &bg)) return;
+    {
+        u32 it_blocks = (sb.inodes_per_group * sb.inode_size + sb.block_size - 1)
+                        / sb.block_size;
+        if (blk == bg.block_bitmap || blk == bg.inode_bitmap) return;
+        if (blk >= bg.inode_table && blk < bg.inode_table + it_blocks) return;
+    }
     base = sb.first_data_block + g * sb.blocks_per_group;
     local = (sb.groups_count == 1) ? blk : (blk - base);
     if (!bread(bg.block_bitmap, blk_buf)) return;
@@ -338,8 +363,8 @@ static u32 inode_write(u32 ino, const u8 *raw) {
 
 
 /* Release every data and indirect block referenced by an inode (direct,
- * single-, and double-indirect). Leaves the raw inode image zeroed for
- * the caller to write back. */
+ * single-, double-, and triple-indirect). Leaves the raw inode image
+ * zeroed for the caller to write back. */
 static void inode_free_all_blocks(u8 *raw) {
     u32 b;
     u32 nent = sb.block_size / 4;
@@ -386,6 +411,36 @@ static void inode_free_all_blocks(u8 *raw) {
             wr32(raw + I_BLOCK + 13 * 4, 0);
         }
     }
+    {
+        u32 tind = rd32(raw + I_BLOCK + 14 * 4);
+        if (tind) {
+            u32 a;
+            if (bread(tind, tind_buf)) {
+                for (a = 0; a < nent; a++) {
+                    u32 dind = rd32(tind_buf + a * 4);
+                    u32 i;
+                    if (dind == 0) continue;
+                    if (bread(dind, ind_buf)) {
+                        for (i = 0; i < nent; i++) {
+                            u32 leaf = rd32(ind_buf + i * 4);
+                            u32 j;
+                            if (leaf == 0) continue;
+                            if (bread(leaf, blk_buf)) {
+                                for (j = 0; j < nent; j++) {
+                                    u32 p = rd32(blk_buf + j * 4);
+                                    if (p) free_block_bit(p);
+                                }
+                            }
+                            free_block_bit(leaf);
+                        }
+                    }
+                    free_block_bit(dind);
+                }
+            }
+            free_block_bit(tind);
+            wr32(raw + I_BLOCK + 14 * 4, 0);
+        }
+    }
     wr32(raw + I_SIZE_LO, 0);
     wr32(raw + I_BLOCKS, 0);
 }
@@ -394,6 +449,7 @@ static u32 inode_get_block(const u8 *raw, u32 file_block) {
     u32 ptrs = sb.block_size / 4;
     u32 single_max = 12 + ptrs;
     u32 double_max = single_max + ptrs * ptrs;
+    u32 triple_max = double_max + ptrs * ptrs * ptrs;
     if (file_block < 12) {
         return rd32(raw + I_BLOCK + file_block * 4);
     }
@@ -419,13 +475,43 @@ static u32 inode_get_block(const u8 *raw, u32 file_block) {
         if (!bread(leaf, blk_buf)) return 0;
         return rd32(blk_buf + lvl2 * 4);
     }
+    if (file_block < triple_max) {
+        u32 tind = rd32(raw + I_BLOCK + 14 * 4);
+        u32 rel;
+        u32 lvl1;
+        u32 rem;
+        u32 lvl2;
+        u32 lvl3;
+        u32 dind;
+        u32 leaf;
+        if (tind == 0) return 0;
+        rel = file_block - double_max;
+        lvl1 = rel / (ptrs * ptrs);
+        rem = rel % (ptrs * ptrs);
+        lvl2 = rem / ptrs;
+        lvl3 = rem % ptrs;
+        if (!bread(tind, tind_buf)) return 0;
+        dind = rd32(tind_buf + lvl1 * 4);
+        if (dind == 0) return 0;
+        if (!bread(dind, ind_buf)) return 0;
+        leaf = rd32(ind_buf + lvl2 * 4);
+        if (leaf == 0) return 0;
+        if (!bread(leaf, blk_buf)) return 0;
+        return rd32(blk_buf + lvl3 * 4);
+    }
     return 0;
+}
+
+static void inode_add_iblocks(u8 *raw) {
+    u32 ib = rd32(raw + I_BLOCKS);
+    wr32(raw + I_BLOCKS, ib + sb.block_size / 512);
 }
 
 static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
     u32 ptrs = sb.block_size / 4;
     u32 single_max = 12 + ptrs;
     u32 double_max = single_max + ptrs * ptrs;
+    u32 triple_max = double_max + ptrs * ptrs * ptrs;
     if (file_block < 12) {
         wr32(raw + I_BLOCK + file_block * 4, phys);
         return 1;
@@ -437,6 +523,7 @@ static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
             ind = alloc_block();
             if (ind == 0) return 0;
             wr32(raw + I_BLOCK + 12 * 4, ind);
+            inode_add_iblocks(raw);
         }
         if (!bread(ind, blk_buf)) return 0;
         idx = file_block - 12;
@@ -449,14 +536,11 @@ static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
         u32 lvl1;
         u32 lvl2;
         u32 leaf;
-        u32 ib;
         if (dind == 0) {
             dind = alloc_block();
             if (dind == 0) return 0;
             wr32(raw + I_BLOCK + 13 * 4, dind);
-            /* i_blocks counts the new indirect block in 512-byte units. */
-            ib = rd32(raw + I_BLOCKS);
-            wr32(raw + I_BLOCKS, ib + sb.block_size / 512);
+            inode_add_iblocks(raw);
         }
         rel = file_block - single_max;
         lvl1 = rel / ptrs;
@@ -468,11 +552,52 @@ static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
             if (leaf == 0) return 0;
             wr32(ind_buf + lvl1 * 4, leaf);
             if (!bwrite(dind, ind_buf)) return 0;
-            ib = rd32(raw + I_BLOCKS);
-            wr32(raw + I_BLOCKS, ib + sb.block_size / 512);
+            inode_add_iblocks(raw);
         }
         if (!bread(leaf, blk_buf)) return 0;
         wr32(blk_buf + lvl2 * 4, phys);
+        return bwrite(leaf, blk_buf);
+    }
+    if (file_block < triple_max) {
+        u32 tind = rd32(raw + I_BLOCK + 14 * 4);
+        u32 rel;
+        u32 lvl1;
+        u32 rem;
+        u32 lvl2;
+        u32 lvl3;
+        u32 dind;
+        u32 leaf;
+        if (tind == 0) {
+            tind = alloc_block();
+            if (tind == 0) return 0;
+            wr32(raw + I_BLOCK + 14 * 4, tind);
+            inode_add_iblocks(raw);
+        }
+        rel = file_block - double_max;
+        lvl1 = rel / (ptrs * ptrs);
+        rem = rel % (ptrs * ptrs);
+        lvl2 = rem / ptrs;
+        lvl3 = rem % ptrs;
+        if (!bread(tind, tind_buf)) return 0;
+        dind = rd32(tind_buf + lvl1 * 4);
+        if (dind == 0) {
+            dind = alloc_block();
+            if (dind == 0) return 0;
+            wr32(tind_buf + lvl1 * 4, dind);
+            if (!bwrite(tind, tind_buf)) return 0;
+            inode_add_iblocks(raw);
+        }
+        if (!bread(dind, ind_buf)) return 0;
+        leaf = rd32(ind_buf + lvl2 * 4);
+        if (leaf == 0) {
+            leaf = alloc_block();
+            if (leaf == 0) return 0;
+            wr32(ind_buf + lvl2 * 4, leaf);
+            if (!bwrite(dind, ind_buf)) return 0;
+            inode_add_iblocks(raw);
+        }
+        if (!bread(leaf, blk_buf)) return 0;
+        wr32(blk_buf + lvl3 * 4, phys);
         return bwrite(leaf, blk_buf);
     }
     return 0;
@@ -1382,5 +1507,67 @@ void ext2_selftest(void) {
         ext2_close(fh2);
         drivers.blk_flush();
         kprintf("[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB\n");
+    }
+
+    /* Sparse write past double-indirect ceiling (1K: file block 65804)
+     * exercises i_block[14] without needing a 64MiB image. */
+    {
+        u32 fh3;
+        u32 ptrs = sb.block_size / 4;
+        u32 single_max = 12 + ptrs;
+        u32 double_max = single_max + ptrs * ptrs;
+        u64 trip_off = (u64)double_max * (u64)sb.block_size;
+        u8 pattern[1024];
+        u8 got[1024];
+        u32 i;
+        u64 n;
+        for (i = 0; i < 1024; i++) pattern[i] = (u8)(0xA5 ^ (i & 0xFF));
+        fh3 = ext2_open("/mnt/trip.bin", O_CREAT | O_RDWR | O_TRUNC);
+        if (fh3 == 0) {
+            kprintf("[EXT2] [FAIL] create /mnt/trip.bin\n");
+            return;
+        }
+        if (ext2_lseek(fh3, trip_off, SEEK_SET) != trip_off) {
+            kprintf("[EXT2] [FAIL] trip lseek %u\n", (u64)trip_off);
+            ext2_close(fh3);
+            return;
+        }
+        {
+            u32 chunk = sb.block_size;
+            if (chunk > 1024) chunk = 1024;
+            n = ext2_write(fh3, (char *)pattern, chunk);
+            if (n != chunk) {
+                kprintf("[EXT2] [FAIL] trip write got %u\n", n);
+                ext2_close(fh3);
+                return;
+            }
+            if (ext2_lseek(fh3, trip_off, SEEK_SET) != trip_off) {
+                kprintf("[EXT2] [FAIL] trip re-lseek\n");
+                ext2_close(fh3);
+                return;
+            }
+            for (i = 0; i < 1024; i++) got[i] = 0;
+            n = ext2_read(fh3, (char *)got, chunk);
+            if (n != chunk) {
+                kprintf("[EXT2] [FAIL] trip read %u\n", n);
+                ext2_close(fh3);
+                return;
+            }
+            for (i = 0; i < chunk; i++) {
+                if (got[i] != pattern[i]) {
+                    kprintf("[EXT2] [FAIL] trip mismatch at %u\n", (u64)i);
+                    ext2_close(fh3);
+                    return;
+                }
+            }
+        }
+        ext2_close(fh3);
+        /* Unlink recycles the triple-indirect tree. */
+        if (!ext2_unlink("/mnt/trip.bin")) {
+            kprintf("[EXT2] [FAIL] unlink /mnt/trip.bin\n");
+            return;
+        }
+        drivers.blk_flush();
+        kprintf("[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin\n");
     }
 }

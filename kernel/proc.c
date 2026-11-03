@@ -37,7 +37,9 @@ static struct exit_record exit_table[MAX_EXIT];
 
 /* sched.c */
 extern u32 sched_current_pid(void);
-extern u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 *old_out);
+extern u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 flags, u64 *old_out, u64 *old_flags_out);
+extern u32 sched_should_eintr(void);
+extern u32 sched_sig_get_flags(u32 sig, u64 *flags_out);
 extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
 extern u32 sched_sig_get(u32 sig, u64 *handler_out);
@@ -163,7 +165,7 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
             /* sched_sleep_cli: mark sleeping + switch; returns with IRQs off. */
             sched_sleep_cli(chan);
             arch.cpu_sti();
-            if (sched_has_pending_fatal()) {
+            if (sched_should_eintr()) {
                 return (u64)-4;         /* EINTR */
             }
         }
@@ -216,7 +218,9 @@ u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
     u64 as = sched_current_as_h();
     u64 handler = 0;
     u64 restorer = 0;
+    u64 flags = 0;
     u64 old = 0;
+    u64 oldf = 0;
     u32 st;
     (void)setsize;
     if (as == 0) {
@@ -226,22 +230,30 @@ u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
     if (st != 0) {
         return (u64)(-22);
     }
+    st = sched_sig_get_flags((u32)sig, &oldf);
+    if (st != 0) {
+        return (u64)(-22);
+    }
     if (act_u != 0) {
-        if (!mem.as_user_range_ok(as, act_u, 24)) {
+        if (!mem.as_user_range_ok(as, act_u, 32)) {
             return (u64)(-14);
         }
         handler = *(volatile u64 *)act_u;
+        flags = *(volatile u64 *)(act_u + 8);
         restorer = *(volatile u64 *)(act_u + 16);
-        st = sched_sigaction((u32)sig, handler, restorer, 0);
+        st = sched_sigaction((u32)sig, handler, restorer, flags, 0, 0);
         if (st != 0) {
             return (u64)(-22);
         }
     }
     if (old_u != 0) {
-        if (!mem.as_user_range_ok(as, old_u, 8)) {
+        if (!mem.as_user_range_ok(as, old_u, 32)) {
             return (u64)(-14);
         }
         *(volatile u64 *)old_u = old;
+        *(volatile u64 *)(old_u + 8) = oldf;
+        *(volatile u64 *)(old_u + 16) = 0;
+        *(volatile u64 *)(old_u + 24) = 0;
     }
     return 0;
 }

@@ -14,7 +14,8 @@ typedef types.uint64_t u64;
  * via its own ring, keyboard via tty_push_byte. Sleepers wake on either
  * source; empty checks use sched_sleep_cli so a byte cannot be lost between
  * poll and sleep. Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
- * a 32-entry line history shared by serial and PS/2.
+ * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
+ * provide basic readline-style editing.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -24,6 +25,7 @@ enum {
 
 static char tty_buf[LINE_MAX];
 static u32 tty_editing;
+static u32 tty_cursor;          /* insertion point within tty_editing */
 static u32 tty_line_len;
 static u32 tty_pos;
 
@@ -54,6 +56,7 @@ static int tty_hist_view;       /* -1 = editing new; else index into ring */
 extern u32 sched_current_pid(void);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern u32 sched_has_pending_fatal(void);
+extern u32 sched_should_eintr(void);
 
 enum {
     SIGINT_N = 2,
@@ -162,6 +165,41 @@ static void tty_clear_edit(void) {
         tty_rubout();
         tty_editing--;
     }
+    tty_cursor = 0;
+}
+
+static void tty_move_cursor_to(u32 pos) {
+    if (pos > tty_editing) pos = tty_editing;
+    while (tty_cursor > pos) {
+        drivers.uart_putc('\b');
+        drivers.vga_putc('\b');
+        tty_cursor--;
+    }
+    while (tty_cursor < pos) {
+        tty_echo_ch(tty_buf[tty_cursor]);
+        tty_cursor++;
+    }
+}
+
+static void tty_redraw_tail(void) {
+    u32 i;
+    u32 save = tty_cursor;
+    for (i = tty_cursor; i < tty_editing; i++) {
+        tty_echo_ch(tty_buf[i]);
+    }
+    /* Erase leftover glyph if we deleted. */
+    drivers.uart_putc(' ');
+    drivers.vga_putc(' ');
+    drivers.uart_putc('\b');
+    drivers.vga_putc('\b');
+    /* Walk back to insertion point. */
+    i = tty_editing;
+    while (i > save) {
+        drivers.uart_putc('\b');
+        drivers.vga_putc('\b');
+        i--;
+    }
+    tty_cursor = save;
 }
 
 static void tty_hist_apply(int view) {
@@ -170,7 +208,6 @@ static void tty_hist_apply(int view) {
     const char *s;
     if (tty_hist_len == 0) return;
     if (view < 0 || (u32)view >= tty_hist_len) return;
-    /* view 0 = oldest in window, view hist_len-1 = newest */
     idx = (tty_hist_len < TTY_HIST_MAX)
         ? (u32)view
         : (tty_hist_next + (u32)view) % TTY_HIST_MAX;
@@ -181,24 +218,26 @@ static void tty_hist_apply(int view) {
         tty_echo_ch(s[i]);
         tty_editing++;
     }
+    tty_cursor = tty_editing;
     tty_hist_view = view;
 }
 
 static void tty_recv_line(void) {
-    u32 esc_state = 0; /* 0=normal 1=saw ESC 2=saw ESC [ */
+    u32 esc_state = 0; /* 0=normal 1=saw ESC 2=saw ESC [ 3=CSI digits */
+    u32 csi_num = 0;
     tty_hist_view = -1;
+    tty_cursor = 0;
     for (;;) {
         int c = tty_getc_block();
-        if (c == -2 || sched_has_pending_fatal()) {
-            /* Woken by kill while blocked on input. */
+        if (c == -2 || sched_should_eintr() || sched_has_pending_fatal()) {
             tty_got_intr = 1;
             tty_editing = 0;
+            tty_cursor = 0;
             tty_line_len = 0;
             tty_pos = 0;
             return;
         }
         if (c == 0x03) {
-            /* Ctrl-C: echo, reset line, SIGINT to fg (or current reader). */
             drivers.uart_putc('^');
             drivers.uart_putc('C');
             drivers.uart_putc('\n');
@@ -206,45 +245,63 @@ static void tty_recv_line(void) {
             drivers.vga_putc('C');
             drivers.vga_putc('\n');
             tty_editing = 0;
+            tty_cursor = 0;
             tty_line_len = 0;
             tty_pos = 0;
             tty_got_intr = 1;
-            /* Only signal a declared foreground job. fg==0 means the
-             * reader (usually the shell at a prompt) just wants EINTR. */
             if (tty_fg_pid != 0) {
                 sched_signal_send(tty_fg_pid, SIGINT_N);
             }
             return;
         }
+        if (c == 0x01) { /* Ctrl-A home */
+            tty_move_cursor_to(0);
+            continue;
+        }
+        if (c == 0x05) { /* Ctrl-E end */
+            tty_move_cursor_to(tty_editing);
+            continue;
+        }
+        if (c == 0x15) { /* Ctrl-U kill line */
+            tty_clear_edit();
+            tty_hist_view = -1;
+            continue;
+        }
         if (c == '\n' || c == '\r') {
+            tty_move_cursor_to(tty_editing);
             tty_hist_remember(tty_buf, tty_editing);
             tty_buf[tty_editing] = '\n';
             tty_line_len = tty_editing + 1;
             tty_pos = 0;
             tty_editing = 0;
+            tty_cursor = 0;
             tty_echo_ch('\n');
             return;
         }
-        /* ESC [ A/B = Up/Down history (serial CSI or PS/2 arrows). */
         if (esc_state == 1) {
             if (c == '[') {
                 esc_state = 2;
+                csi_num = 0;
                 continue;
             }
             esc_state = 0;
-            /* lone ESC dropped */
             continue;
         }
-        if (esc_state == 2) {
+        if (esc_state == 2 || esc_state == 3) {
+            if (c >= '0' && c <= '9') {
+                csi_num = csi_num * 10 + (u32)(c - '0');
+                esc_state = 3;
+                continue;
+            }
             esc_state = 0;
-            if (c == 'A') { /* Up */
+            if (c == 'A') {
                 int view = tty_hist_view;
                 if (view < 0) view = (int)tty_hist_len - 1;
                 else if (view > 0) view--;
                 tty_hist_apply(view);
                 continue;
             }
-            if (c == 'B') { /* Down */
+            if (c == 'B') {
                 int view = tty_hist_view;
                 if (view < 0) continue;
                 if (view + 1 >= (int)tty_hist_len) {
@@ -255,7 +312,22 @@ static void tty_recv_line(void) {
                 }
                 continue;
             }
-            /* Left/Right ignored in canonical mode for now. */
+            if (c == 'C') { /* Right */
+                if (tty_cursor < tty_editing) tty_move_cursor_to(tty_cursor + 1);
+                continue;
+            }
+            if (c == 'D') { /* Left */
+                if (tty_cursor > 0) tty_move_cursor_to(tty_cursor - 1);
+                continue;
+            }
+            if (c == 'H' || (c == '~' && csi_num == 1)) { /* Home */
+                tty_move_cursor_to(0);
+                continue;
+            }
+            if (c == 'F' || (c == '~' && csi_num == 4)) { /* End */
+                tty_move_cursor_to(tty_editing);
+                continue;
+            }
             continue;
         }
         if (c == 0x1B) {
@@ -263,24 +335,39 @@ static void tty_recv_line(void) {
             continue;
         }
         if (c == 0x7F || c == 0x08) {
-            if (tty_editing > 0) {
+            if (tty_cursor > 0) {
+                u32 i;
+                for (i = tty_cursor - 1; i + 1 < tty_editing; i++) {
+                    tty_buf[i] = tty_buf[i + 1];
+                }
                 tty_editing--;
-                tty_rubout();
+                tty_cursor--;
+                drivers.uart_putc('\b');
+                drivers.vga_putc('\b');
+                tty_redraw_tail();
                 tty_hist_view = -1;
             }
             continue;
         }
         if (c >= 0x20 && c < 0x7F) {
             if (tty_editing < LINE_MAX - 1) {
-                tty_buf[tty_editing] = (char)c;
+                u32 i;
+                for (i = tty_editing; i > tty_cursor; i--) {
+                    tty_buf[i] = tty_buf[i - 1];
+                }
+                tty_buf[tty_cursor] = (char)c;
                 tty_editing++;
                 tty_echo_ch((char)c);
+                tty_cursor++;
+                if (tty_cursor < tty_editing) tty_redraw_tail();
                 tty_hist_view = -1;
             } else {
+                tty_move_cursor_to(tty_editing);
                 tty_buf[tty_editing] = '\n';
                 tty_line_len = tty_editing + 1;
                 tty_pos = 0;
                 tty_editing = 0;
+                tty_cursor = 0;
                 tty_echo_ch('\n');
                 return;
             }

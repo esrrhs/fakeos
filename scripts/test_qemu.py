@@ -302,6 +302,7 @@ def main():
         "[PASS] I/O APIC IRQ1 (kbd) -> 33, IRQ4 (COM1) -> 36 armed",
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
         "[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB",
+        "[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin",
         "Multiboot Physical Memory Map",
         "Buddy Physical Page Allocator Online",
         "4-Level Page Table Toolchain Online",
@@ -360,7 +361,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - builtins, pipes/redirects, &&/||, jobs, PATH/quotes, kill; persist under /home",
+        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg, history/!!/arrows/readline, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",

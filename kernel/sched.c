@@ -1,6 +1,5 @@
 package kernel;
 import arch;
-import fs;
 import mem;
 import types;
 
@@ -14,6 +13,14 @@ extern u32 pipe_close(u32 fh);
 extern u32 sock_fh_is(u32 fh);
 extern void sock_retain(u32 fh);
 extern u32 sock_close(u32 fh);
+
+/* fs / Ext2 (externs avoid import fs re-parsing large Ext2 into sched). */
+extern u32 fs_console_fh(void);
+extern u32 fs_file_retain(u32 fh);
+extern u32 fs_close(u32 fh);
+extern u32 ext2_fh_is(u32 fh);
+extern void ext2_file_retain(u32 fh);
+extern u32 ext2_close(u32 fh);
 
 extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
@@ -67,6 +74,7 @@ struct tcb {
     u32 sig_ignore;    /* Bitmask: bit N set => ignore signal N           */
     u64 sig_handler[32]; /* 0=DFL, 1=IGN, else user handler VA            */
     u64 sig_restorer[32]; /* user rt_sigreturn trampoline (may be 0)      */
+    u64 sig_flags[32];   /* sa_flags (SA_RESTART=0x10000000, ...)         */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -109,6 +117,7 @@ void sched_init(void) {
             for (s = 0; s < 32; s++) {
                 threads[i].sig_handler[s] = 0;
                 threads[i].sig_restorer[s] = 0;
+                threads[i].sig_flags[s] = 0;
             }
         }
         for (j = 0; j < FD_MAX; j++) {
@@ -166,9 +175,9 @@ static void fd_table_clear(struct tcb *t) {
 
 static void fd_table_install_console(struct tcb *t) {
     fd_table_clear(t);
-    t->fd[0] = fs.fs_console_fh();
-    t->fd[1] = fs.fs_console_fh();
-    t->fd[2] = fs.fs_console_fh();
+    t->fd[0] = fs_console_fh();
+    t->fd[1] = fs_console_fh();
+    t->fd[2] = fs_console_fh();
 }
 
 static void cwd_set_root(struct tcb *t) {
@@ -278,6 +287,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
         for (s = 0; s < 32; s++) {
             threads[i].sig_handler[s] = 0;
             threads[i].sig_restorer[s] = 0;
+            threads[i].sig_flags[s] = 0;
         }
     }
     fd_table_install_console(&threads[i]);
@@ -341,14 +351,14 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
             threads[i].fd[f] = fh;
             if (fh != FD_EMPTY) {
                 /* Shared open-file description; console retain is a no-op. */
-                if (fs.ext2_fh_is(fh)) {
-                    fs.ext2_file_retain(fh);
+                if (ext2_fh_is(fh)) {
+                    ext2_file_retain(fh);
                 } else if (pipe_fh_is(fh)) {
                     pipe_retain(fh);
                 } else if (sock_fh_is(fh)) {
                     sock_retain(fh);
                 } else {
-                    fs.fs_file_retain(fh);
+                    fs_file_retain(fh);
                 }
             }
         }
@@ -360,6 +370,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
         u32 s;
         for (s = 0; s < 32; s++) {
             threads[i].sig_handler[s] = threads[current].sig_handler[s];
+            threads[i].sig_flags[s] = threads[current].sig_flags[s];
             threads[i].sig_restorer[s] = threads[current].sig_restorer[s];
         }
     }
@@ -607,14 +618,14 @@ void sched_fd_close_all(void) {
     for (i = 0; i < FD_MAX; i++) {
         if (threads[current].fd[i] != FD_EMPTY) {
             u32 fh = threads[current].fd[i];
-            if (fs.ext2_fh_is(fh)) {
-                fs.ext2_close(fh);
+            if (ext2_fh_is(fh)) {
+                ext2_close(fh);
             } else if (pipe_fh_is(fh)) {
                 pipe_close(fh);
             } else if (sock_fh_is(fh)) {
                 sock_close(fh);
             } else {
-                fs.fs_close(fh);
+                fs_close(fh);
             }
             threads[current].fd[i] = FD_EMPTY;
         }
@@ -715,21 +726,75 @@ u32 sched_sig_get(u32 sig, u64 *handler_out) {
     return 0;
 }
 
-u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 *old_out) {
+u32 sched_sig_get_flags(u32 sig, u64 *flags_out) {
+    if (sig == 0 || sig > 31) {
+        return (u32)-1;
+    }
+    if (flags_out) {
+        *flags_out = threads[current].sig_flags[sig];
+    }
+    return 0;
+}
+
+enum { SA_RESTART_F = 0x10000000u };
+
+u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 flags, u64 *old_out,
+                    u64 *old_flags_out) {
     u64 old = 0;
+    u64 oldf = 0;
     if (sig == 0 || sig > 31 || sig == SIGKILL_N || sig == 19) {
         return (u32)-1;
     }
     old = threads[current].sig_handler[sig];
+    oldf = threads[current].sig_flags[sig];
     if (old_out) {
         *old_out = old;
     }
+    if (old_flags_out) {
+        *old_flags_out = oldf;
+    }
     threads[current].sig_handler[sig] = handler;
     threads[current].sig_restorer[sig] = restorer;
+    threads[current].sig_flags[sig] = flags;
     if (handler == 1) {
         threads[current].sig_ignore |= (1u << sig);
     } else {
         threads[current].sig_ignore &= ~(1u << sig);
+    }
+    return 0;
+}
+
+/* True when a pending signal should abort an interruptible sleep with EINTR.
+ * Custom handlers with SA_RESTART leave the syscall blocked (handler runs
+ * when the call eventually returns); without SA_RESTART they interrupt. */
+u32 sched_has_pending_fatal(void);
+
+u32 sched_should_eintr(void) {
+    u32 pend;
+    u32 ign;
+    u32 sig;
+    if (!threads[current].is_user) {
+        return 0;
+    }
+    if (sched_has_pending_fatal()) {
+        return 1;
+    }
+    pend = threads[current].pending_sigs;
+    ign = threads[current].sig_ignore;
+    pend &= ~ign;
+    for (sig = 1; sig <= 31; sig++) {
+        u64 h;
+        if ((pend & (1u << sig)) == 0) continue;
+        if (sig == SIGKILL_N) return 1;
+        h = threads[current].sig_handler[sig];
+        if (h > 1) {
+            if ((threads[current].sig_flags[sig] & SA_RESTART_F) == 0) {
+                return 1;
+            }
+            continue; /* SA_RESTART: keep sleeping */
+        }
+        /* Default action that stops a wait/read: INT/TERM already covered by
+         * has_pending_fatal; other defaults are ignored for EINTR. */
     }
     return 0;
 }
