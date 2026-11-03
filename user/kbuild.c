@@ -203,7 +203,7 @@ int main(void) {
     }
     puts("[kbuild] ping compile+run OK");
 
-    unsigned long nmod = 26;
+    unsigned long nmod = 33;
     unsigned long ok = 0;
     unsigned long diff = 0;
     char got_buf[READ_CAP];

@@ -134,6 +134,7 @@ def second_boot_checks(disk):
         "[BLK] using ",
         "[EXT2] mounted:",
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
+        "[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB",
         "m6-ext2-persistent-ok",
         "fakeos:~$",
         "hello from /bin/hello",
@@ -268,6 +269,8 @@ def main():
         "[PASS] Exception #PF",
         "[PASS] APIC Timer Calibration",
         "[PASS] I/O APIC IRQ4 (COM1) routed to vector 36, UART RDA armed",
+        "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
+        "[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB",
         "Multiboot Physical Memory Map",
         "Buddy Physical Page Allocator Online",
         "4-Level Page Table Toolchain Online",
@@ -331,7 +334,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: VFS, Ramfs, POSIX syscalls, TTY input, libc and interactive shell online!",
+        "[SUCCESS] fakeos: VFS/Ramfs/shell + VirtIO-blk/Ext2 /mnt persistence online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
@@ -394,10 +397,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 31 modules accounted for",
-         identical + mismatches == 31),
-        (f"all 31 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 31 and mismatches == 0),
+        ("all 33 modules accounted for",
+         identical + mismatches == 33),
+        (f"all 33 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 33 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

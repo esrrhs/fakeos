@@ -14,7 +14,7 @@ extern void kprintf(const char *fmt, ...);
  *
  * Mount, path lookup, open/read/write/lseek, create, mkdir, getdents,
  * unlink (regular files), sync. Block size 1024 or 4096. Single block
- * group. Direct + single-indirect maps only.
+ * group. Direct + single- and double-indirect maps.
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -88,6 +88,7 @@ struct ext2_open {
 static struct ext2_sb sb;
 static struct ext2_open opens[MAX_OPEN];
 static u8 blk_buf[4096];
+static u8 ind_buf[4096];
 static u8 ino_raw[128];
 
 static u16 rd16(const u8 *p) {
@@ -205,25 +206,101 @@ static u32 inode_write(u32 ino, const u8 *raw) {
     return bwrite(blk, blk_buf);
 }
 
+
+/* Release every data and indirect block referenced by an inode (direct,
+ * single-, and double-indirect). Leaves the raw inode image zeroed for
+ * the caller to write back. */
+static void inode_free_all_blocks(u8 *raw) {
+    u32 b;
+    u32 nent = sb.block_size / 4;
+    for (b = 0; b < 12; b++) {
+        u32 phys = rd32(raw + I_BLOCK + b * 4);
+        if (phys) {
+            free_block_bit(phys);
+            wr32(raw + I_BLOCK + b * 4, 0);
+        }
+    }
+    {
+        u32 ind = rd32(raw + I_BLOCK + 12 * 4);
+        if (ind) {
+            u32 j;
+            if (bread(ind, blk_buf)) {
+                for (j = 0; j < nent; j++) {
+                    u32 p = rd32(blk_buf + j * 4);
+                    if (p) free_block_bit(p);
+                }
+            }
+            free_block_bit(ind);
+            wr32(raw + I_BLOCK + 12 * 4, 0);
+        }
+    }
+    {
+        u32 dind = rd32(raw + I_BLOCK + 13 * 4);
+        if (dind) {
+            u32 i;
+            if (bread(dind, ind_buf)) {
+                for (i = 0; i < nent; i++) {
+                    u32 leaf = rd32(ind_buf + i * 4);
+                    u32 j;
+                    if (leaf == 0) continue;
+                    if (bread(leaf, blk_buf)) {
+                        for (j = 0; j < nent; j++) {
+                            u32 p = rd32(blk_buf + j * 4);
+                            if (p) free_block_bit(p);
+                        }
+                    }
+                    free_block_bit(leaf);
+                }
+            }
+            free_block_bit(dind);
+            wr32(raw + I_BLOCK + 13 * 4, 0);
+        }
+    }
+    wr32(raw + I_SIZE_LO, 0);
+    wr32(raw + I_BLOCKS, 0);
+}
+
 static u32 inode_get_block(const u8 *raw, u32 file_block) {
+    u32 ptrs = sb.block_size / 4;
+    u32 single_max = 12 + ptrs;
+    u32 double_max = single_max + ptrs * ptrs;
     if (file_block < 12) {
         return rd32(raw + I_BLOCK + file_block * 4);
     }
-    if (file_block < 12 + sb.block_size / 4) {
+    if (file_block < single_max) {
         u32 ind = rd32(raw + I_BLOCK + 12 * 4);
         if (ind == 0) return 0;
         if (!bread(ind, blk_buf)) return 0;
         return rd32(blk_buf + (file_block - 12) * 4);
     }
+    if (file_block < double_max) {
+        u32 dind = rd32(raw + I_BLOCK + 13 * 4);
+        u32 rel;
+        u32 lvl1;
+        u32 lvl2;
+        u32 leaf;
+        if (dind == 0) return 0;
+        rel = file_block - single_max;
+        lvl1 = rel / ptrs;
+        lvl2 = rel % ptrs;
+        if (!bread(dind, ind_buf)) return 0;
+        leaf = rd32(ind_buf + lvl1 * 4);
+        if (leaf == 0) return 0;
+        if (!bread(leaf, blk_buf)) return 0;
+        return rd32(blk_buf + lvl2 * 4);
+    }
     return 0;
 }
 
 static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
+    u32 ptrs = sb.block_size / 4;
+    u32 single_max = 12 + ptrs;
+    u32 double_max = single_max + ptrs * ptrs;
     if (file_block < 12) {
         wr32(raw + I_BLOCK + file_block * 4, phys);
         return 1;
     }
-    if (file_block < 12 + sb.block_size / 4) {
+    if (file_block < single_max) {
         u32 ind = rd32(raw + I_BLOCK + 12 * 4);
         u32 idx;
         if (ind == 0) {
@@ -235,6 +312,38 @@ static u32 inode_set_block(u8 *raw, u32 file_block, u32 phys) {
         idx = file_block - 12;
         wr32(blk_buf + idx * 4, phys);
         return bwrite(ind, blk_buf);
+    }
+    if (file_block < double_max) {
+        u32 dind = rd32(raw + I_BLOCK + 13 * 4);
+        u32 rel;
+        u32 lvl1;
+        u32 lvl2;
+        u32 leaf;
+        u32 ib;
+        if (dind == 0) {
+            dind = alloc_block();
+            if (dind == 0) return 0;
+            wr32(raw + I_BLOCK + 13 * 4, dind);
+            /* i_blocks counts the new indirect block in 512-byte units. */
+            ib = rd32(raw + I_BLOCKS);
+            wr32(raw + I_BLOCKS, ib + sb.block_size / 512);
+        }
+        rel = file_block - single_max;
+        lvl1 = rel / ptrs;
+        lvl2 = rel % ptrs;
+        if (!bread(dind, ind_buf)) return 0;
+        leaf = rd32(ind_buf + lvl1 * 4);
+        if (leaf == 0) {
+            leaf = alloc_block();
+            if (leaf == 0) return 0;
+            wr32(ind_buf + lvl1 * 4, leaf);
+            if (!bwrite(dind, ind_buf)) return 0;
+            ib = rd32(raw + I_BLOCKS);
+            wr32(raw + I_BLOCKS, ib + sb.block_size / 512);
+        }
+        if (!bread(leaf, blk_buf)) return 0;
+        wr32(blk_buf + lvl2 * 4, phys);
+        return bwrite(leaf, blk_buf);
     }
     return 0;
 }
@@ -634,32 +743,7 @@ u32 ext2_open(const char *path, u32 flags) {
     if (!inode_read(ino, ino_raw)) return 0;
 
     if (want_trunc && !is_dir && (acc == O_WRONLY || acc == O_RDWR)) {
-        /* Free data blocks and reset size (simple: clear direct ptrs). */
-        u32 b;
-        for (b = 0; b < 12; b++) {
-            u32 phys = rd32(ino_raw + I_BLOCK + b * 4);
-            if (phys) {
-                free_block_bit(phys);
-                wr32(ino_raw + I_BLOCK + b * 4, 0);
-            }
-        }
-        {
-            u32 ind = rd32(ino_raw + I_BLOCK + 12 * 4);
-            if (ind) {
-                u32 nent = sb.block_size / 4;
-                u32 j;
-                if (bread(ind, blk_buf)) {
-                    for (j = 0; j < nent; j++) {
-                        u32 p = rd32(blk_buf + j * 4);
-                        if (p) free_block_bit(p);
-                    }
-                }
-                free_block_bit(ind);
-                wr32(ino_raw + I_BLOCK + 12 * 4, 0);
-            }
-        }
-        wr32(ino_raw + I_SIZE_LO, 0);
-        wr32(ino_raw + I_BLOCKS, 0);
+        inode_free_all_blocks(ino_raw);
         if (!inode_write(ino, ino_raw)) return 0;
     }
 
@@ -942,24 +1026,7 @@ u32 ext2_unlink(const char *path) {
     }
     if (!dir_remove(parent, last, last_n, &victim)) return 0;
     if (!inode_read(victim, ino_raw)) return 0;
-    for (b = 0; b < 12; b++) {
-        u32 phys = rd32(ino_raw + I_BLOCK + b * 4);
-        if (phys) free_block_bit(phys);
-    }
-    {
-        u32 ind = rd32(ino_raw + I_BLOCK + 12 * 4);
-        if (ind) {
-            u32 nent = sb.block_size / 4;
-            u32 j;
-            if (bread(ind, blk_buf)) {
-                for (j = 0; j < nent; j++) {
-                    u32 p = rd32(blk_buf + j * 4);
-                    if (p) free_block_bit(p);
-                }
-            }
-            free_block_bit(ind);
-        }
-    }
+    inode_free_all_blocks(ino_raw);
     for (b = 0; b < 128; b++) ino_raw[b] = 0;
     inode_write(victim, ino_raw);
     free_inode_bit(victim);
@@ -1051,4 +1118,75 @@ void ext2_selftest(void) {
         }
     }
     kprintf("[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt\n");
+
+    /* Past single-indirect: 12 + 256 = 268 KiB at 1 KiB blocks; write 300 KiB
+     * so the double-indirect pointer is exercised, then read back tails. */
+    {
+        u32 fh2;
+        u32 total = 300 * 1024;
+        u32 done = 0;
+        u8 pattern[512];
+        u32 i;
+        for (i = 0; i < 512; i++) pattern[i] = (u8)(i & 0xFF);
+        fh2 = ext2_open("/mnt/big.bin", O_CREAT | O_RDWR | O_TRUNC);
+        if (fh2 == 0) {
+            kprintf("[EXT2] [FAIL] create /mnt/big.bin\n");
+            return;
+        }
+        while (done < total) {
+            u32 chunk = 512;
+            u64 n;
+            if (chunk > total - done) chunk = total - done;
+            n = ext2_write(fh2, (char *)pattern, chunk);
+            if (n != chunk) {
+                kprintf("[EXT2] [FAIL] big write at %u got %u\n", (u64)done, n);
+                ext2_close(fh2);
+                return;
+            }
+            done += chunk;
+        }
+        if (ext2_lseek(fh2, 0, SEEK_SET) != 0) {
+            kprintf("[EXT2] [FAIL] big lseek 0\n");
+            ext2_close(fh2);
+            return;
+        }
+        /* Spot-check first and last 512 bytes (past single-indirect). */
+        {
+            u8 got[512];
+            u64 n = ext2_read(fh2, (char *)got, 512);
+            if (n != 512) {
+                kprintf("[EXT2] [FAIL] big head read %u\n", n);
+                ext2_close(fh2);
+                return;
+            }
+            for (i = 0; i < 512; i++) {
+                if (got[i] != pattern[i]) {
+                    kprintf("[EXT2] [FAIL] big head mismatch\n");
+                    ext2_close(fh2);
+                    return;
+                }
+            }
+            if (ext2_lseek(fh2, total - 512, SEEK_SET) != (u64)(total - 512)) {
+                kprintf("[EXT2] [FAIL] big lseek tail\n");
+                ext2_close(fh2);
+                return;
+            }
+            n = ext2_read(fh2, (char *)got, 512);
+            if (n != 512) {
+                kprintf("[EXT2] [FAIL] big tail read %u\n", n);
+                ext2_close(fh2);
+                return;
+            }
+            for (i = 0; i < 512; i++) {
+                if (got[i] != pattern[i]) {
+                    kprintf("[EXT2] [FAIL] big tail mismatch\n");
+                    ext2_close(fh2);
+                    return;
+                }
+            }
+        }
+        ext2_close(fh2);
+        drivers.blk_flush();
+        kprintf("[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB\n");
+    }
 }
