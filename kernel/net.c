@@ -1,4 +1,5 @@
 package kernel;
+import mem;
 import types;
 
 typedef types.uint8_t  u8;
@@ -12,14 +13,21 @@ extern u32 virtio_net_present(void);
 extern void virtio_net_mac(u8 *out);
 extern u32 virtio_net_tx(const void *frame, u32 len);
 extern u32 virtio_net_rx(void *frame, u32 maxlen);
+extern void sched_yield(void);
+extern void sched_sleep(u64 chan);
+extern void sched_wakeup(u64 chan);
+extern u64 sched_current_as_h(void);
+extern u32 sched_fd_alloc(void);
+extern void sched_fd_set(u32 idx, u32 fh);
+extern u32 sched_fd_get(u32 idx);
 
 /* ---------------------------------------------------------------------------
- * Minimal L2/L3: Ethernet + ARP + IPv4 + ICMP echo.
+ * Minimal L2/L3 + BSD-ish UDP sockets.
  *
  * Static addressing matches QEMU user-mode networking defaults:
  *   guest 10.0.2.15/24, gateway/DNS 10.0.2.2.
- * Host can be reached by ICMP echo (guest ping 10.0.2.2). Incoming echo
- * requests are answered so a bridged setup can ping the guest too.
+ * ICMP echo (sys_ping) plus socket/bind/connect/sendto/recvfrom for UDP.
+ * SOCK_STREAM is accepted as a scaffold (create/bind only; I/O returns -1).
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -28,21 +36,63 @@ enum {
     ARP_OP_REQ    = 1,
     ARP_OP_REP    = 2,
     IP_PROTO_ICMP = 1,
+    IP_PROTO_TCP  = 6,
+    IP_PROTO_UDP  = 17,
     ICMP_ECHO_REP = 0,
     ICMP_ECHO_REQ = 8,
     ETH_HDR       = 14,
     ARP_LEN       = 28,
     IP_HDR        = 20,
     ICMP_HDR      = 8,
+    UDP_HDR       = 8,
     FRAME_MAX     = 1514,
     ARP_CACHE     = 8,
-    PING_DATA_LEN = 32
+    PING_DATA_LEN = 32,
+
+    AF_INET       = 2,
+    SOCK_STREAM   = 1,
+    SOCK_DGRAM    = 2,
+    IPPROTO_IP    = 0,
+    IPPROTO_TCP   = 6,
+    IPPROTO_UDP   = 17,
+
+    FH_SOCK_BASE  = 0x20000000u,
+    FD_BAD        = 0xFFFFFFFF,
+    MAX_SOCKS     = 16,
+    SOCK_RXQ      = 8,
+    UDP_MAX_PAYLOAD = 1400,
+    SOCKADDR_IN_LEN = 16,
+    EPHEMERAL_BASE = 49152,
+    EPHEMERAL_MAX  = 65535
 };
 
 struct arp_entry {
     u32 ip;
     u8  mac[6];
     u32 used;
+};
+
+struct udp_pkt {
+    u32 src_ip;
+    u16 src_port;
+    u16 len;
+    u8  data[UDP_MAX_PAYLOAD];
+};
+
+struct sock {
+    u32 used;
+    u32 refs;
+    u32 type;          /* SOCK_DGRAM / SOCK_STREAM */
+    u32 bound;
+    u32 connected;
+    u16 local_port;
+    u32 local_ip;      /* host order; 0 = INADDR_ANY */
+    u32 peer_ip;       /* host order */
+    u16 peer_port;
+    u32 rx_head;
+    u32 rx_tail;
+    u32 rx_count;
+    struct udp_pkt rxq[SOCK_RXQ];
 };
 
 static u8  local_mac[6];
@@ -58,6 +108,8 @@ static u16 ping_seq;
 static u32 ping_waiting;
 static u32 ping_got_reply;
 static u32 ping_target;
+static struct sock socks[MAX_SOCKS];
+static u16 next_eph = EPHEMERAL_BASE;
 
 static u16 checksum(const u8 *data, u32 len) {
     u32 sum = 0;
@@ -106,6 +158,14 @@ static u32 get32(const u8 *p) {
     return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
 }
 
+static void mem_zero(void *dst, u32 n) {
+    u8 *p = (u8 *)dst;
+    u32 i;
+    for (i = 0; i < n; i++) {
+        p[i] = 0;
+    }
+}
+
 static void arp_learn(u32 ip, const u8 *mac) {
     u32 i;
     for (i = 0; i < ARP_CACHE; i++) {
@@ -122,7 +182,6 @@ static void arp_learn(u32 ip, const u8 *mac) {
             return;
         }
     }
-    /* Overwrite slot 0 when full. */
     arp_tab[0].used = 1;
     arp_tab[0].ip = ip;
     mac_copy(arp_tab[0].mac, mac);
@@ -160,10 +219,10 @@ static u32 arp_send(u16 op, u32 tip, const u8 *tmac) {
     for (i = 0; i < ARP_LEN; i++) {
         pkt[i] = 0;
     }
-    put16(pkt + 0, 1);                /* HTYPE Ethernet */
-    put16(pkt + 2, ETH_TYPE_IP);      /* PTYPE IPv4 */
-    pkt[4] = 6;                       /* HLEN */
-    pkt[5] = 4;                       /* PLEN */
+    put16(pkt + 0, 1);
+    put16(pkt + 2, ETH_TYPE_IP);
+    pkt[4] = 6;
+    pkt[5] = 4;
     put16(pkt + 6, op);
     mac_copy(pkt + 8, local_mac);
     put32(pkt + 14, local_ip);
@@ -213,10 +272,10 @@ static u32 ip_send(u32 dst_ip, u8 proto, const u8 *payload, u32 plen, const u8 *
     for (i = 0; i < total; i++) {
         ippkt[i] = 0;
     }
-    ippkt[0] = 0x45;                  /* v4, IHL=5 */
+    ippkt[0] = 0x45;
     put16(ippkt + 2, (u16)total);
-    put16(ippkt + 4, ping_id);        /* identification */
-    ippkt[8] = 64;                    /* TTL */
+    put16(ippkt + 4, ping_id);
+    ippkt[8] = 64;
     ippkt[9] = proto;
     put32(ippkt + 12, local_ip);
     put32(ippkt + 16, dst_ip);
@@ -256,6 +315,172 @@ static void handle_icmp(u32 src_ip, const u8 *icmp, u32 len, const u8 *src_mac) 
     }
 }
 
+/* ---------------- sockets (UDP) ---------------- */
+
+u32 sock_fh_is(u32 fh) {
+    return (fh & FH_SOCK_BASE) != 0 && (fh & 0xC0000000u) == 0;
+}
+
+static u32 sock_slot(u32 fh) {
+    return fh & ~FH_SOCK_BASE;
+}
+
+static struct sock *sock_from_fh(u32 fh) {
+    u32 s;
+    if (!sock_fh_is(fh)) {
+        return 0;
+    }
+    s = sock_slot(fh);
+    if (s >= MAX_SOCKS || !socks[s].used) {
+        return 0;
+    }
+    return &socks[s];
+}
+
+void sock_retain(u32 fh) {
+    struct sock *sk = sock_from_fh(fh);
+    if (sk) {
+        sk->refs++;
+    }
+}
+
+u32 sock_close(u32 fh) {
+    struct sock *sk = sock_from_fh(fh);
+    if (!sk) {
+        return 0;
+    }
+    if (sk->refs > 1) {
+        sk->refs--;
+        return 1;
+    }
+    sk->used = 0;
+    sk->refs = 0;
+    sk->rx_count = 0;
+    sk->rx_head = 0;
+    sk->rx_tail = 0;
+    sched_wakeup((u64)sk);
+    return 1;
+}
+
+static u32 sock_alloc_slot(void) {
+    u32 i;
+    for (i = 1; i < MAX_SOCKS; i++) {
+        if (!socks[i].used) {
+            mem_zero(&socks[i], (u32)sizeof(struct sock));
+            socks[i].used = 1;
+            socks[i].refs = 1;
+            return i;
+        }
+    }
+    return 0;
+}
+
+static u16 alloc_ephemeral(void) {
+    u32 tries;
+    for (tries = 0; tries < 16384; tries++) {
+        u16 p = next_eph;
+        u32 i;
+        u32 taken = 0;
+        if (next_eph >= EPHEMERAL_MAX) {
+            next_eph = EPHEMERAL_BASE;
+        } else {
+            next_eph = (u16)(next_eph + 1);
+        }
+        for (i = 1; i < MAX_SOCKS; i++) {
+            if (socks[i].used && socks[i].bound && socks[i].local_port == p) {
+                taken = 1;
+                break;
+            }
+        }
+        if (!taken) {
+            return p;
+        }
+    }
+    return 0;
+}
+
+static u32 port_in_use(u16 port, u32 except_slot) {
+    u32 i;
+    for (i = 1; i < MAX_SOCKS; i++) {
+        if (i == except_slot) {
+            continue;
+        }
+        if (socks[i].used && socks[i].bound && socks[i].local_port == port) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void sock_enqueue(struct sock *sk, u32 src_ip, u16 src_port,
+                         const u8 *payload, u16 plen) {
+    struct udp_pkt *pkt;
+    u32 i;
+    if (plen > UDP_MAX_PAYLOAD) {
+        plen = UDP_MAX_PAYLOAD;
+    }
+    if (sk->rx_count >= SOCK_RXQ) {
+        /* Drop oldest. */
+        sk->rx_head++;
+        if (sk->rx_head >= SOCK_RXQ) {
+            sk->rx_head = 0;
+        }
+        sk->rx_count--;
+    }
+    pkt = &sk->rxq[sk->rx_tail];
+    pkt->src_ip = src_ip;
+    pkt->src_port = src_port;
+    pkt->len = plen;
+    for (i = 0; i < plen; i++) {
+        pkt->data[i] = payload[i];
+    }
+    sk->rx_tail++;
+    if (sk->rx_tail >= SOCK_RXQ) {
+        sk->rx_tail = 0;
+    }
+    sk->rx_count++;
+    sched_wakeup((u64)sk);
+}
+
+static void handle_udp(u32 src_ip, u32 dst_ip, const u8 *udp, u32 len) {
+    u16 sport;
+    u16 dport;
+    u16 ulen;
+    u32 i;
+    const u8 *payload;
+    u16 plen;
+    if (len < UDP_HDR) {
+        return;
+    }
+    sport = get16(udp + 0);
+    dport = get16(udp + 2);
+    ulen = get16(udp + 4);
+    if (ulen < UDP_HDR || ulen > len) {
+        return;
+    }
+    payload = udp + UDP_HDR;
+    plen = (u16)(ulen - UDP_HDR);
+    for (i = 1; i < MAX_SOCKS; i++) {
+        struct sock *sk = &socks[i];
+        if (!sk->used || sk->type != SOCK_DGRAM || !sk->bound) {
+            continue;
+        }
+        if (sk->local_port != dport) {
+            continue;
+        }
+        if (sk->local_ip != 0 && sk->local_ip != dst_ip) {
+            continue;
+        }
+        if (sk->connected) {
+            if (sk->peer_ip != src_ip || sk->peer_port != sport) {
+                continue;
+            }
+        }
+        sock_enqueue(sk, src_ip, sport, payload, plen);
+        return;
+    }
+}
+
 static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
     u8 ihl;
     u16 total;
@@ -285,6 +510,8 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
     }
     if (proto == IP_PROTO_ICMP) {
         handle_icmp(src, pkt + ihl, (u32)(total - ihl), src_mac);
+    } else if (proto == IP_PROTO_UDP) {
+        handle_udp(src, dst, pkt + ihl, (u32)(total - ihl));
     }
 }
 
@@ -313,6 +540,9 @@ void net_poll(void) {
 static u32 resolve_mac(u32 ip, u8 *mac_out) {
     u32 spins;
     u32 i;
+    if ((ip & netmask) != (local_ip & netmask)) {
+        ip = gateway_ip;
+    }
     if (arp_lookup(ip, mac_out)) {
         return 1;
     }
@@ -322,12 +552,61 @@ static u32 resolve_mac(u32 ip, u8 *mac_out) {
         if (arp_lookup(ip, mac_out)) {
             return 1;
         }
-        /* Mild delay via a tiny busy touch. */
         for (i = 0; i < 20; i++) {
             (void)i;
         }
     }
     return 0;
+}
+
+static u32 udp_deliver_local(u16 sport, u32 dst_ip, u16 dport,
+                             const u8 *payload, u16 plen) {
+    u32 i;
+    u32 hit = 0;
+    for (i = 1; i < MAX_SOCKS; i++) {
+        struct sock *sk = &socks[i];
+        if (!sk->used || sk->type != SOCK_DGRAM || !sk->bound) {
+            continue;
+        }
+        if (sk->local_port != dport) {
+            continue;
+        }
+        if (sk->local_ip != 0 && sk->local_ip != dst_ip) {
+            continue;
+        }
+        if (sk->connected && (sk->peer_ip != local_ip || sk->peer_port != sport)) {
+            continue;
+        }
+        sock_enqueue(sk, local_ip, sport, payload, plen);
+        hit = 1;
+        break;
+    }
+    return hit;
+}
+
+static u32 udp_tx(u16 sport, u32 dst_ip, u16 dport,
+                  const u8 *payload, u16 plen) {
+    u8 udp[FRAME_MAX];
+    u8 dst_mac[6];
+    u32 i;
+    if (UDP_HDR + plen > FRAME_MAX - ETH_HDR - IP_HDR) {
+        return 0;
+    }
+    /* Loopback to our own address: never leave the host. */
+    if (dst_ip == local_ip) {
+        return udp_deliver_local(sport, dst_ip, dport, payload, plen);
+    }
+    if (!resolve_mac(dst_ip, dst_mac)) {
+        return 0;
+    }
+    put16(udp + 0, sport);
+    put16(udp + 2, dport);
+    put16(udp + 4, (u16)(UDP_HDR + plen));
+    put16(udp + 6, 0);                 /* checksum optional for IPv4 */
+    for (i = 0; i < plen; i++) {
+        udp[UDP_HDR + i] = payload[i];
+    }
+    return ip_send(dst_ip, IP_PROTO_UDP, udp, UDP_HDR + plen, dst_mac);
 }
 
 /* Blocking ICMP echo to `dst_ip` (host order). Returns 1 on reply. */
@@ -392,6 +671,345 @@ u32 net_local_ip(void) {
     return local_ip;
 }
 
+/* Parse a user sockaddr_in (16 bytes) into host-order ip + port. */
+static u32 parse_sockaddr_in(u64 uaddr, u64 ulen, u32 *ip_out, u16 *port_out) {
+    u64 as = sched_current_as_h();
+    volatile u8 *p;
+    u16 family;
+    if (as == 0 || ulen < SOCKADDR_IN_LEN) {
+        return 0;
+    }
+    if (!mem.as_user_range_ok(as, uaddr, SOCKADDR_IN_LEN)) {
+        return 0;
+    }
+    p = (volatile u8 *)uaddr;
+    family = (u16)p[0] | ((u16)p[1] << 8);
+    if (family != AF_INET) {
+        return 0;
+    }
+    *port_out = (u16)(((u16)p[2] << 8) | (u16)p[3]);
+    *ip_out = ((u32)p[4] << 24) | ((u32)p[5] << 16) | ((u32)p[6] << 8) | (u32)p[7];
+    return 1;
+}
+
+static u32 write_sockaddr_in(u64 uaddr, u64 ualen_ptr, u32 ip, u16 port) {
+    u64 as = sched_current_as_h();
+    volatile u8 *p;
+    volatile u32 *alenp;
+    u32 alen;
+    u32 i;
+    if (uaddr == 0) {
+        return 1;                      /* caller does not want address */
+    }
+    if (as == 0 || ualen_ptr == 0) {
+        return 0;
+    }
+    if (!mem.as_user_range_ok(as, ualen_ptr, 4)) {
+        return 0;
+    }
+    alenp = (volatile u32 *)ualen_ptr;
+    alen = *alenp;
+    if (alen < SOCKADDR_IN_LEN) {
+        return 0;
+    }
+    if (!mem.as_user_range_ok(as, uaddr, SOCKADDR_IN_LEN)) {
+        return 0;
+    }
+    p = (volatile u8 *)uaddr;
+    p[0] = (u8)(AF_INET & 0xFF);
+    p[1] = (u8)((AF_INET >> 8) & 0xFF);
+    p[2] = (u8)(port >> 8);
+    p[3] = (u8)(port & 0xFF);
+    p[4] = (u8)(ip >> 24);
+    p[5] = (u8)(ip >> 16);
+    p[6] = (u8)(ip >> 8);
+    p[7] = (u8)(ip & 0xFF);
+    for (i = 8; i < SOCKADDR_IN_LEN; i++) {
+        p[i] = 0;
+    }
+    *alenp = SOCKADDR_IN_LEN;
+    return 1;
+}
+
+u64 sys_socket(u64 domain, u64 type, u64 protocol) {
+    u32 slot;
+    u32 fd;
+    if (!net_up) {
+        return (u64)(-1);
+    }
+    if (domain != AF_INET) {
+        return (u64)(-1);
+    }
+    if (type != SOCK_DGRAM && type != SOCK_STREAM) {
+        return (u64)(-1);
+    }
+    if (type == SOCK_DGRAM) {
+        if (protocol != IPPROTO_IP && protocol != IPPROTO_UDP) {
+            return (u64)(-1);
+        }
+    } else {
+        /* TCP scaffold: allow creation; data path still fails. */
+        if (protocol != IPPROTO_IP && protocol != IPPROTO_TCP) {
+            return (u64)(-1);
+        }
+    }
+    slot = sock_alloc_slot();
+    if (slot == 0) {
+        return (u64)(-1);
+    }
+    socks[slot].type = (u32)type;
+    fd = sched_fd_alloc();
+    if (fd == FD_BAD) {
+        socks[slot].used = 0;
+        return (u64)(-1);
+    }
+    sched_fd_set(fd, FH_SOCK_BASE | slot);
+    return (u64)fd;
+}
+
+u64 sys_bind(u64 fd, u64 uaddr, u64 ulen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk;
+    u32 ip;
+    u16 port;
+    sk = sock_from_fh(fh);
+    if (!sk) {
+        return (u64)(-1);
+    }
+    if (sk->bound) {
+        return (u64)(-1);
+    }
+    if (!parse_sockaddr_in(uaddr, ulen, &ip, &port)) {
+        return (u64)(-1);
+    }
+    if (ip != 0 && ip != local_ip) {
+        return (u64)(-1);
+    }
+    if (port == 0) {
+        port = alloc_ephemeral();
+        if (port == 0) {
+            return (u64)(-1);
+        }
+    } else if (port_in_use(port, sock_slot(fh))) {
+        return (u64)(-1);
+    }
+    sk->local_ip = ip;
+    sk->local_port = port;
+    sk->bound = 1;
+    return 0;
+}
+
+u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk;
+    u32 ip;
+    u16 port;
+    sk = sock_from_fh(fh);
+    if (!sk) {
+        return (u64)(-1);
+    }
+    if (sk->type == SOCK_STREAM) {
+        return (u64)(-1);             /* TCP not implemented yet */
+    }
+    if (!parse_sockaddr_in(uaddr, ulen, &ip, &port)) {
+        return (u64)(-1);
+    }
+    if (port == 0) {
+        return (u64)(-1);
+    }
+    if (!sk->bound) {
+        u16 eph = alloc_ephemeral();
+        if (eph == 0) {
+            return (u64)(-1);
+        }
+        sk->local_ip = 0;
+        sk->local_port = eph;
+        sk->bound = 1;
+    }
+    sk->peer_ip = ip;
+    sk->peer_port = port;
+    sk->connected = 1;
+    return 0;
+}
+
+u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk;
+    u64 as = sched_current_as_h();
+    u32 dst_ip;
+    u16 dst_port;
+    u8 kbuf[UDP_MAX_PAYLOAD];
+    u32 i;
+    u16 plen;
+    (void)flags;
+    sk = sock_from_fh(fh);
+    if (!sk || as == 0) {
+        return (u64)(-1);
+    }
+    if (sk->type != SOCK_DGRAM) {
+        return (u64)(-1);
+    }
+    if (len > UDP_MAX_PAYLOAD) {
+        len = UDP_MAX_PAYLOAD;
+    }
+    plen = (u16)len;
+    if (uaddr != 0) {
+        if (!parse_sockaddr_in(uaddr, ulen, &dst_ip, &dst_port)) {
+            return (u64)(-1);
+        }
+    } else if (sk->connected) {
+        dst_ip = sk->peer_ip;
+        dst_port = sk->peer_port;
+    } else {
+        return (u64)(-1);
+    }
+    if (dst_port == 0) {
+        return (u64)(-1);
+    }
+    if (!sk->bound) {
+        u16 eph = alloc_ephemeral();
+        if (eph == 0) {
+            return (u64)(-1);
+        }
+        sk->local_ip = 0;
+        sk->local_port = eph;
+        sk->bound = 1;
+    }
+    if (plen > 0) {
+        if (!mem.as_user_range_ok(as, ubuf, plen)) {
+            return (u64)(-1);
+        }
+        {
+            volatile u8 *u = (volatile u8 *)ubuf;
+            for (i = 0; i < plen; i++) {
+                kbuf[i] = u[i];
+            }
+        }
+    }
+    if (!udp_tx(sk->local_port, dst_ip, dst_port, kbuf, plen)) {
+        return (u64)(-1);
+    }
+    return (u64)plen;
+}
+
+u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk;
+    u64 as = sched_current_as_h();
+    struct udp_pkt *pkt;
+    u32 i;
+    u16 n;
+    u32 spins;
+    (void)flags;
+    sk = sock_from_fh(fh);
+    if (!sk || as == 0) {
+        return (u64)(-1);
+    }
+    if (sk->type != SOCK_DGRAM || !sk->bound) {
+        return (u64)(-1);
+    }
+    spins = 0;
+    while (sk->rx_count == 0) {
+        net_poll();
+        if (sk->rx_count > 0) {
+            break;
+        }
+        /* Yield so idle can run; also sleep on the sock channel. */
+        if ((spins & 63) == 0) {
+            sched_sleep((u64)sk);
+        } else {
+            sched_yield();
+        }
+        spins++;
+        if (spins > 2000000) {
+            return (u64)(-1);         /* soft timeout */
+        }
+        if (!sk->used) {
+            return (u64)(-1);
+        }
+    }
+    pkt = &sk->rxq[sk->rx_head];
+    n = pkt->len;
+    if (len < n) {
+        n = (u16)len;
+    }
+    if (n > 0) {
+        if (!mem.as_user_range_ok(as, ubuf, n)) {
+            return (u64)(-1);
+        }
+        {
+            volatile u8 *u = (volatile u8 *)ubuf;
+            for (i = 0; i < n; i++) {
+                u[i] = pkt->data[i];
+            }
+        }
+    }
+    if (uaddr != 0) {
+        if (!write_sockaddr_in(uaddr, ualen, pkt->src_ip, pkt->src_port)) {
+            return (u64)(-1);
+        }
+    }
+    sk->rx_head++;
+    if (sk->rx_head >= SOCK_RXQ) {
+        sk->rx_head = 0;
+    }
+    sk->rx_count--;
+    return (u64)n;
+}
+
+void net_udp_selftest(void) {
+    u32 a;
+    u32 b;
+    u8 payload[8];
+    u32 i;
+    if (!net_up) {
+        return;
+    }
+    a = sock_alloc_slot();
+    b = sock_alloc_slot();
+    if (a == 0 || b == 0) {
+        kprintf("      [FAIL] UDP selftest: no socket slots\n");
+        if (a) {
+            socks[a].used = 0;
+        }
+        if (b) {
+            socks[b].used = 0;
+        }
+        return;
+    }
+    socks[a].type = SOCK_DGRAM;
+    socks[a].local_ip = 0;
+    socks[a].local_port = 7;
+    socks[a].bound = 1;
+    socks[b].type = SOCK_DGRAM;
+    socks[b].local_ip = 0;
+    socks[b].local_port = alloc_ephemeral();
+    socks[b].bound = 1;
+    for (i = 0; i < 8; i++) {
+        payload[i] = (u8)('A' + i);
+    }
+    if (!udp_tx(socks[b].local_port, local_ip, 7, payload, 8)) {
+        kprintf("      [FAIL] UDP selftest: loopback send\n");
+    } else if (socks[a].rx_count == 0) {
+        kprintf("      [FAIL] UDP selftest: no loopback delivery\n");
+    } else {
+        struct udp_pkt *pkt = &socks[a].rxq[socks[a].rx_head];
+        u32 ok = (pkt->len == 8);
+        for (i = 0; ok && i < 8; i++) {
+            if (pkt->data[i] != payload[i]) {
+                ok = 0;
+            }
+        }
+        if (ok && pkt->src_port == socks[b].local_port) {
+            kprintf("      [PASS] UDP loopback (bind/sendto/recv path)\n");
+        } else {
+            kprintf("      [FAIL] UDP selftest: payload mismatch\n");
+        }
+    }
+    socks[a].used = 0;
+    socks[b].used = 0;
+}
+
 void net_selftest(void) {
     u32 ok;
     if (!net_up) {
@@ -404,6 +1022,7 @@ void net_selftest(void) {
     } else {
         kprintf("      [FAIL] no ICMP echo reply (is virtio-net + user netdev attached?)\n");
     }
+    net_udp_selftest();
 }
 
 void net_init(void) {
@@ -416,8 +1035,12 @@ void net_init(void) {
     ping_seq = 0;
     ping_waiting = 0;
     ping_got_reply = 0;
+    next_eph = EPHEMERAL_BASE;
     for (i = 0; i < ARP_CACHE; i++) {
         arp_tab[i].used = 0;
+    }
+    for (i = 0; i < MAX_SOCKS; i++) {
+        socks[i].used = 0;
     }
 
     virtio_net_init();

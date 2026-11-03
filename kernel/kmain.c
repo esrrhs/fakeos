@@ -26,6 +26,7 @@ extern void uproc_selftest(void);
 extern void vfs_selftest(void);
 extern void rootfs_publish(void);
 extern void sched_yield(void);
+extern void net_poll(void);
 extern void net_init(void);
 extern void net_selftest(void);
 
@@ -205,6 +206,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
      * the resuming peer, and a sti/hlt here would desync threads[0].rsp.
      * Required once the uproc monitor exits and the shell blocks on TTY. */
     for (;;) {
+        net_poll();
         sched_yield();
     }
 }

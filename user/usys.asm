@@ -28,6 +28,11 @@ global u_rmdir
 global u_pipe
 global u_sync
 global u_ping
+global u_socket
+global u_bind
+global u_connect
+global u_sendto
+global u_recvfrom
 
 section .text
 
@@ -114,6 +119,31 @@ USYSC1 u_sync, 162
 
 ; long u_ping(unsigned int ip_host_order)
 USYSC1 u_ping, 500
+
+; long u_socket(long domain, long type, long protocol)
+USYSC1 u_socket, 41
+
+; long u_bind(long fd, const void *addr, unsigned long len)
+USYSC1 u_bind, 49
+
+; long u_connect(long fd, const void *addr, unsigned long len)
+USYSC1 u_connect, 42
+
+; long u_sendto(fd,buf,len,flags,addr,addrlen) - 4th C arg RCX -> R10
+align 16
+u_sendto:
+    mov     r10, rcx
+    mov     eax, 44
+    syscall
+    ret
+
+; long u_recvfrom(fd,buf,len,flags,addr,addrlen)
+align 16
+u_recvfrom:
+    mov     r10, rcx
+    mov     eax, 45
+    syscall
+    ret
 
 ; void u_exit(long code) - does not return
 align 16

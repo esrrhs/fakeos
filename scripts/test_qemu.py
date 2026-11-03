@@ -139,6 +139,7 @@ def second_boot_checks(disk):
         "[VNET] ready:",
         "[NET] up: ip=10.0.2.15/24",
         "[PASS] ICMP echo reply from gateway",
+        "[PASS] UDP loopback (bind/sendto/recv path)",
         "[KBD] PS/2 keyboard armed (IRQ1)",
         "fakeos:~$",
         "hello from /bin/hello",
@@ -208,6 +209,7 @@ def main():
         "cat /mnt/m6pass.txt",  # persistent Ext2 file written by selftest
         "echo PIPEOK | cat",    # pipe() + shell | via wait queues
         "ping -c 1 10.0.2.2",  # sys_ping + VirtIO-net ICMP
+        "udptest",            # UDP socket loopback
         "sync",                # ext2 flush builtin
     ]
     session = ""
@@ -313,6 +315,8 @@ def main():
         "[FS] published /bin/touch (",
         "[FS] published /bin/mv (",
         "[FS] published /bin/ping (",
+        "[FS] published /bin/udptest (",
+        "[FS] published /bin/nc (",
         "[FS] published /etc/motd (",
         # Ring-3 retained + stage-4 user self-tests
         "[U] hello from ring 3, pid=",
@@ -394,6 +398,7 @@ def main():
         # prompt returns after every command
         ("multiple shell prompts", norm.count("fakeos:~$") >= 12),
         ("userland ping replied", "reply from 10.0.2.2" in out),
+        ("userland udptest loopback", "UDP loopback OK" in out),
     ]
     # kbuild/ldfake also publish the new user programs
     #

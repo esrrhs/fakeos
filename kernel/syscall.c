@@ -38,6 +38,11 @@ extern u64 sys_dup2(u64 oldfd, u64 newfd);
 extern u64 sys_pipe(u64 upipefd);
 extern u64 sys_sync(void);
 extern u64 sys_ping(u64 ip);
+extern u64 sys_socket(u64 domain, u64 type, u64 protocol);
+extern u64 sys_bind(u64 fd, u64 uaddr, u64 ulen);
+extern u64 sys_connect(u64 fd, u64 uaddr, u64 ulen);
+extern u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen);
+extern u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
@@ -107,6 +112,11 @@ enum {
     SC_UNLINK = 87,
     SC_EXIT_GROUP = 231,
     SC_SYNC = 162,
+    SC_SOCKET = 41,
+    SC_CONNECT = 42,
+    SC_SENDTO = 44,
+    SC_RECVFROM = 45,
+    SC_BIND = 49,
     SC_PING = 500
 };
 
@@ -206,6 +216,21 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_PING) {
         return sys_ping(f->rdi);
+    }
+    if (f->rax == SC_SOCKET) {
+        return sys_socket(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_BIND) {
+        return sys_bind(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_CONNECT) {
+        return sys_connect(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_SENDTO) {
+        return sys_sendto(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_RECVFROM) {
+        return sys_recvfrom(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
     }
     if (f->rax == SC_LSEEK) {
         return sys_lseek(f->rdi, f->rsi, f->rdx);

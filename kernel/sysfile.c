@@ -52,6 +52,11 @@ extern u32 pipe_close(u32 fh);
 extern u64 pipe_read(u32 fh, char *kbuf, u64 len);
 extern u64 pipe_write(u32 fh, const char *kbuf, u64 len);
 
+/* kernel/net.c sockets */
+extern u32 sock_fh_is(u32 fh);
+extern void sock_retain(u32 fh);
+extern u32 sock_close(u32 fh);
+
 
 static u32 kstr_len(const char *s) {
     u32 n = 0;
@@ -237,6 +242,8 @@ u64 sys_close(u64 fd) {
         ok = fs.ext2_close(fh);
     } else if (pipe_fh_is(fh)) {
         ok = pipe_close(fh);
+    } else if (sock_fh_is(fh)) {
+        ok = sock_close(fh);
     } else {
         ok = fs.fs_close(fh);
     }
@@ -264,6 +271,8 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
             fs.ext2_close(nfh);
         } else if (pipe_fh_is(nfh)) {
             pipe_close(nfh);
+        } else if (sock_fh_is(nfh)) {
+            sock_close(nfh);
         } else {
             fs.fs_close(nfh);
         }
@@ -273,6 +282,8 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
         fs.ext2_file_retain(ofh);
     } else if (pipe_fh_is(ofh)) {
         pipe_retain(ofh);
+    } else if (sock_fh_is(ofh)) {
+        sock_retain(ofh);
     } else {
         fs.fs_file_retain(ofh);
     }
@@ -285,7 +296,7 @@ u64 sys_lseek(u64 fd, u64 off, u64 whence) {
     if (fh == FD_BAD) {
         return (u64)(-1);
     }
-    if (pipe_fh_is(fh)) {
+    if (pipe_fh_is(fh) || sock_fh_is(fh)) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh)) {
@@ -306,6 +317,9 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
     }
 
     /* fd 0: serial console with canonical line discipline. */
+    if (sock_fh_is(fh)) {
+        return (u64)(-1);             /* use recvfrom */
+    }
     if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return tty_console_read(buf, len);
     }
@@ -385,6 +399,9 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
 
     /* fd 1/2: serial console sink. Validate the whole user range first, then
      * stream byte by byte (uart_putc performs the \n -> \r\n translation). */
+    if (sock_fh_is(fh)) {
+        return (u64)(-1);             /* use sendto */
+    }
     if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         volatile char *p;
         u64 i;
@@ -591,7 +608,7 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     if (fh == FD_BAD || as == 0) {
         return (u64)(-1);
     }
-    if (pipe_fh_is(fh)) {
+    if (pipe_fh_is(fh) || sock_fh_is(fh)) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh) ? !fs.ext2_file_is_dir(fh) : !fs.fs_file_is_dir(fh)) {
