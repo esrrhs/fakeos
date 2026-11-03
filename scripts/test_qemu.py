@@ -113,10 +113,10 @@ def decode_dumpbin(captured):
     return blob, len(frames), declared
 
 
-def second_boot_checks():
+def second_boot_checks(disk):
     """Boot the in-OS linked kernel and run a reduced shell session."""
     print("\n==> Phase 5b: second boot of the in-OS rebuilt kernel...")
-    vm = VM(REBUILT)
+    vm = VM(REBUILT, extra_args=disk_args(disk))
     boot = vm.wait_for("fakeos:~$", 30.0)
     session = ""
     for c in ["hello", "echo $?", "pid", "echo INPUT123", "cat /etc/motd",
@@ -165,15 +165,16 @@ def ensure_disk():
     return disk
 
 
-def virtio_disk_args(disk):
-    # IDE/ATA PIO path (VirtIO is still probed first by the guest).
+def disk_args(disk):
+    # Prefer IDE so tests exercise the ATA PIO backend; guest still probes
+    # VirtIO first and falls through when no virtio-blk device is present.
     return ["-drive", f"file={disk},format=raw,if=ide"]
 
 
 def main():
-    print("==> Phase 1-6: boot stock kernel (+VirtIO disk) and run the interactive shell...")
+    print("==> Phase 1-6: boot stock kernel (+IDE disk) and run the interactive shell...")
     disk = ensure_disk()
-    vm = VM(KERNEL, extra_args=virtio_disk_args(disk))
+    vm = VM(KERNEL, extra_args=disk_args(disk))
 
     # 1. Boot + kernel self-tests + init userspace tests -> first prompt.
     boot = vm.wait_for("fakeos:~$", 30.0)
@@ -458,7 +459,7 @@ def main():
     # ---- Stage 5b: second boot of the rebuilt kernel ------------------
     second = []
     if all(s for _, s in structural):
-        second = second_boot_checks()
+        second = second_boot_checks(disk)
     else:
         print("\n[SKIP] second boot: phase-5a structural checks failed")
     for name, ok in second:

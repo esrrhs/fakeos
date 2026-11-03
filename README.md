@@ -137,14 +137,14 @@ flowchart TD
 
 ### 阶段六：持久化块设备与 Ext2（Milestone 6 · 进行中）
 - [x] **PCI 配置空间枚举**：`drivers/pci.c` 通过 0xCF8/0xCFC 扫描 bus 0，按 vendor/device 或 subsystem 定位设备，解码 BAR0，开启 I/O + Bus Master。
-- [x] **VirtIO-blk 遗留/过渡驱动（轮询）**：`drivers/virtio_blk.c` 对接 `virtio-blk-pci,disable-modern=on` 的 I/O BAR 遗留寄存器与 4096 对齐 virtqueue；容量读取已通，队列 DMA 路径仍在排障（请求超时），因此默认不作为唯一后端。
+- [x] **VirtIO-blk 遗留/过渡驱动（轮询）**：`drivers/virtio_blk.c` 对接 `virtio-blk-pci,disable-modern=on` 的 I/O BAR 遗留寄存器与 4096 对齐 virtqueue。已按设备只读 `QueueNum`（QEMU 10 常为 1024）分配 vring，队列 DMA 读写可用；不再误写只读 QueueNum / 错误钳到 256。
 - [x] **ATA PIO 主盘驱动**：`drivers/ata.c` 支持 IDENTIFY / READ / WRITE / FLUSH（28-bit LBA），对接 QEMU `-drive ...,if=ide`。
 - [x] **统一块层**：`drivers/blk.c` 先探测 VirtIO（含 1 扇区冒烟），失败则回退 ATA；Ext2 只依赖 `blk_read/write/flush`。
 - [x] **最小 Ext2**：`fs/ext2.c` 支持挂载、路径查找、open/read/write/lseek、create、mkdir、getdents、unlink（普通文件）、sync；块大小 1024/2048/4096，直接块 + 一级间接块。
 - [x] **VFS 集成**：绝对路径 `/mnt...` 分流到 Ext2；进程 cwd 可进入 `/mnt`；退出时正确关闭 Ext2 句柄。
 - [x] **宿主工具**：`tools/mkext2.py` 生成最小 Ext2 镜像；`make disk` / `make qemu-disk`。
 - [x] **自测与持久化冒烟**：启动时写入 `/mnt/m6pass.txt` 并回读；跨两次 QEMU 引导文件仍在；用户态 `/bin/cp`、`/bin/rm` 可把 Ramfs 文件拷到 `/mnt` 并持久化。
-- [ ] **VirtIO-blk 队列 DMA 排通**：修好 used ring 通知后默认走 VirtIO（保留 ATA 回退）。
+- [x] **VirtIO-blk 队列 DMA 排通**：按真实 QueueNum 建环后 used ring 正常前进；`make qemu-disk` 默认 VirtIO，测试仍可用 IDE/ATA。
 - [ ] **I/O APIC + 中断驱动 I/O**：取代轮询；为键盘/网卡铺路。
 - [ ] **更完整的 Ext2**：rmdir、多块组、双间接、journal/写入屏障策略。
 

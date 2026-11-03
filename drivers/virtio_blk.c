@@ -64,10 +64,13 @@ enum {
     VIRTIO_BLK_S_IOERR  = 1,
 
     SECTOR_SIZE         = 512,
-    QUEUE_MAX           = 256,
-    /* Contiguous DMA arena: 2 pages for the virtqueue + 1 page for the
-     * request header/status + one sector bounce (enough for 512B I/O). */
-    ARENA_PAGES         = 3
+    /* QEMU 10 virtio-blk legacy often reports 1024; legacy QueueNum is
+     * read-only so the guest must size the vring to match exactly. */
+    QUEUE_MAX           = 1024,
+    /* pmm_alloc_pages(order) returns 2^order contiguous pages.
+     * order 4 = 16 pages = 64 KiB: queue (~28 KiB at 1024 descs) + req page. */
+    ARENA_ORDER         = 4,
+    ARENA_BYTES         = 65536
 };
 
 /* Virtqueue descriptor (16 bytes) - laid out manually as bytes to avoid any
@@ -160,14 +163,18 @@ static u32 setup_queue(void) {
     u16 qsz;
 
     iow16(REG_QUEUE_SEL, 0);
+    /* Legacy QueueNum is read-only; never write it (QEMU logs
+     * virtio_ioport_write unexpected address 0xc and ignores the store).
+     * Use the device size as-is. Cap only by refusing oversized rings. */
     qsz = ior16(REG_QUEUE_NUM);
     if (qsz == 0) {
         kprintf("[VIRTIO] Queue Num is 0\n");
         return 0;
     }
     if (qsz > QUEUE_MAX) {
-        qsz = QUEUE_MAX;
-        iow16(REG_QUEUE_NUM, qsz);     /* tell device we use a smaller ring */
+        kprintf("[VIRTIO] Queue Num %u exceeds driver max %u\n",
+                (u64)qsz, (u64)QUEUE_MAX);
+        return 0;
     }
     vb.queue_size = qsz;
     kprintf("[VIRTIO] queue0 size=%u\n", (u64)qsz);
@@ -180,17 +187,14 @@ static u32 setup_queue(void) {
     used_sz = 6 + (u64)qsz * 8;            /* flags + idx + used_elem[qsz] */
     total = used_off + used_sz;
 
-    /* 8 contiguous pages (32 KiB): queue (~12 KiB at 256 descs) + req page.
-     * Queue DMA path still times out under QEMU 10 legacy virtio-blk; ATA
-     * remains the default working backend via blk_init(). */
-    arena = mem.pmm_alloc_pages(3);
+    arena = mem.pmm_alloc_pages(ARENA_ORDER);
     if (arena == 0) {
         return 0;
     }
     vb.arena_phys = arena;
     {
         u64 z;
-        for (z = 0; z < 32768; z++) {
+        for (z = 0; z < (u64)ARENA_BYTES; z++) {
             hhdm8(arena)[z] = 0;
         }
     }
