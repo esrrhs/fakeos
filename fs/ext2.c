@@ -13,8 +13,10 @@ extern void kprintf(const char *fmt, ...);
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
  *
  * Mount, path lookup, open/read/write/lseek, create, mkdir, getdents,
- * unlink (regular files), sync. Block size 1024 or 4096. Single block
- * group. Direct + single- and double-indirect maps.
+ * unlink (regular files), sync. Block size 1024/2048/4096. Multi block
+ * group (BGDT indexed). Direct + single- and double-indirect maps.
+ * Hardening: free-count bookkeeping in SB/BGDT, s_state dirty-on-mount /
+ * clean-on-sync (not a full journal).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -67,10 +69,19 @@ struct ext2_sb {
     u32 first_ino;
     u32 block_size;
     u32 bg_block;
-    u32 inode_table;
+    u32 groups_count;
+    u32 free_blocks;
+    u32 free_inodes;
+    u32 mounted;
+};
+
+/* Cached descriptor for one block group (32-byte on-disk BGD). */
+struct ext2_bg {
     u32 block_bitmap;
     u32 inode_bitmap;
-    u32 mounted;
+    u32 inode_table;
+    u32 free_blocks;
+    u32 free_inodes;
 };
 
 struct ext2_open {
@@ -138,54 +149,173 @@ static void bitmap_clr(u8 *bm, u32 bit) {
     bm[bit / 8] = (u8)(bm[bit / 8] & (u8)(~(1u << (bit % 8))));
 }
 
+/* Load block-group descriptor `g` from the BGDT. */
+static u32 bg_load(u32 g, struct ext2_bg *out) {
+    u32 descs_per = sb.block_size / 32;
+    u32 blk;
+    u32 off;
+    if (g >= sb.groups_count) return 0;
+    blk = sb.bg_block + g / descs_per;
+    off = (g % descs_per) * 32;
+    if (!bread(blk, blk_buf)) return 0;
+    out->block_bitmap = rd32(blk_buf + off + 0);
+    out->inode_bitmap = rd32(blk_buf + off + 4);
+    out->inode_table = rd32(blk_buf + off + 8);
+    out->free_blocks = rd16(blk_buf + off + 12);
+    out->free_inodes = rd16(blk_buf + off + 14);
+    return 1;
+}
+
+static u32 bg_store(u32 g, const struct ext2_bg *in) {
+    u32 descs_per = sb.block_size / 32;
+    u32 blk;
+    u32 off;
+    if (g >= sb.groups_count) return 0;
+    blk = sb.bg_block + g / descs_per;
+    off = (g % descs_per) * 32;
+    if (!bread(blk, blk_buf)) return 0;
+    wr32(blk_buf + off + 0, in->block_bitmap);
+    wr32(blk_buf + off + 4, in->inode_bitmap);
+    wr32(blk_buf + off + 8, in->inode_table);
+    wr16(blk_buf + off + 12, (u16)in->free_blocks);
+    wr16(blk_buf + off + 14, (u16)in->free_inodes);
+    return bwrite(blk, blk_buf);
+}
+
+/* Superblock at byte 1024: update free counts + optional state. */
+static u32 sb_write_counts(u16 state) {
+    u8 sbsec[1024];
+    if (!drivers.blk_read(2, sbsec, 2)) return 0;
+    wr32(sbsec + 12, sb.free_blocks);
+    wr32(sbsec + 16, sb.free_inodes);
+    if (state != 0xFFFF) {
+        wr16(sbsec + 58, state);
+    }
+    return drivers.blk_write(2, sbsec, 2);
+}
+
+static u32 group_of_block(u32 blk) {
+    if (blk < sb.first_data_block) return 0;
+    return (blk - sb.first_data_block) / sb.blocks_per_group;
+}
+
+static u32 group_of_inode(u32 ino) {
+    if (ino == 0) return 0;
+    return (ino - 1) / sb.inodes_per_group;
+}
+
 static u32 alloc_block(void) {
-    u32 i;
+    u32 g;
     u32 z;
-    if (!bread(sb.block_bitmap, blk_buf)) return 0;
-    for (i = sb.first_data_block + 1; i < sb.blocks_count; i++) {
-        if (!bitmap_test(blk_buf, i)) {
-            bitmap_set(blk_buf, i);
-            if (!bwrite(sb.block_bitmap, blk_buf)) return 0;
-            for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
-            if (!bwrite(i, blk_buf)) return 0;
-            return i;
+    for (g = 0; g < sb.groups_count; g++) {
+        struct ext2_bg bg;
+        u32 base;
+        u32 lim;
+        u32 i;
+        u32 local;
+        if (!bg_load(g, &bg)) continue;
+        /* free_blocks is advisory; still scan the bitmap. */
+        base = sb.first_data_block + g * sb.blocks_per_group;
+        lim = base + sb.blocks_per_group;
+        if (lim > sb.blocks_count) lim = sb.blocks_count;
+        if (!bread(bg.block_bitmap, blk_buf)) continue;
+        for (i = (g == 0 ? sb.first_data_block : base); i < lim; i++) {
+            local = i - base;
+            /* Group 0 bitmap historically indexed by absolute block number
+             * for 1K single-group images (bit N = block N). Multi-group
+             * images use group-relative bits. Detect via blocks_per_group. */
+            if (sb.groups_count == 1) {
+                local = i;
+            }
+            if (!bitmap_test(blk_buf, local)) {
+                bitmap_set(blk_buf, local);
+                if (!bwrite(bg.block_bitmap, blk_buf)) return 0;
+                for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
+                if (!bwrite(i, blk_buf)) return 0;
+                if (bg.free_blocks > 0) bg.free_blocks--;
+                bg_store(g, &bg);
+                if (sb.free_blocks > 0) sb.free_blocks--;
+                sb_write_counts(0xFFFF);
+                return i;
+            }
         }
     }
     return 0;
 }
 
 static u32 alloc_inode_num(void) {
-    u32 i;
-    if (!bread(sb.inode_bitmap, blk_buf)) return 0;
-    for (i = sb.first_ino; i <= sb.inodes_per_group; i++) {
-        if (!bitmap_test(blk_buf, i - 1)) {
-            bitmap_set(blk_buf, i - 1);
-            if (!bwrite(sb.inode_bitmap, blk_buf)) return 0;
-            return i;
+    u32 g;
+    for (g = 0; g < sb.groups_count; g++) {
+        struct ext2_bg bg;
+        u32 start;
+        u32 end;
+        u32 i;
+        if (!bg_load(g, &bg)) continue;
+        start = g * sb.inodes_per_group + 1;
+        end = start + sb.inodes_per_group - 1;
+        if (end > sb.inodes_count) end = sb.inodes_count;
+        if (g == 0 && start < sb.first_ino) start = sb.first_ino;
+        if (!bread(bg.inode_bitmap, blk_buf)) continue;
+        for (i = start; i <= end; i++) {
+            u32 bit = (i - 1) % sb.inodes_per_group;
+            if (!bitmap_test(blk_buf, bit)) {
+                bitmap_set(blk_buf, bit);
+                if (!bwrite(bg.inode_bitmap, blk_buf)) return 0;
+                if (bg.free_inodes > 0) bg.free_inodes--;
+                bg_store(g, &bg);
+                if (sb.free_inodes > 0) sb.free_inodes--;
+                sb_write_counts(0xFFFF);
+                return i;
+            }
         }
     }
     return 0;
 }
 
 static void free_inode_bit(u32 ino) {
-    if (ino == 0 || ino > sb.inodes_per_group) return;
-    if (!bread(sb.inode_bitmap, blk_buf)) return;
-    bitmap_clr(blk_buf, ino - 1);
-    bwrite(sb.inode_bitmap, blk_buf);
+    struct ext2_bg bg;
+    u32 g;
+    u32 bit;
+    if (ino == 0 || ino > sb.inodes_count) return;
+    g = group_of_inode(ino);
+    if (!bg_load(g, &bg)) return;
+    bit = (ino - 1) % sb.inodes_per_group;
+    if (!bread(bg.inode_bitmap, blk_buf)) return;
+    bitmap_clr(blk_buf, bit);
+    bwrite(bg.inode_bitmap, blk_buf);
+    bg.free_inodes++;
+    bg_store(g, &bg);
+    sb.free_inodes++;
+    sb_write_counts(0xFFFF);
 }
 
 static void free_block_bit(u32 blk) {
+    struct ext2_bg bg;
+    u32 g;
+    u32 local;
+    u32 base;
     if (blk < sb.first_data_block || blk >= sb.blocks_count) return;
-    if (!bread(sb.block_bitmap, blk_buf)) return;
-    bitmap_clr(blk_buf, blk);
-    bwrite(sb.block_bitmap, blk_buf);
+    g = group_of_block(blk);
+    if (!bg_load(g, &bg)) return;
+    base = sb.first_data_block + g * sb.blocks_per_group;
+    local = (sb.groups_count == 1) ? blk : (blk - base);
+    if (!bread(bg.block_bitmap, blk_buf)) return;
+    bitmap_clr(blk_buf, local);
+    bwrite(bg.block_bitmap, blk_buf);
+    bg.free_blocks++;
+    bg_store(g, &bg);
+    sb.free_blocks++;
+    sb_write_counts(0xFFFF);
 }
 
 static u32 inode_block_of(u32 ino, u32 *offset_out) {
-    u32 idx = ino - 1;
+    struct ext2_bg bg;
+    u32 g = group_of_inode(ino);
+    u32 idx = (ino - 1) % sb.inodes_per_group;
     u32 ipb = sb.block_size / sb.inode_size;
+    if (!bg_load(g, &bg)) return 0;
     *offset_out = (idx % ipb) * sb.inode_size;
-    return sb.inode_table + idx / ipb;
+    return bg.inode_table + idx / ipb;
 }
 
 static u32 inode_read(u32 ino, u8 *raw) {
@@ -708,13 +838,25 @@ u32 ext2_mount(void) {
     }
 
     sb.bg_block = sb.first_data_block + 1;
+    if (sb.blocks_per_group == 0) {
+        kprintf("[EXT2] blocks_per_group is 0\n");
+        return 0;
+    }
+    sb.groups_count = (sb.blocks_count - sb.first_data_block + sb.blocks_per_group - 1)
+                      / sb.blocks_per_group;
+    if (sb.groups_count == 0) sb.groups_count = 1;
+    sb.free_blocks = rd32(sbsec + 12);
+    sb.free_inodes = rd32(sbsec + 16);
+
     if (!bread(sb.bg_block, blk_buf)) {
         kprintf("[EXT2] failed to read block group descriptor\n");
         return 0;
     }
-    sb.block_bitmap = rd32(blk_buf + 0);
-    sb.inode_bitmap = rd32(blk_buf + 4);
-    sb.inode_table = rd32(blk_buf + 8);
+    /* Probe group 0 descriptor presence (bitmap/itable non-zero). */
+    if (rd32(blk_buf + 0) == 0 || rd32(blk_buf + 8) == 0) {
+        kprintf("[EXT2] bad group-0 descriptor\n");
+        return 0;
+    }
 
     /* Verify root inode is a directory. */
     if (!inode_read(EXT2_ROOT_INO, ino_raw)) {
@@ -727,10 +869,12 @@ u32 ext2_mount(void) {
     }
 
     sb.mounted = 1;
+    /* Hardening: mark filesystem not-valid until sync (s_state=2). */
+    sb_write_counts(2);
     bg0 = sb.bg_block;
-    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u bg=%u /mnt+/home ready\n",
+    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u /mnt+/home ready\n",
             (u64)sb.blocks_count, (u64)sb.inodes_count,
-            (u64)sb.block_size, (u64)bg0);
+            (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0);
     return 1;
 }
 
@@ -1123,6 +1267,8 @@ u32 ext2_rmdir(const char *path) {
 
 u32 ext2_sync(void) {
     if (!sb.mounted) return 0;
+    /* Write barrier: persist free counts + mark VALID_FS before FLUSH. */
+    sb_write_counts(1);
     return drivers.blk_flush();
 }
 

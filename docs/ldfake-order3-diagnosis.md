@@ -63,3 +63,37 @@ built with `2c1f4525`.
 ldfake still inserts a 4 KiB-aligned synthetic GOT between `.rodata` and
 `.data`, so BSS/stack absolute addresses differ from GNU ld by ~one page;
 that layout delta alone does **not** cause the order-3 failure.
+
+## M5 restage pin (REQUIRED)
+
+**Pin fakecc at `2c1f4525` when restaging the Milestone-5 blob.**
+
+Tip of `combine/gcc16-macho-and-o0-ldouble` after that commit miscompiles
+`imm64 ^ induction` (O0 BXOR / rematerialization). Staging tip objects into
+`/bin/fakecc` + `/ref` makes the *ldfake-rebuilt* kernel fail PMM order-3 and
+often kill/wait, even though the host-linked `build/fakeos.elf` (built with the
+installed/good fakecc) still passes.
+
+### Restage recipe
+
+```bash
+# 1) Known-good worktree (do not use tip of the combine branch)
+git -C /path/to/fakecc worktree add /tmp/fakecc-m5-good 2c1f4525
+
+# 2) Force a fresh m5 stage with that tree
+rm -rf build/m5stage build/m5blob.asm build/m5blob.o
+FAKECC_SRC=/tmp/fakecc-m5-good make
+
+# 3) Confirm pin was used
+#    tools/m5_stage.sh prints: [m5] FAKECC_SRC pin hint: use 2c1f4525 ...
+```
+
+Makefile override (same effect):
+
+```make
+FAKECC_SRC=/tmp/fakecc-m5-good make
+```
+
+Until upstream fixes the BXOR/home clobber, **never restage m5 from fakecc tip**.
+Host kernel objects may still be built with a newer installed `fakecc` on PATH;
+only the *staged* in-OS compiler and `/ref` objects must stay on `2c1f4525`.

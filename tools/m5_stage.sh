@@ -17,6 +17,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 FAKECC_SRC=${FAKECC_SRC:-"$ROOT/../fakecc"}
+# Pin reminder: tip after 2c1f4525 breaks rebuilt-kernel order-3 (BXOR).
+echo "[m5] FAKECC_SRC=$FAKECC_SRC"
+echo "[m5] FAKECC_SRC pin hint: restage only from fakecc @ 2c1f4525 (see docs/ldfake-order3-diagnosis.md)"
 STAGE=$1
 BUILD=$ROOT/build
 

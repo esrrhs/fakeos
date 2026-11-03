@@ -310,7 +310,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
-        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin; !! and history");
+        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin; !! / history / Up-Down arrows");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -699,7 +699,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs, history/!!, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs, history/!!/arrows, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

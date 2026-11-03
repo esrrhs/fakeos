@@ -38,6 +38,7 @@ global u_accept
 global u_kill
 global u_tty_setfg
 global u_rt_sigaction
+global u_rt_sigreturn
 
 section .text
 
@@ -167,6 +168,13 @@ align 16
 u_rt_sigaction:
     mov     r10, rcx
     mov     eax, 13
+    syscall
+    ret
+
+; long u_rt_sigreturn(void) -- Linux nr 15
+align 16
+u_rt_sigreturn:
+    mov     eax, 15
     syscall
     ret
 

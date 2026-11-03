@@ -66,6 +66,8 @@ extern u64 sys_tty_setfg(u64 pid);
 extern u64 sys_rt_sigaction(u64 sig, u64 act, u64 old, u64 setsize);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
+extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
+extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
 
 /* uproc.c */
 extern void uproc_note_exit(u32 pid, u64 code);
@@ -129,7 +131,8 @@ enum {
     SC_KILL = 62,
     SC_PING = 500,
     SC_TTY_SETFG = 501,
-    SC_RT_SIGACTION = 13
+    SC_RT_SIGACTION = 13,
+    SC_RT_SIGRETURN = 15
 };
 
 enum {
@@ -318,6 +321,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_RT_SIGACTION) {
         return sys_rt_sigaction(f->rdi, f->rsi, f->rdx, f->r10);
     }
+    if (f->rax == SC_RT_SIGRETURN) {
+        if (!sched_sigreturn(&f->rip, &f->rflags, &f->pad, &f->rdi)) {
+            return (u64)(-1);
+        }
+        return 0;
+    }
     if (f->rax == SC_EXIT) {
         proc_terminate(f->rdi);
     }
@@ -333,8 +342,8 @@ u64 syscall_dispatch(struct syscall_frame *f) {
     u64 r;
     syscall_count++;
     r = syscall_dispatch_inner(f);
-    /* Fatal signals pending (e.g. SIGINT from Ctrl-C / kill): do not return. */
-    sched_check_signals();
+    /* Deliver custom handler frames or default-terminate fatal signals. */
+    sched_check_signals_frame(&f->rip, &f->rflags, &f->pad, &f->rdi);
     return r;
 }
 

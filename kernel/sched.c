@@ -65,6 +65,8 @@ struct tcb {
     u32 is_user;       /* Runs at ring 3 between syscalls/interrupts      */
     u32 pending_sigs;  /* Bitmask: bit N set => signal N pending          */
     u32 sig_ignore;    /* Bitmask: bit N set => ignore signal N           */
+    u64 sig_handler[32]; /* 0=DFL, 1=IGN, else user handler VA            */
+    u64 sig_restorer[32]; /* user rt_sigreturn trampoline (may be 0)      */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -102,6 +104,13 @@ void sched_init(void) {
         threads[i].is_user = 0;
         threads[i].pending_sigs = 0;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
+        {
+            u32 s;
+            for (s = 0; s < 32; s++) {
+                threads[i].sig_handler[s] = 0;
+                threads[i].sig_restorer[s] = 0;
+            }
+        }
         for (j = 0; j < FD_MAX; j++) {
             threads[i].fd[j] = FD_EMPTY;
         }
@@ -264,6 +273,13 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].is_user = 1;
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = (1u << 17);
+    {
+        u32 s;
+        for (s = 0; s < 32; s++) {
+            threads[i].sig_handler[s] = 0;
+            threads[i].sig_restorer[s] = 0;
+        }
+    }
     fd_table_install_console(&threads[i]);
     cwd_set_root(&threads[i]);
     threads[i].state = TCB_RUNNABLE;
@@ -340,6 +356,13 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     cwd_copy_from(&threads[i], threads[current].cwd);
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = threads[current].sig_ignore;
+    {
+        u32 s;
+        for (s = 0; s < 32; s++) {
+            threads[i].sig_handler[s] = threads[current].sig_handler[s];
+            threads[i].sig_restorer[s] = threads[current].sig_restorer[s];
+        }
+    }
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -679,28 +702,30 @@ enum {
 extern void proc_terminate(u64 code);
 
 
-/* Stub sigaction helpers. Only SIG_DFL (0) and SIG_IGN (1) are honored;
- * any other handler value clears ignore (default terminate on delivery).
- * SIGKILL (9) and SIGSTOP (19) cannot be altered. */
+/* sigaction: SIG_DFL(0) / SIG_IGN(1) / custom handler VA.
+ * Optional restorer is the user trampoline invoked on handler return
+ * (typically libc's rt_sigreturn stub). SIGKILL/SIGSTOP immutable. */
 u32 sched_sig_get(u32 sig, u64 *handler_out) {
     if (sig == 0 || sig > 31) {
         return (u32)-1;
     }
     if (handler_out) {
-        *handler_out = (threads[current].sig_ignore & (1u << sig)) ? 1ULL : 0ULL;
+        *handler_out = threads[current].sig_handler[sig];
     }
     return 0;
 }
 
-u32 sched_sigaction(u32 sig, u64 handler, u64 *old_out) {
+u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 *old_out) {
     u64 old = 0;
     if (sig == 0 || sig > 31 || sig == SIGKILL_N || sig == 19) {
         return (u32)-1;
     }
-    old = (threads[current].sig_ignore & (1u << sig)) ? 1ULL : 0ULL;
+    old = threads[current].sig_handler[sig];
     if (old_out) {
         *old_out = old;
     }
+    threads[current].sig_handler[sig] = handler;
+    threads[current].sig_restorer[sig] = restorer;
     if (handler == 1) {
         threads[current].sig_ignore |= (1u << sig);
     } else {
@@ -736,10 +761,57 @@ u32 sched_pid_exists(u32 pid) {
     return sched_signal_send(pid, 0);
 }
 
-/* Deliver default actions for the current thread. May not return. */
-void sched_check_signals(void) {
+/* Minimal user signal frame pushed onto the interrupted stack:
+ *   [0] restorer RIP (handler returns here)
+ *   [1] saved user RIP
+ *   [2] saved RFLAGS
+ *   [3] saved user RSP (pre-frame)
+ *   [4] saved RDI
+ *   [5] signo
+ * Handler is entered with RDI=signo; returning through restorer runs
+ * rt_sigreturn which restores RIP/RFLAGS/RSP/RDI. */
+enum { SIGFRAME_QWORDS = 6 };
+
+static u32 sig_deliver_frame(u32 sig, u64 *frame_rip, u64 *frame_rflags,
+                             u64 *frame_rsp, u64 *frame_rdi) {
+    u64 handler = threads[current].sig_handler[sig];
+    u64 restorer = threads[current].sig_restorer[sig];
+    u64 as = threads[current].as_h;
+    u64 usp;
+    u64 *sf;
+    u32 i;
+    if (handler <= 1 || restorer == 0 || as == 0) {
+        return 0;
+    }
+    usp = *frame_rsp;
+    /* Align so handler entry has RSP % 16 == 8 (SysV "after call"). */
+    usp &= ~0xFULL;
+    usp -= 8;
+    usp -= SIGFRAME_QWORDS * 8;
+    if (!mem.as_user_range_ok(as, usp, SIGFRAME_QWORDS * 8 + 8)) {
+        return 0;
+    }
+    sf = (u64 *)usp;
+    sf[0] = restorer;
+    sf[1] = *frame_rip;
+    sf[2] = *frame_rflags;
+    sf[3] = *frame_rsp;
+    sf[4] = *frame_rdi;
+    sf[5] = (u64)sig;
+    for (i = 0; i < 1; i++) { (void)i; }
+    *frame_rip = handler;
+    *frame_rdi = (u64)sig;
+    *frame_rsp = usp;
+    threads[current].pending_sigs &= ~(1u << sig);
+    return 1;
+}
+
+/* Deliver pending signals. When `f_rip` is non-NULL we may redirect the
+ * interrupted syscall frame to a user handler; otherwise default actions. */
+void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi) {
     u32 pend;
     u32 ign;
+    u32 sig;
     if (!threads[current].is_user || threads[current].pid == 0) {
         return;
     }
@@ -749,24 +821,72 @@ void sched_check_signals(void) {
         threads[current].pending_sigs = 0;
         proc_terminate(128 + SIGKILL_N);
     }
-    /* Consume ignored signals. */
     threads[current].pending_sigs &= ~ign;
     pend = threads[current].pending_sigs;
-    if (pend & (1u << SIGINT_N)) {
-        threads[current].pending_sigs = 0;
-        proc_terminate(128 + SIGINT_N);
+
+    /* Prefer delivering a custom handler for INT/TERM when a frame is available. */
+    for (sig = 1; sig <= 31; sig++) {
+        u64 h;
+        if ((pend & (1u << sig)) == 0) continue;
+        if (sig == SIGKILL_N) continue;
+        h = threads[current].sig_handler[sig];
+        if (h > 1 && f_rip != 0) {
+            if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+                return; /* one at a time */
+            }
+        }
+        if (sig == SIGINT_N || sig == SIGTERM_N) {
+            threads[current].pending_sigs = 0;
+            proc_terminate(128 + sig);
+        }
+        /* Drop unhandled / non-fatal bits. */
+        threads[current].pending_sigs &= ~(1u << sig);
+        pend = threads[current].pending_sigs;
     }
-    if (pend & (1u << SIGTERM_N)) {
-        threads[current].pending_sigs = 0;
-        proc_terminate(128 + SIGTERM_N);
+}
+
+void sched_check_signals(void) {
+    sched_check_signals_frame(0, 0, 0, 0);
+}
+
+/* Restore user context from the sigframe at current user RSP (rt_sigreturn). */
+u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi) {
+    u64 as = threads[current].as_h;
+    u64 usp;
+    u64 *sf;
+    if (as == 0 || f_rsp == 0) return 0;
+    usp = *f_rsp;
+    /* On entry to rt_sigreturn, RSP still points at the frame (ret popped restorer).
+     * After `ret` from handler, RSP = frame+8 (past restorer). We accept either. */
+    if (!mem.as_user_range_ok(as, usp, 8)) return 0;
+    /* Prefer frame at RSP-8 if restorer was popped. */
+    {
+        u64 cand = usp - 8;
+        if (mem.as_user_range_ok(as, cand, SIGFRAME_QWORDS * 8)) {
+            sf = (u64 *)cand;
+            /* Heuristic: signo at [5] in 1..31 */
+            if (sf[5] >= 1 && sf[5] <= 31) {
+                usp = cand;
+            } else {
+                sf = (u64 *)usp;
+            }
+        } else {
+            sf = (u64 *)usp;
+        }
     }
-    /* Drop any other pending bits we do not handle specially. */
-    threads[current].pending_sigs = 0;
+    if (!mem.as_user_range_ok(as, usp, SIGFRAME_QWORDS * 8)) return 0;
+    sf = (u64 *)usp;
+    *f_rip = sf[1];
+    *f_rflags = sf[2];
+    *f_rsp = sf[3];
+    *f_rdi = sf[4];
+    return 1;
 }
 
 u32 sched_has_pending_fatal(void) {
     u32 pend;
     u32 ign;
+    u32 sig;
     if (!threads[current].is_user) {
         return 0;
     }
@@ -776,6 +896,13 @@ u32 sched_has_pending_fatal(void) {
     }
     ign = threads[current].sig_ignore;
     pend &= ~ign;
+    /* Custom handlers are not fatal — leave them for syscall-exit delivery. */
+    for (sig = 1; sig <= 31; sig++) {
+        if ((pend & (1u << sig)) == 0) continue;
+        if (threads[current].sig_handler[sig] > 1) {
+            pend &= ~(1u << sig);
+        }
+    }
     if (pend & ((1u << SIGINT_N) | (1u << SIGTERM_N))) {
         return 1;
     }

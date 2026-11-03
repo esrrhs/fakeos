@@ -25,8 +25,8 @@ extern u32 sched_fd_get(u32 idx);
 /* ---------------------------------------------------------------------------
  * Minimal L2/L3 + BSD-ish UDP/TCP sockets.
  *
- * Static addressing matches QEMU user-mode networking defaults:
- *   guest 10.0.2.15/24, gateway/DNS 10.0.2.2.
+ * Addressing: DHCP DISCOVER/REQUEST against QEMU user-net (fallback to
+ *   static 10.0.2.15/24, gw 10.0.2.2, dns 10.0.2.2 if lease fails).
  * ICMP echo (sys_ping); UDP socket/bind/connect/sendto/recvfrom;
  * TCP 3-way handshake, listen/accept, and byte-stream send/recv
  * (loopback fully exercised; SYN/data retransmit via 100Hz timer).
@@ -145,6 +145,16 @@ static u8  local_mac[6];
 static u32 local_ip;                 /* host order */
 static u32 netmask;
 static u32 gateway_ip;
+static u32 dns_ip;                   /* host order; from DHCP or default */
+static u32 dhcp_pending;             /* accept DHCP replies before lease */
+static u32 dhcp_xid;
+static u32 dhcp_offer_ip;
+static u32 dhcp_server_ip;
+static u32 dhcp_got_offer;
+static u32 dhcp_got_ack;
+static u32 dhcp_offer_mask;
+static u32 dhcp_offer_gw;
+static u32 dhcp_offer_dns;
 static u32 net_up;
 static struct arp_entry arp_tab[ARP_CACHE];
 static u8  rx_frame[FRAME_MAX];
@@ -522,6 +532,62 @@ static void sock_enqueue(struct sock *sk, u32 src_ip, u16 src_port,
     sched_wakeup((u64)sk);
 }
 
+/* Parse DHCP options; fill offer_* globals. msgtype 2=OFFER, 5=ACK. */
+static void dhcp_parse_options(const u8 *opt, u32 len, u8 *msgtype_out) {
+    u32 i = 0;
+    *msgtype_out = 0;
+    while (i < len) {
+        u8 tag = opt[i];
+        u8 l;
+        if (tag == 0xFF) break;
+        if (tag == 0) { i++; continue; }
+        if (i + 1 >= len) break;
+        l = opt[i + 1];
+        if (i + 2 + l > len) break;
+        if (tag == 53 && l >= 1) {
+            *msgtype_out = opt[i + 2];
+        } else if (tag == 1 && l >= 4) {
+            dhcp_offer_mask = get32(opt + i + 2);
+        } else if (tag == 3 && l >= 4) {
+            dhcp_offer_gw = get32(opt + i + 2);
+        } else if (tag == 6 && l >= 4) {
+            dhcp_offer_dns = get32(opt + i + 2);
+        } else if (tag == 54 && l >= 4) {
+            dhcp_server_ip = get32(opt + i + 2);
+        }
+        i += 2 + l;
+    }
+}
+
+static void dhcp_handle_bootp(u32 src_ip, const u8 *bootp, u16 plen) {
+    u32 xid;
+    u32 yiaddr;
+    u8 msgtype;
+    (void)src_ip;
+    if (!dhcp_pending || plen < 240) return;
+    if (bootp[0] != 2) return;                 /* BOOTREPLY */
+    xid = get32(bootp + 4);
+    if (xid != dhcp_xid) return;
+    /* magic cookie */
+    if (bootp[236] != 0x63 || bootp[237] != 0x82 ||
+        bootp[238] != 0x53 || bootp[239] != 0x63) return;
+    yiaddr = get32(bootp + 16);
+    dhcp_offer_mask = 0xFFFFFF00u;
+    dhcp_offer_gw = 0;
+    dhcp_offer_dns = 0;
+    dhcp_parse_options(bootp + 240, (u32)(plen - 240), &msgtype);
+    if (msgtype == 2) {                        /* DHCPOFFER */
+        dhcp_offer_ip = yiaddr;
+        if (dhcp_server_ip == 0) dhcp_server_ip = src_ip;
+        dhcp_got_offer = 1;
+    } else if (msgtype == 5 || msgtype == 6) { /* ACK / NAK->treat ACK only */
+        if (msgtype == 5) {
+            dhcp_offer_ip = yiaddr;
+            dhcp_got_ack = 1;
+        }
+    }
+}
+
 static void handle_udp(u32 src_ip, u32 dst_ip, const u8 *udp, u32 len) {
     u16 sport;
     u16 dport;
@@ -529,6 +595,7 @@ static void handle_udp(u32 src_ip, u32 dst_ip, const u8 *udp, u32 len) {
     u32 i;
     const u8 *payload;
     u16 plen;
+    (void)dst_ip;
     if (len < UDP_HDR) {
         return;
     }
@@ -540,6 +607,10 @@ static void handle_udp(u32 src_ip, u32 dst_ip, const u8 *udp, u32 len) {
     }
     payload = udp + UDP_HDR;
     plen = (u16)(ulen - UDP_HDR);
+    if (dport == 68 && dhcp_pending) {
+        dhcp_handle_bootp(src_ip, payload, plen);
+        return;
+    }
     for (i = 1; i < MAX_SOCKS; i++) {
         struct sock *sk = &socks[i];
         if (!sk->used || sk->type != SOCK_DGRAM || !sk->bound) {
@@ -585,8 +656,11 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
     src = get32(pkt + 12);
     dst = get32(pkt + 16);
     arp_learn(src, src_mac);
-    if (dst != local_ip && dst != 0xFFFFFFFFu) {
-        return;
+    /* During DHCP we have no lease yet: accept broadcast and any unicast. */
+    if (!dhcp_pending) {
+        if (dst != local_ip && dst != 0xFFFFFFFFu && dst != LOOPBACK_IP) {
+            return;
+        }
     }
     if (proto == IP_PROTO_ICMP) {
         handle_icmp(src, pkt + ihl, (u32)(total - ihl), src_mac);
@@ -675,6 +749,14 @@ void net_poll(void) {
 static u32 resolve_mac(u32 ip, u8 *mac_out) {
     u32 spins;
     u32 i;
+    if (ip == 0xFFFFFFFFu) {
+        mac_set_bcast(mac_out);
+        return 1;
+    }
+    /* No lease yet: only broadcast is resolvable without a gateway. */
+    if (local_ip == 0) {
+        return 0;
+    }
     if ((ip & netmask) != (local_ip & netmask)) {
         ip = gateway_ip;
     }
@@ -1170,6 +1252,10 @@ u32 net_present(void) {
 
 u32 net_local_ip(void) {
     return local_ip;
+}
+
+u32 net_dns_ip(void) {
+    return dns_ip;
 }
 
 /* Parse a user sockaddr_in (16 bytes) into host-order ip + port. */
@@ -1781,6 +1867,131 @@ void net_tcp_selftest(void) {
     socks[child_s].used = 0;
 }
 
+/* Minimal DHCP client for QEMU user-net. Falls back to static lease. */
+static u32 dhcp_build_discover(u8 *bootp, u32 xid) {
+    u32 i;
+    for (i = 0; i < 300; i++) bootp[i] = 0;
+    bootp[0] = 1;                              /* BOOTREQUEST */
+    bootp[1] = 1;                              /* Ethernet */
+    bootp[2] = 6;                              /* hlen */
+    put32(bootp + 4, xid);
+    put16(bootp + 10, 0x8000);                 /* broadcast flag */
+    mac_copy(bootp + 28, local_mac);
+    bootp[236] = 0x63; bootp[237] = 0x82;
+    bootp[238] = 0x53; bootp[239] = 0x63;
+    bootp[240] = 53; bootp[241] = 1; bootp[242] = 1; /* DISCOVER */
+    bootp[243] = 55; bootp[244] = 4;                 /* param list */
+    bootp[245] = 1; bootp[246] = 3; bootp[247] = 6; bootp[248] = 15;
+    bootp[249] = 0xFF;
+    return 250;
+}
+
+static u32 dhcp_build_request(u8 *bootp, u32 xid, u32 req_ip, u32 srv_ip) {
+    u32 i;
+    for (i = 0; i < 300; i++) bootp[i] = 0;
+    bootp[0] = 1;
+    bootp[1] = 1;
+    bootp[2] = 6;
+    put32(bootp + 4, xid);
+    put16(bootp + 10, 0x8000);
+    mac_copy(bootp + 28, local_mac);
+    bootp[236] = 0x63; bootp[237] = 0x82;
+    bootp[238] = 0x53; bootp[239] = 0x63;
+    bootp[240] = 53; bootp[241] = 1; bootp[242] = 3; /* REQUEST */
+    bootp[243] = 50; bootp[244] = 4; put32(bootp + 245, req_ip);
+    bootp[249] = 54; bootp[250] = 4; put32(bootp + 251, srv_ip);
+    bootp[255] = 55; bootp[256] = 4;
+    bootp[257] = 1; bootp[258] = 3; bootp[259] = 6; bootp[260] = 15;
+    bootp[261] = 0xFF;
+    return 262;
+}
+
+/* Send UDP from src_ip (may be 0) to dst, bypassing socket table. */
+static u32 dhcp_udp_xmit(u32 src_ip, u16 sport, u32 dst_ip, u16 dport,
+                         const u8 *payload, u16 plen) {
+    u8 udp[FRAME_MAX];
+    u8 dst_mac[6];
+    u32 i;
+    u32 saved = local_ip;
+    if (UDP_HDR + plen > FRAME_MAX - ETH_HDR - IP_HDR) return 0;
+    mac_set_bcast(dst_mac);
+    put16(udp + 0, sport);
+    put16(udp + 2, dport);
+    put16(udp + 4, (u16)(UDP_HDR + plen));
+    put16(udp + 6, 0);
+    for (i = 0; i < plen; i++) udp[UDP_HDR + i] = payload[i];
+    local_ip = src_ip;                         /* ip_send source */
+    i = ip_send(dst_ip, IP_PROTO_UDP, udp, UDP_HDR + plen, dst_mac);
+    local_ip = saved;
+    return i;
+}
+
+static void dhcp_apply_static_fallback(void) {
+    local_ip = 0x0A00020Fu;
+    netmask = 0xFFFFFF00u;
+    gateway_ip = 0x0A000202u;
+    dns_ip = 0x0A000202u;
+    kprintf("[NET] DHCP timeout; static fallback 10.0.2.15/24 gw/dns 10.0.2.2\n");
+}
+
+static void dhcp_run(void) {
+    u8 bootp[300];
+    u32 blen;
+    u32 spins;
+    u32 tries;
+    dhcp_pending = 1;
+    dhcp_xid = 0xFACE0001u ^ (u32)sched_tick_count();
+    if (dhcp_xid == 0) dhcp_xid = 0xFACE0001u;
+    dhcp_got_offer = 0;
+    dhcp_got_ack = 0;
+    dhcp_offer_ip = 0;
+    dhcp_server_ip = 0;
+    local_ip = 0;
+    netmask = 0xFFFFFF00u;
+    gateway_ip = 0;
+    dns_ip = 0x0A000202u;
+
+    for (tries = 0; tries < 3 && !dhcp_got_offer; tries++) {
+        blen = dhcp_build_discover(bootp, dhcp_xid);
+        dhcp_udp_xmit(0, 68, 0xFFFFFFFFu, 67, bootp, (u16)blen);
+        for (spins = 0; spins < 800000 && !dhcp_got_offer; spins++) {
+            net_poll();
+        }
+    }
+    if (!dhcp_got_offer || dhcp_offer_ip == 0) {
+        dhcp_pending = 0;
+        dhcp_apply_static_fallback();
+        return;
+    }
+    if (dhcp_server_ip == 0) dhcp_server_ip = gateway_ip ? gateway_ip : 0x0A000202u;
+
+    for (tries = 0; tries < 3 && !dhcp_got_ack; tries++) {
+        blen = dhcp_build_request(bootp, dhcp_xid, dhcp_offer_ip, dhcp_server_ip);
+        dhcp_udp_xmit(0, 68, 0xFFFFFFFFu, 67, bootp, (u16)blen);
+        for (spins = 0; spins < 800000 && !dhcp_got_ack; spins++) {
+            net_poll();
+        }
+    }
+    dhcp_pending = 0;
+    if (!dhcp_got_ack) {
+        dhcp_apply_static_fallback();
+        return;
+    }
+    local_ip = dhcp_offer_ip;
+    netmask = dhcp_offer_mask ? dhcp_offer_mask : 0xFFFFFF00u;
+    gateway_ip = dhcp_offer_gw ? dhcp_offer_gw : 0x0A000202u;
+    dns_ip = dhcp_offer_dns ? dhcp_offer_dns : gateway_ip;
+    kprintf("[NET] DHCP lease ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u dns=%u.%u.%u.%u\n",
+            (u64)((local_ip >> 24) & 0xFF), (u64)((local_ip >> 16) & 0xFF),
+            (u64)((local_ip >> 8) & 0xFF), (u64)(local_ip & 0xFF),
+            (u64)((netmask >> 24) & 0xFF), (u64)((netmask >> 16) & 0xFF),
+            (u64)((netmask >> 8) & 0xFF), (u64)(netmask & 0xFF),
+            (u64)((gateway_ip >> 24) & 0xFF), (u64)((gateway_ip >> 16) & 0xFF),
+            (u64)((gateway_ip >> 8) & 0xFF), (u64)(gateway_ip & 0xFF),
+            (u64)((dns_ip >> 24) & 0xFF), (u64)((dns_ip >> 16) & 0xFF),
+            (u64)((dns_ip >> 8) & 0xFF), (u64)(dns_ip & 0xFF));
+}
+
 void net_selftest(void) {
     u32 ok;
     if (!net_up) {
@@ -1800,9 +2011,11 @@ void net_selftest(void) {
 void net_init(void) {
     u32 i;
     net_up = 0;
-    local_ip = 0x0A00020Fu;           /* 10.0.2.15 */
-    netmask = 0xFFFFFF00u;            /* /24 */
-    gateway_ip = 0x0A000202u;         /* 10.0.2.2 */
+    local_ip = 0;
+    netmask = 0xFFFFFF00u;
+    gateway_ip = 0x0A000202u;
+    dns_ip = 0x0A000202u;
+    dhcp_pending = 0;
     ping_id = 1;
     ping_seq = 0;
     ping_waiting = 0;
@@ -1820,8 +2033,14 @@ void net_init(void) {
         return;
     }
     virtio_net_mac(local_mac);
-    net_up = 1;
-    kprintf("[NET] up: ip=10.0.2.15/24 gw=10.0.2.2 mac=%x:%x:%x:%x:%x:%x\n",
+    net_up = 1;                        /* enable RX before DHCP polls */
+    dhcp_run();
+    kprintf("[NET] up: ip=%u.%u.%u.%u/%u gw=%u.%u.%u.%u mac=%x:%x:%x:%x:%x:%x\n",
+            (u64)((local_ip >> 24) & 0xFF), (u64)((local_ip >> 16) & 0xFF),
+            (u64)((local_ip >> 8) & 0xFF), (u64)(local_ip & 0xFF),
+            (u64)24,
+            (u64)((gateway_ip >> 24) & 0xFF), (u64)((gateway_ip >> 16) & 0xFF),
+            (u64)((gateway_ip >> 8) & 0xFF), (u64)(gateway_ip & 0xFF),
             (u64)local_mac[0], (u64)local_mac[1], (u64)local_mac[2],
             (u64)local_mac[3], (u64)local_mac[4], (u64)local_mac[5]);
 }

@@ -37,7 +37,9 @@ static struct exit_record exit_table[MAX_EXIT];
 
 /* sched.c */
 extern u32 sched_current_pid(void);
-extern u32 sched_sigaction(u32 sig, u64 handler, u64 *old_out);
+extern u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 *old_out);
+extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
+extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
 extern u32 sched_sig_get(u32 sig, u64 *handler_out);
 extern u32 sched_current_ppid(void);
 extern u64 sched_current_as_h(void);
@@ -208,11 +210,12 @@ u64 sys_tty_setfg(u64 pid) {
 }
 
 /* Linux nr 13: rt_sigaction(sig, act, oldact, sigsetsize).
- * Stub: sa_handler SIG_DFL(0) / SIG_IGN(1) only; other pointers clear ignore
- * (default terminate). SIGKILL/SIGSTOP rejected. */
+ * act layout: sa_handler(8) sa_flags(8) sa_restorer(8) sa_mask(8).
+ * Custom handlers require a restorer (libc installs one). */
 u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
     u64 as = sched_current_as_h();
     u64 handler = 0;
+    u64 restorer = 0;
     u64 old = 0;
     u32 st;
     (void)setsize;
@@ -224,11 +227,12 @@ u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
         return (u64)(-22);
     }
     if (act_u != 0) {
-        if (!mem.as_user_range_ok(as, act_u, 8)) {
+        if (!mem.as_user_range_ok(as, act_u, 24)) {
             return (u64)(-14);
         }
         handler = *(volatile u64 *)act_u;
-        st = sched_sigaction((u32)sig, handler, 0);
+        restorer = *(volatile u64 *)(act_u + 16);
+        st = sched_sigaction((u32)sig, handler, restorer, 0);
         if (st != 0) {
             return (u64)(-22);
         }
@@ -241,3 +245,4 @@ u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
     }
     return 0;
 }
+

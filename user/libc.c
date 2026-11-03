@@ -347,9 +347,9 @@ void free(void *ptr) {
 }
 
 /* ---------------------------------------------------------------------------
- * Host resolution: dotted IPv4, /etc/hosts, then DNS A query via UDP.
- * Soft DHCP is not implemented; QEMU user-net gives a static lease and we
- * publish /etc/resolv.conf with nameserver 10.0.2.2.
+ * Host resolution: dotted IPv4, /etc/hosts, then DNS A via UDP.
+ * Richer stub: multiple nameservers, search list, short retries, tiny cache.
+ * Kernel DHCP fills the lease; /etc/resolv.conf ships QEMU user-net defaults.
  * ------------------------------------------------------------------------- */
 
 extern long u_open(const char *path, long flags, long mode);
@@ -442,35 +442,101 @@ static int hosts_lookup(const char *name, unsigned int *out) {
     return 0;
 }
 
-static unsigned int read_nameserver(void) {
-    char buf[128];
-    long fd;
-    long n;
-    unsigned int ns = 0x0A000202u; /* 10.0.2.2 default */
-    fd = u_open("/etc/resolv.conf", 0, 0);
-    if (fd < 0) return ns;
-    n = u_read(fd, buf, sizeof(buf) - 1);
-    u_close(fd);
-    if (n <= 0) return ns;
-    buf[n] = 0;
-    {
-        char *p = buf;
-        const char *key = "nameserver";
-        int k;
-        while (*p != 0) {
-            for (k = 0; key[k] != 0 && p[k] == key[k]; k++) {
-            }
-            if (key[k] == 0 && (p[k] == ' ' || p[k] == '\t')) {
-                p += k;
-                while (*p == ' ' || *p == '\t') p++;
-                parse_ipv4_lit(p, &ns);
-                return ns;
-            }
-            while (*p != 0 && *p != '\n') p++;
-            if (*p == '\n') p++;
+static unsigned int dns_cache_ip[8];
+static char dns_cache_name[8][64];
+static int dns_cache_used;
+
+static int dns_cache_get(const char *name, unsigned int *out) {
+    int i;
+    for (i = 0; i < dns_cache_used; i++) {
+        if (strcmp(dns_cache_name[i], name) == 0) {
+            *out = dns_cache_ip[i];
+            return 1;
         }
     }
-    return ns;
+    return 0;
+}
+
+static void dns_cache_put(const char *name, unsigned int ip) {
+    int n = 0;
+    int i;
+    while (name[n] && n < 63) n++;
+    if (n == 0) return;
+    if (dns_cache_used < 8) {
+        i = dns_cache_used++;
+    } else {
+        i = 0; /* simple overwrite slot 0 */
+    }
+    for (n = 0; name[n] && n < 63; n++) dns_cache_name[i][n] = name[n];
+    dns_cache_name[i][n] = 0;
+    dns_cache_ip[i] = ip;
+}
+
+/* Collect up to 4 nameservers + up to 4 search domains from resolv.conf. */
+static void load_resolv(unsigned int *ns, int *nns, char search[][64], int *nsearch) {
+    char buf[256];
+    long fd;
+    long n;
+    long i;
+    *nns = 0;
+    *nsearch = 0;
+    ns[0] = 0x0A000202u;
+    fd = u_open("/etc/resolv.conf", 0, 0);
+    if (fd < 0) {
+        *nns = 1;
+        return;
+    }
+    n = u_read(fd, buf, sizeof(buf) - 1);
+    u_close(fd);
+    if (n <= 0) {
+        *nns = 1;
+        return;
+    }
+    buf[n] = 0;
+    i = 0;
+    while (i < n) {
+        char *line = buf + i;
+        while (i < n && buf[i] != '\n') i++;
+        if (i < n) {
+            buf[i] = 0;
+            i++;
+        }
+        if (line[0] == '#' || line[0] == 0) continue;
+        if (line[0] == 'n' && line[1] == 'a' && line[2] == 'm' &&
+            line[3] == 'e' && line[4] == 's' && line[5] == 'e' &&
+            line[6] == 'r' && line[7] == 'v' && line[8] == 'e' &&
+            line[9] == 'r' && (line[10] == ' ' || line[10] == '\t')) {
+            char *p = line + 10;
+            unsigned int addr;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*nns < 4 && parse_ipv4_lit(p, &addr)) {
+                ns[*nns] = addr;
+                (*nns)++;
+            }
+        } else if ((line[0] == 's' && line[1] == 'e' && line[2] == 'a' &&
+                    line[3] == 'r' && line[4] == 'c' && line[5] == 'h' &&
+                    (line[6] == ' ' || line[6] == '\t')) ||
+                   (line[0] == 'd' && line[1] == 'o' && line[2] == 'm' &&
+                    line[3] == 'a' && line[4] == 'i' && line[5] == 'n' &&
+                    (line[6] == ' ' || line[6] == '\t'))) {
+            char *p = line + 6;
+            while (*p == ' ' || *p == '\t') p++;
+            while (*p != 0 && *nsearch < 4) {
+                int k = 0;
+                while (*p != 0 && *p != ' ' && *p != '\t') {
+                    if (k < 63) search[*nsearch][k++] = *p;
+                    p++;
+                }
+                search[*nsearch][k] = 0;
+                if (k > 0) (*nsearch)++;
+                while (*p == ' ' || *p == '\t') p++;
+            }
+        }
+    }
+    if (*nns == 0) {
+        ns[0] = 0x0A000202u;
+        *nns = 1;
+    }
 }
 
 static int dns_query_a(const char *name, unsigned int nameserver, unsigned int *out) {
@@ -478,11 +544,11 @@ static int dns_query_a(const char *name, unsigned int nameserver, unsigned int *
     unsigned char resp[512];
     unsigned char sa[16];
     unsigned char bindsa[16];
-    unsigned int alen = 16;
     long s;
     long n;
     int qi;
     int i;
+    int attempt;
     const char *p;
     unsigned short id = 0x4F53;
     for (i = 0; i < 16; i++) {
@@ -528,63 +594,114 @@ static int dns_query_a(const char *name, unsigned int nameserver, unsigned int *
         u_close(s);
         return 0;
     }
-    if (u_sendto(s, q, (unsigned long)qi, 0, sa, 16) != qi) {
-        u_close(s);
-        return 0;
-    }
-    n = u_recvfrom(s, resp, sizeof(resp), 0, 0, 0);
-    u_close(s);
-    if (n < 12) return 0;
-    if (resp[0] != q[0] || resp[1] != q[1]) return 0;
-    /* Skip question, then walk answers for type A. */
-    {
-        int ancount = ((int)resp[6] << 8) | (int)resp[7];
-        int off = 12;
-        /* skip QNAME */
-        while (off < n && resp[off] != 0) {
-            if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
-            off += 1 + resp[off];
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (u_sendto(s, q, (unsigned long)qi, 0, sa, 16) != qi) {
+            continue;
         }
-        if (off < n && resp[off] == 0) off++;
-        off += 4; /* QTYPE+QCLASS */
-        while (ancount > 0 && off + 12 <= n) {
-            int typ;
-            int rdlen;
-            if ((resp[off] & 0xC0) == 0xC0) off += 2;
-            else {
-                while (off < n && resp[off] != 0) {
-                    if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
-                    off += 1 + resp[off];
+        n = u_recvfrom(s, resp, sizeof(resp), 0, 0, 0);
+        if (n < 12) {
+            u_yield();
+            continue;
+        }
+        if (resp[0] != q[0] || resp[1] != q[1]) continue;
+        {
+            int ancount = ((int)resp[6] << 8) | (int)resp[7];
+            int off = 12;
+            while (off < n && resp[off] != 0) {
+                if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
+                off += 1 + resp[off];
+            }
+            if (off < n && resp[off] == 0) off++;
+            off += 4;
+            while (ancount > 0 && off + 12 <= n) {
+                int typ;
+                int rdlen;
+                if ((resp[off] & 0xC0) == 0xC0) off += 2;
+                else {
+                    while (off < n && resp[off] != 0) {
+                        if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
+                        off += 1 + resp[off];
+                    }
+                    if (off < n && resp[off] == 0) off++;
                 }
-                if (off < n && resp[off] == 0) off++;
+                if (off + 10 > n) break;
+                typ = ((int)resp[off] << 8) | (int)resp[off + 1];
+                rdlen = ((int)resp[off + 8] << 8) | (int)resp[off + 9];
+                off += 10;
+                if (typ == 1 && rdlen == 4 && off + 4 <= n) {
+                    *out = ((unsigned int)resp[off] << 24) |
+                           ((unsigned int)resp[off + 1] << 16) |
+                           ((unsigned int)resp[off + 2] << 8) |
+                           (unsigned int)resp[off + 3];
+                    u_close(s);
+                    return 1;
+                }
+                /* Skip CNAME / other RRs and keep walking. */
+                off += rdlen;
+                ancount--;
             }
-            if (off + 10 > n) return 0;
-            typ = ((int)resp[off] << 8) | (int)resp[off + 1];
-            rdlen = ((int)resp[off + 8] << 8) | (int)resp[off + 9];
-            off += 10;
-            if (typ == 1 && rdlen == 4 && off + 4 <= n) {
-                *out = ((unsigned int)resp[off] << 24) |
-                       ((unsigned int)resp[off + 1] << 16) |
-                       ((unsigned int)resp[off + 2] << 8) |
-                       (unsigned int)resp[off + 3];
-                return 1;
-            }
-            off += rdlen;
-            ancount--;
         }
     }
-    (void)alen;
+    u_close(s);
+    return 0;
+}
+
+static int resolve_one(const char *name, unsigned int *out) {
+    unsigned int ns[4];
+    int nns = 0;
+    char search[4][64];
+    int nsearch = 0;
+    int i;
+    if (dns_cache_get(name, out)) return 1;
+    if (hosts_lookup(name, out)) {
+        dns_cache_put(name, *out);
+        return 1;
+    }
+    load_resolv(ns, &nns, search, &nsearch);
+    for (i = 0; i < nns; i++) {
+        if (dns_query_a(name, ns[i], out)) {
+            dns_cache_put(name, *out);
+            return 1;
+        }
+    }
+    (void)nsearch;
+    (void)search;
     return 0;
 }
 
 /* Resolve name to host-order IPv4. Returns 1 on success. */
 int resolve_host(const char *name, unsigned int *out) {
-    unsigned int ns;
+    unsigned int ns[4];
+    int nns = 0;
+    char search[4][64];
+    int nsearch = 0;
+    int i;
+    int has_dot = 0;
     if (name == 0 || out == 0 || name[0] == 0) return 0;
     if (parse_ipv4_lit(name, out)) return 1;
-    if (hosts_lookup(name, out)) return 1;
-    ns = read_nameserver();
-    if (dns_query_a(name, ns, out)) return 1;
+    if (resolve_one(name, out)) return 1;
+    for (i = 0; name[i]; i++) {
+        if (name[i] == '.') has_dot = 1;
+    }
+    if (has_dot) return 0;
+    load_resolv(ns, &nns, search, &nsearch);
+    for (i = 0; i < nsearch; i++) {
+        char fqdn[128];
+        int a = 0;
+        int b = 0;
+        while (name[a] && a < 63) {
+            fqdn[a] = name[a];
+            a++;
+        }
+        fqdn[a++] = '.';
+        while (search[i][b] && a < 126) {
+            fqdn[a++] = search[i][b++];
+        }
+        fqdn[a] = 0;
+        if (resolve_one(fqdn, out)) return 1;
+    }
+    (void)ns;
+    (void)nns;
     return 0;
 }
 
@@ -620,8 +737,17 @@ char *strtok_sh(char **save) {
     return out;
 }
 
-/* ---- signals (stub) ----------------------------------------------------- */
+/* ---- signals (delivery frames + restorer) ------------------------------- */
 enum { SIG_DFL_V = 0, SIG_IGN_V = 1 };
+
+extern long u_rt_sigreturn(void);
+
+/* Kernel redirects handler return here; issues rt_sigreturn. */
+void __sig_restorer(void) {
+    u_rt_sigreturn();
+    for (;;) {
+    }
+}
 
 struct sigaction {
     void *sa_handler;
@@ -638,6 +764,11 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
     void *op = 0;
     if (act) {
         tmp = *act;
+        if (tmp.sa_handler != (void *)SIG_DFL_V &&
+            tmp.sa_handler != (void *)SIG_IGN_V &&
+            tmp.sa_restorer == 0) {
+            tmp.sa_restorer = (void *)__sig_restorer;
+        }
         ap = &tmp;
     }
     if (oldact) {
@@ -661,7 +792,7 @@ void *signal(int sig, void *handler) {
     struct sigaction old;
     act.sa_handler = handler;
     act.sa_flags = 0;
-    act.sa_restorer = 0;
+    act.sa_restorer = (void *)__sig_restorer;
     act.sa_mask = 0;
     if (sigaction(sig, &act, &old) != 0) {
         return (void *)(long)-1;

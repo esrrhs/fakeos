@@ -28,6 +28,7 @@ enum {
 static u32 kbd_shift;
 static u32 kbd_caps;
 static u32 kbd_ok;
+static u32 kbd_e0;                   /* next scancode is E0-prefixed */
 static volatile u64 kbd_irq_count;
 
 /* Set-1 make codes -> ASCII (unshifted). 0 = ignore / special. */
@@ -109,16 +110,37 @@ void kbd_irq(void) {
     sc = arch.inb(KBD_DATA);
     kbd_irq_count++;
 
-    /* Ignore E0-prefixed extended make/break for the first cut. */
-    if (sc == 0xE0 || sc == 0xE1) {
+    if (sc == 0xE1) {
+        return; /* pause/break sequence ignored */
+    }
+    if (sc == 0xE0) {
+        kbd_e0 = 1;
         return;
     }
 
     if (sc & 0x80) {
         /* Break code */
         sc = (u8)(sc & 0x7F);
+        if (kbd_e0) {
+            kbd_e0 = 0;
+            return;
+        }
         if (sc == 0x2A || sc == 0x36) {
             kbd_shift = 0;
+        }
+        return;
+    }
+
+    if (kbd_e0) {
+        kbd_e0 = 0;
+        /* Arrow keys: emit CSI A/B/C/D for TTY history / cursor. */
+        if (sc == 0x48 || sc == 0x50 || sc == 0x4B || sc == 0x4D) {
+            tty_push_byte(0x1B);
+            tty_push_byte('[');
+            if (sc == 0x48) tty_push_byte('A');      /* Up */
+            else if (sc == 0x50) tty_push_byte('B'); /* Down */
+            else if (sc == 0x4D) tty_push_byte('C'); /* Right */
+            else tty_push_byte('D');                 /* Left */
         }
         return;
     }
@@ -162,6 +184,7 @@ void kbd_init(void) {
     int r;
     kbd_shift = 0;
     kbd_caps = 0;
+    kbd_e0 = 0;
     kbd_irq_count = 0;
     kbd_ok = 0;
 

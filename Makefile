@@ -26,11 +26,15 @@ ROOT_DIR  := $(shell pwd)
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
 # in a throwaway /tmp copy.
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
-# Tip of combine/gcc16-macho-and-o0-ldouble after 2c1f4525 miscompiles
-# `imm64 ^ induction` (PMM order-3 selftest) and breaks kill/wait on the
-# ldfake-rebuilt kernel. Pin when restaging m5blob, e.g.:
-#   FAKECC_SRC=/tmp/fakecc-m5-good   # git worktree at 2c1f4525
-# See docs/ldfake-order3-diagnosis.md.
+# !!! M5 RESTAGE PIN (required) !!!
+# Tip of combine/gcc16-macho-and-o0-ldouble AFTER 2c1f4525 miscompiles
+# `imm64 ^ induction` (O0 BXOR) and breaks PMM order-3 + kill/wait on the
+# ldfake-rebuilt kernel. When restaging build/m5stage (rm -rf then make),
+# ALWAYS point FAKECC_SRC at a worktree pinned to 2c1f4525, e.g.:
+#   git -C ../fakecc worktree add /tmp/fakecc-m5-good 2c1f4525
+#   rm -rf build/m5stage build/m5blob.asm build/m5blob.o
+#   FAKECC_SRC=/tmp/fakecc-m5-good make
+# Full write-up: docs/ldfake-order3-diagnosis.md (section "M5 restage pin").
 
 # Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
 M5STAGE := $(BUILD_DIR)/m5stage
@@ -53,8 +57,11 @@ QEMUFLAGS := -m 128M -serial stdio
 DISK_IMG  := $(BUILD_DIR)/disk.img
 # Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
 QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
-# Legacy/transitional VirtIO-net + QEMU user-mode stack (guest 10.0.2.15).
-QEMU_NET  := -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0
+# Legacy/transitional VirtIO-net + QEMU user-mode stack.
+# Explicit subnet + dhcpstart match the guest DHCP client / static fallback
+# (10.0.2.15/24, gw 10.0.2.2). Optional hostfwd example (uncomment to expose
+# guest TCP 23 on host 10023): ,hostfwd=tcp::10023-:23
+QEMU_NET  := -netdev user,id=net0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-pci,disable-modern=on,netdev=net0
 
 # Target ELF files
 KERNEL_64  := $(BUILD_DIR)/fakeos64.elf
