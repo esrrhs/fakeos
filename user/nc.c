@@ -20,6 +20,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_close(long fd);
 extern void printf(const char *fmt, ...);
 extern int strcmp(const char *a, const char *b);
+extern int resolve_host(const char *name, unsigned int *out);
 
 enum {
     AF_INET = 2,
@@ -187,7 +188,7 @@ int main(int argc, char **argv) {
             }
             return tcp_listen_mode(port);
         }
-        if (i + 1 >= argc || !parse_ipv4(argv[i], &ip) || !parse_port(argv[i + 1], &port)) {
+        if (i + 1 >= argc || !resolve_host(argv[i], &ip) || !parse_port(argv[i + 1], &port)) {
             usage();
             return 1;
         }
@@ -222,7 +223,7 @@ int main(int argc, char **argv) {
             if (n > 0) u_write(1, buf, (unsigned long)n);
         }
     }
-    if (i + 1 >= argc || !parse_ipv4(argv[i], &ip) || !parse_port(argv[i + 1], &port)) {
+    if (i + 1 >= argc || !resolve_host(argv[i], &ip) || !parse_port(argv[i + 1], &port)) {
         usage();
         return 1;
     }

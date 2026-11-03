@@ -18,6 +18,8 @@ extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
 extern void kbd_irq(void);
 extern void net_poll(void);
+extern void sched_check_signals(void);
+extern void net_tcp_timer(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -136,7 +138,11 @@ void isr_dispatch(struct trap_frame *f) {
         if ((f->cs & 3) == 3) {
             sched_note_user_tick();     /* tick interrupted a ring-3 thread */
         }
+        net_tcp_timer();
         sched_tick();
+        if ((f->cs & 3) == 3) {
+            sched_check_signals();
+        }
         return;
     }
 
@@ -144,6 +150,9 @@ void isr_dispatch(struct trap_frame *f) {
     if (v == 33) {
         drivers.kbd_irq();
         arch.lapic_send_eoi();
+        if ((f->cs & 3) == 3) {
+            sched_check_signals();
+        }
         return;
     }
 
@@ -152,6 +161,9 @@ void isr_dispatch(struct trap_frame *f) {
         drivers.uart_irq();
         tty_on_uart_byte();
         arch.lapic_send_eoi();
+        if ((f->cs & 3) == 3) {
+            sched_check_signals();
+        }
         return;
     }
 

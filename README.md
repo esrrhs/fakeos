@@ -159,11 +159,15 @@ flowchart TD
 - [x] **PS/2 键盘 IRQ1**：i8042 + set-1 扫描码；I/O APIC IRQ1→vector 33；`tty_push_byte` 与串口共享行规程，回显至 UART+VGA。
 - [x] **Ext2 persist-root UX**：`/home` 路径别名到 Ext2 卷；Ramfs 保留 `/bin` `/etc` `/tmp` 等；VirtIO-blk 轮询夹带 port I/O，FLUSH 超时最佳努力以免卡死队列。
 - [x] **IRQ 驱动 VirtIO-net**：PCI INTx → I/O APIC level → vector 40；`virtio_net_irq` ack ISR 后 `net_poll` 收包；idle 轮询仅作备份。
-- [x] **TCP 握手与流**：`listen`/`accept` + 三次握手；已连接 `send`/`recv`（sendto/recvfrom 与 read/write）；环回自测；`/bin/nc` TCP 模式（`nc -l PORT` / `nc HOST PORT`）。无重传定时器，远程路径尽力而为。
+- [x] **TCP 握手与流**：`listen`/`accept` + 三次握手；已连接 `send`/`recv`（sendto/recvfrom 与 read/write）；环回自测；`/bin/nc` TCP 模式（`nc -l PORT` / `nc HOST PORT`）。SYN/数据经 100Hz 定时器重传。
 - [x] **Shell `&&` / `||` / 作业**：命令列表短电路；尾 `&` 后台 + `jobs`/`fg`（单作业，WNOHANG 回收提示）。
 - [x] **更丰富 VGA 文本**：控制台写回显至 VGA；CSI 解析（清屏/光标/颜色/行擦除），`clear` 对图形窗口生效。
 - [x] **简易行编辑器 `/bin/ed`**：`a/c/d/p/n/w/e/q` 子集，可写 Ext2 持久文件。
 - [x] **Ext2 default-root UX**：Ramfs 保留 `/` 列表与 `/bin` `/etc` `/tmp` `/proc` `/src` `/ref` `/asm` `/dev`；其余绝对路径（含 `/home`）落入 Ext2 卷（`/mnt` 仍为卷根别名）。
+- [x] **Signals + Ctrl-C**：`kill`/`SIGINT`/`SIGKILL`/`SIGTERM`/`SIGCHLD`；TTY Ctrl-C 向 foreground（`tty_setfg`）投递 SIGINT；默认动作终止；shell 在 wait 前设置 fg。
+- [x] **DNS stub**：`/etc/resolv.conf` + `/etc/hosts`；libc `resolve_host`（字面量 / hosts / UDP DNS A）；`ping`/`nc` 接受主机名。静态地址（无完整 DHCP）。
+- [x] **login/getty stub**：`/etc/passwd` + `/bin/login`（root / 空或 root 密码）后 exec `/bin/sh`。
+- [x] **TCP retransmit timer**：100Hz 节拍上对未确认 SYN/数据段重传；shell `PATH`（`/bin:.:...`）与引号分词；`kill` builtin。
 
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。

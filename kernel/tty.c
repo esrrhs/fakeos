@@ -40,6 +40,25 @@ extern void cpu_cli(void);
 extern void cpu_sti(void);
 
 static u32 tty_wait_token;
+static u32 tty_fg_pid;          /* foreground process for SIGINT (0=reader) */
+static u32 tty_got_intr;        /* Ctrl-C interrupted the current read */
+
+extern u32 sched_current_pid(void);
+extern u32 sched_signal_send(u32 pid, u32 sig);
+extern u32 sched_has_pending_fatal(void);
+
+enum {
+    SIGINT_N = 2,
+    EINTR_NEG = (u64)-4
+};
+
+void tty_set_fg(u32 pid) {
+    tty_fg_pid = pid;
+}
+
+u32 tty_get_fg(void) {
+    return tty_fg_pid;
+}
 
 void tty_on_uart_byte(void) {
     sched_wakeup((u64)&tty_wait_token);
@@ -80,6 +99,10 @@ static int tty_getc_block(void) {
     cpu_sti();
     cpu_cli();
     for (;;) {
+        if (sched_has_pending_fatal()) {
+            cpu_sti();
+            return -2;                  /* interrupted */
+        }
         c = tty_in_pop();
         if (c < 0) {
             c = drivers.uart_getc_nonblock();
@@ -89,13 +112,40 @@ static int tty_getc_block(void) {
             return c;
         }
         sched_sleep_cli((u64)&tty_wait_token);
-        /* Still CLI after sleep_cli; re-check the ring. */
+        /* Still CLI after sleep_cli; re-check the ring / signals. */
     }
 }
 
 static void tty_recv_line(void) {
     for (;;) {
         int c = tty_getc_block();
+        if (c == -2 || sched_has_pending_fatal()) {
+            /* Woken by kill while blocked on input. */
+            tty_got_intr = 1;
+            tty_editing = 0;
+            tty_line_len = 0;
+            tty_pos = 0;
+            return;
+        }
+        if (c == 0x03) {
+            /* Ctrl-C: echo, reset line, SIGINT to fg (or current reader). */
+            drivers.uart_putc('^');
+            drivers.uart_putc('C');
+            drivers.uart_putc('\n');
+            drivers.vga_putc('^');
+            drivers.vga_putc('C');
+            drivers.vga_putc('\n');
+            tty_editing = 0;
+            tty_line_len = 0;
+            tty_pos = 0;
+            tty_got_intr = 1;
+            /* Only signal a declared foreground job. fg==0 means the
+             * reader (usually the shell at a prompt) just wants EINTR. */
+            if (tty_fg_pid != 0) {
+                sched_signal_send(tty_fg_pid, SIGINT_N);
+            }
+            return;
+        }
         if (c == '\n' || c == '\r') {
             tty_buf[tty_editing] = '\n';
             tty_line_len = tty_editing + 1;
@@ -145,6 +195,7 @@ u64 tty_console_read(u64 ubuf, u64 len) {
     if (!mem.as_user_range_ok(as, ubuf, len)) {
         return (u64)(-1);
     }
+    tty_got_intr = 0;
     while (done < len) {
         u64 n;
         u64 i;
@@ -152,6 +203,9 @@ u64 tty_console_read(u64 ubuf, u64 len) {
             tty_line_len = 0;
             tty_pos = 0;
             tty_recv_line();
+            if (tty_got_intr) {
+                return EINTR_NEG;
+            }
         }
         n = tty_line_len - tty_pos;
         if (n > len - done) {

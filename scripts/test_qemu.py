@@ -117,7 +117,11 @@ def second_boot_checks(disk):
     """Boot the in-OS linked kernel and run a reduced shell session."""
     print("\n==> Phase 5b: second boot of the in-OS rebuilt kernel...")
     vm = VM(REBUILT, extra_args=disk_args(disk) + net_args())
-    boot = vm.wait_for("fakeos:~$", 30.0)
+    boot = vm.wait_for("fakeos login:", 30.0)
+    vm.send("root")
+    boot += vm.wait_for("Password:", 5.0)
+    vm.send("")
+    boot += vm.wait_for("fakeos:~$", 10.0)
     session = ""
     for c in ["hello", "echo $?", "pid", "echo INPUT123", "cat /etc/motd",
               "ls /bin", "nosuchcmd", "exit 7"]:
@@ -189,8 +193,12 @@ def main():
     disk = ensure_disk()
     vm = VM(KERNEL, extra_args=disk_args(disk) + net_args())
 
-    # 1. Boot + kernel self-tests + init userspace tests -> first prompt.
-    boot = vm.wait_for("fakeos:~$", 30.0)
+    # 1. Boot + kernel self-tests + init -> login stub -> shell prompt.
+    boot = vm.wait_for("fakeos login:", 30.0)
+    vm.send("root")
+    boot += vm.wait_for("Password:", 5.0)
+    vm.send("")  # empty password
+    boot += vm.wait_for("fakeos:~$", 10.0)
 
     # 2. Drive the interactive shell line by line.
     commands = [
@@ -210,6 +218,8 @@ def main():
         "cat /mnt/m6pass.txt",  # persistent Ext2 file written by selftest
         "echo PIPEOK | cat",    # pipe() + shell | via wait queues
         "ping -c 1 10.0.2.2",  # sys_ping + VirtIO-net ICMP
+        "ping -c 1 gateway",   # /etc/hosts resolve_host
+        "echo \"QUOTE OK\"", # shell quote tokenizer
         "udptest",            # UDP socket loopback
         "falsecmd || echo OR_OK",  # shell || short-circuit
         "echo AND_OK && echo AND2", # shell &&
@@ -321,7 +331,11 @@ def main():
         "[FS] published /bin/udptest (",
         "[FS] published /bin/nc (",
         "[FS] published /bin/ed (",
+        "[FS] published /bin/login (",
         "[FS] published /etc/motd (",
+        "[FS] published /etc/resolv.conf (",
+        "[FS] published /etc/hosts (",
+        "[FS] published /etc/passwd (",
         # Ring-3 retained + stage-4 user self-tests
         "[U] hello from ring 3, pid=",
         "[U][PASS] child COW write took effect",
@@ -338,8 +352,11 @@ def main():
         "[U][PASS] execve rejects non-ELF file",
         "[U][PASS] huge write length rejected",
         "[U][PASS] orphan reparented to pid 1",
+        "[U][PASS] kill SIGKILL + wait status",
         # interactive shell session
-        "fakeos shell - builtins, pipes/redirects, &&/||, jobs; persist under /home",
+        "fakeos login:",
+        "Welcome root",
+        "fakeos shell - builtins, pipes/redirects, &&/||, jobs, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -357,7 +374,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: TCP streams + Ext2 default-root + shell jobs online!",
+        "[SUCCESS] fakeos: signals/DNS/login + TCP rexmit + shell PATH online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
@@ -403,8 +420,8 @@ def main():
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
         ("multiple shell prompts", norm.count("fakeos:~$") >= 14),
-        ("userland ping replied", "reply from 10.0.2.2" in out),
-        ("userland udptest loopback", "UDP loopback OK" in out),
+        ("userland ping replied", "reply from 10.0.2.2" in norm),
+        ("userland udptest loopback", "UDP loopback OK" in norm),
     ]
     # kbuild/ldfake also publish the new user programs
     #

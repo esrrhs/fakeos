@@ -61,6 +61,10 @@ extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 va
 extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
 extern void proc_reparent_exits(u32 old_ppid, u32 new_ppid);
 extern u64 sys_wait4(u64 pid, u64 status, u64 options, u64 ruspace);
+extern u64 sys_kill(u64 pid, u64 sig);
+extern u64 sys_tty_setfg(u64 pid);
+extern u32 sched_signal_send(u32 pid, u32 sig);
+extern void sched_check_signals(void);
 
 /* uproc.c */
 extern void uproc_note_exit(u32 pid, u64 code);
@@ -121,7 +125,9 @@ enum {
     SC_BIND = 49,
     SC_LISTEN = 50,
     SC_ACCEPT = 43,
-    SC_PING = 500
+    SC_KILL = 62,
+    SC_PING = 500,
+    SC_TTY_SETFG = 501
 };
 
 enum {
@@ -174,6 +180,10 @@ void proc_terminate(u64 code) {
      * exit records are keyed by the *child's* ppid, so reparent records whose
      * owner is the exiting pid (not by the parent of the exiting process). */
     proc_record_exit(pid, ppid, code);
+    /* POSIX: notify parent with SIGCHLD (ignored by default). */
+    if (ppid != 0) {
+        sched_signal_send(ppid, 17);
+    }
     /* Wake a parent blocked in wait4, if any. */
     sched_wakeup(sched_wait4_chan(ppid));
     if (pid != 1) {
@@ -297,6 +307,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_WAIT4) {
         return sys_wait4(f->rdi, f->rsi, f->rdx, f->r10);
     }
+    if (f->rax == SC_KILL) {
+        return sys_kill(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_TTY_SETFG) {
+        return sys_tty_setfg(f->rdi);
+    }
     if (f->rax == SC_EXIT) {
         proc_terminate(f->rdi);
     }
@@ -309,8 +325,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
 }
 
 u64 syscall_dispatch(struct syscall_frame *f) {
+    u64 r;
     syscall_count++;
-    return syscall_dispatch_inner(f);
+    r = syscall_dispatch_inner(f);
+    /* Fatal signals pending (e.g. SIGINT from Ctrl-C / kill): do not return. */
+    sched_check_signals();
+    return r;
 }
 
 u64 syscall_count_total(void) {

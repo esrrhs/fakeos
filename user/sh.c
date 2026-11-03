@@ -21,6 +21,8 @@ extern long u_rmdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_getpid(void);
 extern long u_sync(void);
+extern long u_kill(long pid, long sig);
+extern long u_tty_setfg(long pid);
 
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
@@ -28,6 +30,7 @@ extern char *strcpy(char *dst, const char *src);
 extern char *strncpy(char *dst, const char *src, unsigned long n);
 extern long strtol_dec(const char *s);
 extern char *strtok_ws(char **save);
+extern char *strtok_sh(char **save);
 extern void printf(const char *fmt, ...);
 extern void puts(const char *s);
 
@@ -155,13 +158,19 @@ static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
            eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "sync") ||
-           eq(cmd, "clear") || eq(cmd, "jobs") || eq(cmd, "fg");
+           eq(cmd, "clear") || eq(cmd, "jobs") || eq(cmd, "fg") ||
+           eq(cmd, "kill");
 }
 
-/* Resolve argv[0] into path (may use buf). */
+/* Default PATH directories (colon-separated). */
+static const char *default_path = "/bin:/usr/bin:.";
+
+/* Resolve argv[0] into path (may use buf). Tries PATH components. */
 static const char *resolve_cmd(char **argv, char *buf) {
     int has_slash = 0;
     int k;
+    const char *path = default_path;
+    const char *p;
     for (k = 0; argv[0][k] != 0; k++) {
         if (argv[0][k] == '/') {
             has_slash = 1;
@@ -171,6 +180,37 @@ static const char *resolve_cmd(char **argv, char *buf) {
     if (has_slash) {
         return argv[0];
     }
+    p = path;
+    while (*p != 0) {
+        int n = 0;
+        long fd;
+        while (p[n] != 0 && p[n] != ':') n++;
+        if (n == 0) {
+            /* empty component = "." */
+            strcpy(buf, "./");
+            strncpy(buf + 2, argv[0], 90);
+            buf[95] = 0;
+        } else if (n == 1 && p[0] == '.') {
+            strcpy(buf, "./");
+            strncpy(buf + 2, argv[0], 90);
+            buf[95] = 0;
+        } else {
+            int i;
+            for (i = 0; i < n && i < 80; i++) buf[i] = p[i];
+            buf[n] = '/';
+            buf[n + 1] = 0;
+            strncpy(buf + n + 1, argv[0], 90);
+            buf[95] = 0;
+        }
+        fd = u_open(buf, 0, 0);
+        if (fd >= 0) {
+            u_close(fd);
+            return buf;
+        }
+        if (p[n] == ':') p += n + 1;
+        else break;
+    }
+    /* Fall back to /bin/name even if missing (exec will fail). */
     strcpy(buf, "/bin/");
     strncpy(buf + 5, argv[0], 90);
     buf[95] = 0;
@@ -233,9 +273,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, jobs, fg, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, jobs, fg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("programs: hello cat ls cp rm touch mv ping nc ed (auto /bin)");
+        puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
+        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin");
         return 0;
     }
     if (eq(tokens[0], "jobs")) {
@@ -261,6 +302,25 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
 
     if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
         return 1;
+    }
+    if (eq(tokens[0], "kill")) {
+        long pid;
+        long sig = 15; /* SIGTERM */
+        int ai = 1;
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[2] != 0) {
+            sig = strtol_dec(tokens[1] + 1);
+            ai = 2;
+        }
+        if (tokens[ai] == 0) {
+            puts("sh: kill: usage: kill [-SIG] PID");
+            return 1;
+        }
+        pid = strtol_dec(tokens[ai]);
+        if (u_kill(pid, sig) != 0) {
+            puts("sh: kill: failed");
+            return 1;
+        }
+        return 0;
     }
     if (eq(tokens[0], "pwd")) {
         char buf[64];
@@ -417,7 +477,9 @@ static long run_pipeline(char **tokens, long rc_in) {
                 }
                 u_exit(127);
             }
+            u_tty_setfg(child);
             reaped = u_wait4(child, &status, 0, 0);
+            u_tty_setfg(0);
             if (reaped == child) {
                 return status >> 8;
             }
@@ -467,6 +529,9 @@ static long run_pipeline(char **tokens, long rc_in) {
     }
 
     /* Reap every stage; overall status is the last one's. */
+    if (nstage > 0) {
+        u_tty_setfg(pids[nstage - 1]);
+    }
     for (si = 0; si < nstage; si++) {
         long reaped = u_wait4(pids[si], &status, 0, 0);
         if (reaped == pids[si]) {
@@ -475,6 +540,7 @@ static long run_pipeline(char **tokens, long rc_in) {
             rc = -1;
         }
     }
+    u_tty_setfg(0);
     return rc;
 }
 
@@ -595,7 +661,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -616,14 +682,19 @@ int main(int argc, char **argv) {
             }
         }
 
+        u_tty_setfg(0);
         n = u_read(0, line, sizeof(line) - 1);
+        if (n == -4) {
+            /* Ctrl-C at prompt: new line already echoed. */
+            continue;
+        }
         if (n <= 0) {
             continue;
         }
         line[n] = 0;
 
         save = line;
-        while (nt < MAX_TOK - 1 && (t = strtok_ws(&save)) != 0) {
+        while (nt < MAX_TOK - 1 && (t = strtok_sh(&save)) != 0) {
             tokens[nt++] = t;
         }
         tokens[nt] = 0;

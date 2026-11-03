@@ -16,6 +16,7 @@ extern u32 virtio_net_rx(void *frame, u32 maxlen);
 extern void sched_yield(void);
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
+extern u64 sched_tick_count(void);
 extern u64 sched_current_as_h(void);
 extern u32 sched_fd_alloc(void);
 extern void sched_fd_set(u32 idx, u32 fh);
@@ -28,7 +29,7 @@ extern u32 sched_fd_get(u32 idx);
  *   guest 10.0.2.15/24, gateway/DNS 10.0.2.2.
  * ICMP echo (sys_ping); UDP socket/bind/connect/sendto/recvfrom;
  * TCP 3-way handshake, listen/accept, and byte-stream send/recv
- * (loopback fully exercised; remote best-effort, no retransmit timer).
+ * (loopback fully exercised; SYN/data retransmit via 100Hz timer).
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -131,6 +132,11 @@ struct sock {
     u32 s_count;
     u8  sbuf[TCP_RX_CAP];
     u32 peer_fin;      /* saw FIN; recv returns 0 after drain */
+    /* Retransmit of last unacked segment (SYN or data). */
+    u32 rexmit_due;    /* sched_ticks deadline; 0 = idle */
+    u32 rexmit_seq;
+    u8  rexmit_flags;
+    u16 rexmit_len;
 };
 
 static u8  local_mac[6];
@@ -147,6 +153,7 @@ static u32 ping_waiting;
 static u32 ping_got_reply;
 static u32 ping_target;
 static struct sock socks[MAX_SOCKS];
+static u8 tcp_rexmit_payload[TCP_MAX_PAYLOAD];
 static u16 next_eph = EPHEMERAL_BASE;
 
 static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len);
@@ -430,6 +437,8 @@ static u32 sock_alloc_slot(void) {
         if (!socks[i].used) {
             mem_zero(&socks[i], (u32)sizeof(struct sock));
             socks[i].used = 1;
+            socks[i].rexmit_due = 0;
+            socks[i].rexmit_len = 0;
             socks[i].refs = 1;
             return i;
         }
@@ -576,6 +585,58 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
         handle_udp(src, dst, pkt + ihl, (u32)(total - ihl));
     } else if (proto == IP_PROTO_TCP) {
         handle_tcp(src, dst, pkt + ihl, (u32)(total - ihl));
+    }
+}
+
+
+static void tcp_arm_rexmit(struct sock *sk, u32 seq, u8 flags,
+                           const u8 *payload, u16 plen) {
+    u32 i;
+    sk->rexmit_seq = seq;
+    sk->rexmit_flags = flags;
+    sk->rexmit_len = plen;
+    for (i = 0; i < plen && i < TCP_MAX_PAYLOAD; i++) {
+        tcp_rexmit_payload[i] = payload[i];
+    }
+    /* ~500ms at 100Hz */
+    sk->rexmit_due = (u32)sched_tick_count() + 50;
+}
+
+static void tcp_clear_rexmit(struct sock *sk) {
+    sk->rexmit_due = 0;
+    sk->rexmit_len = 0;
+}
+
+/* Called from the APIC timer ISR path: retransmit unacked SYN/data. */
+void net_tcp_timer(void) {
+    u32 i;
+    u32 now;
+    if (!net_up) {
+        return;
+    }
+    now = (u32)sched_tick_count();
+    for (i = 0; i < MAX_SOCKS; i++) {
+        struct sock *sk = &socks[i];
+        if (!sk->used || sk->type != SOCK_STREAM) {
+            continue;
+        }
+        if (sk->rexmit_due == 0) {
+            continue;
+        }
+        if ((int)(now - sk->rexmit_due) < 0) {
+            continue;
+        }
+        if (sk->tcp_state == TCPS_SYN_SENT ||
+            sk->tcp_state == TCPS_ESTABLISHED ||
+            sk->tcp_state == TCPS_FIN_WAIT ||
+            sk->tcp_state == TCPS_LAST_ACK) {
+            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                       sk->rexmit_seq, sk->rcv_nxt, sk->rexmit_flags,
+                       tcp_rexmit_payload, sk->rexmit_len);
+            sk->rexmit_due = now + 50;
+        } else {
+            tcp_clear_rexmit(sk);
+        }
     }
 }
 
@@ -873,11 +934,13 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
             sk->snd_nxt = ack;
             sk->tcp_state = TCPS_ESTABLISHED;
             sk->connected = 1;
+            tcp_clear_rexmit(sk);
             tcp_tx_seg(sk->local_port, src_ip, sport,
                        sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
             sched_wakeup((u64)sk);
         } else if (flags & TCPF_RST) {
             sk->tcp_state = TCPS_CLOSED;
+            tcp_clear_rexmit(sk);
             sched_wakeup((u64)sk);
         }
         return;
@@ -911,8 +974,19 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
     if (flags & TCPF_RST) {
         sk->tcp_state = TCPS_CLOSED;
         sk->peer_fin = 1;
+        tcp_clear_rexmit(sk);
         sched_wakeup((u64)sk);
         return;
+    }
+
+    if (flags & TCPF_ACK) {
+        /* Cumulative ACK: anything below ack is covered. */
+        if (ack > sk->snd_una) {
+            sk->snd_una = ack;
+        }
+        if (sk->snd_una >= sk->snd_nxt) {
+            tcp_clear_rexmit(sk);
+        }
     }
 
     if (plen > 0 && seq == sk->rcv_nxt) {
@@ -1227,23 +1301,23 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
         return (u64)(-1);
     }
     sk->snd_nxt = sk->iss + 1;
+    tcp_arm_rexmit(sk, sk->iss, TCPF_SYN, 0, 0);
     for (spins = 0; spins < 2000000; spins++) {
         net_poll();
         if (sk->tcp_state == TCPS_ESTABLISHED) {
             sk->connected = 1;
+            tcp_clear_rexmit(sk);
             return 0;
         }
         if (sk->tcp_state == TCPS_CLOSED) {
+            tcp_clear_rexmit(sk);
             return (u64)(-1);
         }
         if ((spins & 255) == 0) {
             sched_yield();
         }
-        /* Retransmit SYN occasionally (no timer). */
-        if ((spins & 65535) == 65535) {
-            tcp_tx_seg(sk->local_port, ip, port, sk->iss, 0, TCPF_SYN, 0, 0);
-        }
     }
+    tcp_clear_rexmit(sk);
     sk->tcp_state = TCPS_CLOSED;
     return (u64)(-1);
 }
@@ -1287,6 +1361,7 @@ u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
                         (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen)) {
             return (u64)(-1);
         }
+        tcp_arm_rexmit(sk, sk->snd_nxt, (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen);
         sk->snd_nxt += plen;
         return (u64)plen;
     }

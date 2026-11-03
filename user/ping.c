@@ -5,6 +5,7 @@ extern long u_ping(unsigned int ip);
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern void printf(const char *fmt, ...);
 extern int strcmp(const char *a, const char *b);
+extern int resolve_host(const char *name, unsigned int *out);
 
 static int parse_ipv4(const char *s, unsigned int *out) {
     unsigned int b[4];
@@ -56,7 +57,7 @@ int main(int argc, char **argv) {
     int ok = 0;
 
     if (argc < 2) {
-        u_write(2, "usage: ping [-c N] IP\n", 22);
+        u_write(2, "usage: ping [-c N] HOST\n", 24);
         return 1;
     }
     i = 1;
@@ -76,8 +77,8 @@ int main(int argc, char **argv) {
         }
         i = 3;
     }
-    if (i >= argc || !parse_ipv4(argv[i], &ip)) {
-        u_write(2, "ping: bad IPv4 address\n", 23);
+    if (i >= argc || !resolve_host(argv[i], &ip)) {
+        u_write(2, "ping: unknown host\n", 19);
         return 1;
     }
     printf("PING %s\n", argv[i]);

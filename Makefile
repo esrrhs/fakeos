@@ -149,7 +149,7 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
-USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed kbuild ldfake dumpbin
+USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed login kbuild ldfake dumpbin
 USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
@@ -184,7 +184,7 @@ $(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
 endef
 $(foreach p,$(USER_PROGS),$(eval $(call USER_ELF_RULE,$(p))))
 
-$(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt
+$(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt user/resolv.conf user/hosts user/passwd
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<

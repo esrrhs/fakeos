@@ -21,6 +21,7 @@ extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_getdents(long fd, void *buf, unsigned long len);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
+extern long u_kill(long pid, long sig);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
@@ -262,6 +263,29 @@ static void wrap_len_test(void) {
 /* Grandchild orphaning: a middle child forks a grandchild and exits before it;
  * the grandchild must be reparented to pid 1, whose wait4(-1) then reaps it
  * with the original exit code 77. */
+
+/* kill(SIGKILL) a looping child; parent must reap it. */
+static void signal_test(void) {
+    long child = u_fork();
+    long status = 0;
+    long reaped;
+    if (child == 0) {
+        for (;;) {
+            u_yield();
+        }
+    }
+    if (u_kill(child, 9) != 0) {
+        puts("[U][FAIL] kill(SIGKILL) returned error");
+        return;
+    }
+    reaped = u_wait4(child, &status, 0, 0);
+    if (reaped == child && (status >> 8) == (128 + 9)) {
+        puts("[U][PASS] kill SIGKILL + wait status");
+    } else {
+        printf("[U][FAIL] kill/wait status=%d reaped=%d\n", (int)(status >> 8), (int)reaped);
+    }
+}
+
 static void orphan_test(void) {
     long middle = u_fork();
     if (middle == 0) {
@@ -320,6 +344,7 @@ int main(int argc, char **argv) {
     bad_exec_test();
     wrap_len_test();
     orphan_test();
+    signal_test();
 
     /* Prefer persistent Ext2 home (/home aliases /mnt/home) when mounted. */
     u_mkdir("/mnt/home");
@@ -329,12 +354,16 @@ int main(int argc, char **argv) {
         puts("[U] cwd -> /mnt/home (persistent Ext2)");
     }
 
-    /* Replace this image with the interactive shell (same pid/fd/cwd). */
-    sh_argv[0] = "/bin/sh";
+    /* getty/login stub then shell (same pid). */
+    sh_argv[0] = "/bin/login";
     sh_argv[1] = 0;
-    if (u_execve("/bin/sh", sh_argv, 0) != 0) {
-        puts("[U][FAIL] execve /bin/sh failed");
-        u_exit(127);
+    if (u_execve("/bin/login", sh_argv, 0) != 0) {
+        puts("[U] login missing, falling back to /bin/sh");
+        sh_argv[0] = "/bin/sh";
+        if (u_execve("/bin/sh", sh_argv, 0) != 0) {
+            puts("[U][FAIL] execve /bin/sh failed");
+            u_exit(127);
+        }
     }
     return 0;                       /* unreachable */
 }

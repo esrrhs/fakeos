@@ -63,6 +63,8 @@ struct tcb {
     u32 pid;           /* User process id (0 for kernel threads)          */
     u32 ppid;          /* Parent process id (0 = kernel / no parent)      */
     u32 is_user;       /* Runs at ring 3 between syscalls/interrupts      */
+    u32 pending_sigs;  /* Bitmask: bit N set => signal N pending          */
+    u32 sig_ignore;    /* Bitmask: bit N set => ignore signal N           */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -98,6 +100,8 @@ void sched_init(void) {
         threads[i].pid = 0;
         threads[i].ppid = 0;
         threads[i].is_user = 0;
+        threads[i].pending_sigs = 0;
+        threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         for (j = 0; j < FD_MAX; j++) {
             threads[i].fd[j] = FD_EMPTY;
         }
@@ -216,6 +220,8 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].pid = 0;
     threads[i].ppid = 0;
     threads[i].is_user = 0;
+    threads[i].pending_sigs = 0;
+    threads[i].sig_ignore = 0;
     fd_table_clear(&threads[i]);
     cwd_set_root(&threads[i]);
     threads[i].state = TCB_RUNNABLE;
@@ -256,6 +262,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].pid = pid;
     threads[i].ppid = 0;
     threads[i].is_user = 1;
+    threads[i].pending_sigs = 0;
+    threads[i].sig_ignore = (1u << 17);
     fd_table_install_console(&threads[i]);
     cwd_set_root(&threads[i]);
     threads[i].state = TCB_RUNNABLE;
@@ -330,6 +338,8 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
         }
     }
     cwd_copy_from(&threads[i], threads[current].cwd);
+    threads[i].pending_sigs = 0;
+    threads[i].sig_ignore = threads[current].sig_ignore;
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -636,6 +646,8 @@ u32 sched_reap_dead(u32 pid) {
             threads[i].pid = 0;
             threads[i].ppid = 0;
             threads[i].is_user = 0;
+            threads[i].pending_sigs = 0;
+            threads[i].sig_ignore = 0;
             return 1;
         }
     }
@@ -650,4 +662,91 @@ void sched_reparent_children(u32 old_ppid, u32 new_ppid) {
             threads[i].ppid = new_ppid;
         }
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Minimal POSIX-ish signals (default actions only).
+ * SIGINT=2 SIGKILL=9 SIGTERM=15 SIGCHLD=17
+ * ------------------------------------------------------------------------- */
+
+enum {
+    SIGINT_N  = 2,
+    SIGKILL_N = 9,
+    SIGTERM_N = 15,
+    SIGCHLD_N = 17
+};
+
+extern void proc_terminate(u64 code);
+
+u32 sched_signal_send(u32 pid, u32 sig) {
+    u32 i;
+    u32 found = 0;
+    if (sig > 31) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].pid == pid && threads[i].state != TCB_FREE
+            && threads[i].state != TCB_DEAD) {
+            found = 1;
+            if (sig == 0) {
+                continue;               /* existence probe */
+            }
+            threads[i].pending_sigs |= (1u << sig);
+            if (threads[i].state == TCB_SLEEPING) {
+                threads[i].wait_chan = 0;
+                threads[i].state = TCB_RUNNABLE;
+            }
+        }
+    }
+    return found;
+}
+
+u32 sched_pid_exists(u32 pid) {
+    return sched_signal_send(pid, 0);
+}
+
+/* Deliver default actions for the current thread. May not return. */
+void sched_check_signals(void) {
+    u32 pend;
+    u32 ign;
+    if (!threads[current].is_user || threads[current].pid == 0) {
+        return;
+    }
+    pend = threads[current].pending_sigs;
+    ign = threads[current].sig_ignore;
+    if (pend & (1u << SIGKILL_N)) {
+        threads[current].pending_sigs = 0;
+        proc_terminate(128 + SIGKILL_N);
+    }
+    /* Consume ignored signals. */
+    threads[current].pending_sigs &= ~ign;
+    pend = threads[current].pending_sigs;
+    if (pend & (1u << SIGINT_N)) {
+        threads[current].pending_sigs = 0;
+        proc_terminate(128 + SIGINT_N);
+    }
+    if (pend & (1u << SIGTERM_N)) {
+        threads[current].pending_sigs = 0;
+        proc_terminate(128 + SIGTERM_N);
+    }
+    /* Drop any other pending bits we do not handle specially. */
+    threads[current].pending_sigs = 0;
+}
+
+u32 sched_has_pending_fatal(void) {
+    u32 pend;
+    u32 ign;
+    if (!threads[current].is_user) {
+        return 0;
+    }
+    pend = threads[current].pending_sigs;
+    if (pend & (1u << SIGKILL_N)) {
+        return 1;
+    }
+    ign = threads[current].sig_ignore;
+    pend &= ~ign;
+    if (pend & ((1u << SIGINT_N) | (1u << SIGTERM_N))) {
+        return 1;
+    }
+    return 0;
 }

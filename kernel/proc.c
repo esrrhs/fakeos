@@ -45,6 +45,12 @@ extern u32 sched_has_live_child(u32 ppid);
 extern u32 sched_is_live_child(u32 ppid, u32 pid);
 extern u32 sched_reap_dead(u32 pid);
 extern void sched_reparent_children(u32 old_ppid, u32 new_ppid);
+extern u32 sched_signal_send(u32 pid, u32 sig);
+extern u32 sched_pid_exists(u32 pid);
+extern void sched_check_signals(void);
+extern u32 sched_has_pending_fatal(void);
+extern void tty_set_fg(u32 pid);
+extern u32 tty_get_fg(void);
 
 void proc_record_exit(u32 pid, u32 ppid, u64 code) {
     u32 i;
@@ -153,6 +159,48 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
             /* sched_sleep_cli: mark sleeping + switch; returns with IRQs off. */
             sched_sleep_cli(chan);
             arch.cpu_sti();
+            if (sched_has_pending_fatal()) {
+                return (u64)-4;         /* EINTR */
+            }
         }
     }
+}
+
+enum {
+    SIGINT_N  = 2,
+    SIGKILL_N = 9,
+    SIGTERM_N = 15,
+    SIGCHLD_N = 17,
+    SC_ERR    = (u64)-1
+};
+
+/* kill(pid, sig): pid>0 exact process; sig==0 existence check.
+ * Returns 0 on success, -1 on failure. */
+u64 sys_kill(u64 pid, u64 sig) {
+    u32 p = (u32)pid;
+    u32 s = (u32)sig;
+    if (pid == 0 || pid > 0x7FFFFFFFUL) {
+        /* No pgrp broadcast yet; reject 0 / negative. */
+        return SC_ERR;
+    }
+    if (s > 31) {
+        return SC_ERR;
+    }
+    if (s == 0) {
+        return sched_pid_exists(p) ? 0 : SC_ERR;
+    }
+    if (!sched_signal_send(p, s)) {
+        return SC_ERR;
+    }
+    /* If we signalled ourselves, deliver before returning. */
+    if (p == sched_current_pid()) {
+        sched_check_signals();
+    }
+    return 0;
+}
+
+/* Custom: set TTY foreground process for Ctrl-C (SIGINT) delivery. */
+u64 sys_tty_setfg(u64 pid) {
+    tty_set_fg((u32)pid);
+    return 0;
 }

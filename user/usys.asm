@@ -35,6 +35,8 @@ global u_sendto
 global u_recvfrom
 global u_listen
 global u_accept
+global u_kill
+global u_tty_setfg
 
 section .text
 
@@ -152,6 +154,12 @@ USYSC1 u_listen, 50
 
 ; long u_accept(long fd, void *addr, unsigned int *alen)
 USYSC1 u_accept, 43
+
+; long u_kill(long pid, long sig)
+USYSC1 u_kill, 62
+
+; long u_tty_setfg(long pid)  - set TTY foreground for Ctrl-C
+USYSC1 u_tty_setfg, 501
 
 ; void u_exit(long code) - does not return
 align 16

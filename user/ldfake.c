@@ -41,7 +41,7 @@ enum {
     R_32 = 10, R_32S = 11, R_GOTPCRELX = 41, R_PLT32X = 42,
     PT_LOAD = 1,
     O_RDWR_CREAT = 0x42,
-    OBJ_ARENA = 786432,      /* all inputs total ~400 KiB */
+    OBJ_ARENA = 1048576,     /* fits ~800+ KiB userblob+objs */
     OUT_CAP = 2097152,
     KERNEL_LMA = 0x100000,
     KERNEL_VMA = 0xFFFFFFFF80000000UL,
@@ -119,7 +119,7 @@ enum {
     B_TEXT, B_RODATA, B_GOT, B_DATA, B_BSS,
     NBUCKETS
 };
-static struct isec *buckets[NBUCKETS][80];
+static struct isec *buckets[NBUCKETS][128];
 static unsigned int bcount[NBUCKETS];
 static struct isec got_sec;      /* synthetic .got placed in B_GOT */
 
@@ -232,7 +232,7 @@ static int read_obj(const char *path) {
         if (b < 0) {
             continue;
         }
-        if (bcount[b] >= 80 || o->nsec >= 48) {
+        if (bcount[b] >= 128 || o->nsec >= 48) {
             puterr("ldfake: section tables full");
             return 0;
         }

@@ -343,3 +343,277 @@ void free(void *ptr) {
     b->next_free = free_list;
     free_list = b;
 }
+
+/* ---------------------------------------------------------------------------
+ * Host resolution: dotted IPv4, /etc/hosts, then DNS A query via UDP.
+ * Soft DHCP is not implemented; QEMU user-net gives a static lease and we
+ * publish /etc/resolv.conf with nameserver 10.0.2.2.
+ * ------------------------------------------------------------------------- */
+
+extern long u_open(const char *path, long flags, long mode);
+extern long u_read(long fd, void *buf, unsigned long len);
+extern long u_close(long fd);
+extern long u_socket(long domain, long type, long protocol);
+extern long u_bind(long fd, const void *addr, unsigned long alen);
+extern long u_sendto(long fd, const void *buf, unsigned long len, long flags,
+                     const void *addr, unsigned long alen);
+extern long u_recvfrom(long fd, void *buf, unsigned long len, long flags,
+                       void *addr, unsigned int *alen);
+extern long u_yield(void);
+
+static int parse_ipv4_lit(const char *s, unsigned int *out) {
+    unsigned int b[4];
+    int i = 0;
+    int n = 0;
+    unsigned int cur = 0;
+    int digits = 0;
+    while (1) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') {
+            cur = cur * 10 + (unsigned int)(c - '0');
+            if (cur > 255) return 0;
+            digits++;
+            i++;
+            continue;
+        }
+        if (digits == 0) return 0;
+        b[n++] = cur;
+        cur = 0;
+        digits = 0;
+        if (c == '.') {
+            if (n >= 4) return 0;
+            i++;
+            continue;
+        }
+        if (c == 0 || c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
+        return 0;
+    }
+    if (n != 4) return 0;
+    *out = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+    return 1;
+}
+
+static int hosts_lookup(const char *name, unsigned int *out) {
+    char buf[512];
+    long fd;
+    long n;
+    long i;
+    fd = u_open("/etc/hosts", 0, 0);
+    if (fd < 0) return 0;
+    n = u_read(fd, buf, sizeof(buf) - 1);
+    u_close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    i = 0;
+    while (i < n) {
+        char *line = buf + i;
+        char *ip;
+        char *host;
+        unsigned int addr;
+        while (i < n && buf[i] != '\n') i++;
+        if (i < n) {
+            buf[i] = 0;
+            i++;
+        }
+        if (line[0] == '#' || line[0] == 0) continue;
+        ip = line;
+        while (*line != 0 && *line != ' ' && *line != '\t') line++;
+        if (*line == 0) continue;
+        *line = 0;
+        line++;
+        while (*line == ' ' || *line == '\t') line++;
+        if (!parse_ipv4_lit(ip, &addr)) continue;
+        while (*line != 0) {
+            host = line;
+            while (*line != 0 && *line != ' ' && *line != '\t') line++;
+            if (*line != 0) {
+                *line = 0;
+                line++;
+            }
+            if (strcmp(host, name) == 0) {
+                *out = addr;
+                return 1;
+            }
+            while (*line == ' ' || *line == '\t') line++;
+        }
+    }
+    return 0;
+}
+
+static unsigned int read_nameserver(void) {
+    char buf[128];
+    long fd;
+    long n;
+    unsigned int ns = 0x0A000202u; /* 10.0.2.2 default */
+    fd = u_open("/etc/resolv.conf", 0, 0);
+    if (fd < 0) return ns;
+    n = u_read(fd, buf, sizeof(buf) - 1);
+    u_close(fd);
+    if (n <= 0) return ns;
+    buf[n] = 0;
+    {
+        char *p = buf;
+        const char *key = "nameserver";
+        int k;
+        while (*p != 0) {
+            for (k = 0; key[k] != 0 && p[k] == key[k]; k++) {
+            }
+            if (key[k] == 0 && (p[k] == ' ' || p[k] == '\t')) {
+                p += k;
+                while (*p == ' ' || *p == '\t') p++;
+                parse_ipv4_lit(p, &ns);
+                return ns;
+            }
+            while (*p != 0 && *p != '\n') p++;
+            if (*p == '\n') p++;
+        }
+    }
+    return ns;
+}
+
+static int dns_query_a(const char *name, unsigned int nameserver, unsigned int *out) {
+    unsigned char q[512];
+    unsigned char resp[512];
+    unsigned char sa[16];
+    unsigned char bindsa[16];
+    unsigned int alen = 16;
+    long s;
+    long n;
+    int qi;
+    int i;
+    const char *p;
+    unsigned short id = 0x4F53;
+    for (i = 0; i < 16; i++) {
+        sa[i] = 0;
+        bindsa[i] = 0;
+    }
+    sa[0] = 2; /* AF_INET */
+    sa[2] = 0;
+    sa[3] = 53;
+    sa[4] = (unsigned char)(nameserver >> 24);
+    sa[5] = (unsigned char)(nameserver >> 16);
+    sa[6] = (unsigned char)(nameserver >> 8);
+    sa[7] = (unsigned char)(nameserver & 0xFF);
+    bindsa[0] = 2;
+    /* Header */
+    q[0] = (unsigned char)(id >> 8);
+    q[1] = (unsigned char)(id & 0xFF);
+    q[2] = 0x01; q[3] = 0x00; /* RD */
+    q[4] = 0; q[5] = 1;       /* QDCOUNT */
+    q[6] = 0; q[7] = 0;
+    q[8] = 0; q[9] = 0;
+    q[10] = 0; q[11] = 0;
+    qi = 12;
+    p = name;
+    while (*p != 0) {
+        const char *dot = p;
+        int lab;
+        while (*dot != 0 && *dot != '.') dot++;
+        lab = (int)(dot - p);
+        if (lab <= 0 || lab > 63 || qi + 1 + lab >= 500) return 0;
+        q[qi++] = (unsigned char)lab;
+        for (i = 0; i < lab; i++) q[qi++] = (unsigned char)p[i];
+        if (*dot == '.') p = dot + 1;
+        else p = dot;
+    }
+    q[qi++] = 0;
+    q[qi++] = 0; q[qi++] = 1; /* A */
+    q[qi++] = 0; q[qi++] = 1; /* IN */
+
+    s = u_socket(2, 2, 0); /* AF_INET, SOCK_DGRAM */
+    if (s < 0) return 0;
+    if (u_bind(s, bindsa, 16) != 0) {
+        u_close(s);
+        return 0;
+    }
+    if (u_sendto(s, q, (unsigned long)qi, 0, sa, 16) != qi) {
+        u_close(s);
+        return 0;
+    }
+    n = u_recvfrom(s, resp, sizeof(resp), 0, 0, 0);
+    u_close(s);
+    if (n < 12) return 0;
+    if (resp[0] != q[0] || resp[1] != q[1]) return 0;
+    /* Skip question, then walk answers for type A. */
+    {
+        int ancount = ((int)resp[6] << 8) | (int)resp[7];
+        int off = 12;
+        /* skip QNAME */
+        while (off < n && resp[off] != 0) {
+            if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
+            off += 1 + resp[off];
+        }
+        if (off < n && resp[off] == 0) off++;
+        off += 4; /* QTYPE+QCLASS */
+        while (ancount > 0 && off + 12 <= n) {
+            int typ;
+            int rdlen;
+            if ((resp[off] & 0xC0) == 0xC0) off += 2;
+            else {
+                while (off < n && resp[off] != 0) {
+                    if ((resp[off] & 0xC0) == 0xC0) { off += 2; break; }
+                    off += 1 + resp[off];
+                }
+                if (off < n && resp[off] == 0) off++;
+            }
+            if (off + 10 > n) return 0;
+            typ = ((int)resp[off] << 8) | (int)resp[off + 1];
+            rdlen = ((int)resp[off + 8] << 8) | (int)resp[off + 9];
+            off += 10;
+            if (typ == 1 && rdlen == 4 && off + 4 <= n) {
+                *out = ((unsigned int)resp[off] << 24) |
+                       ((unsigned int)resp[off + 1] << 16) |
+                       ((unsigned int)resp[off + 2] << 8) |
+                       (unsigned int)resp[off + 3];
+                return 1;
+            }
+            off += rdlen;
+            ancount--;
+        }
+    }
+    (void)alen;
+    return 0;
+}
+
+/* Resolve name to host-order IPv4. Returns 1 on success. */
+int resolve_host(const char *name, unsigned int *out) {
+    unsigned int ns;
+    if (name == 0 || out == 0 || name[0] == 0) return 0;
+    if (parse_ipv4_lit(name, out)) return 1;
+    if (hosts_lookup(name, out)) return 1;
+    ns = read_nameserver();
+    if (dns_query_a(name, ns, out)) return 1;
+    return 0;
+}
+
+/* Quote-aware tokenizer: supports "..." and '...' (no escapes). */
+char *strtok_sh(char **save) {
+    char *s = *save;
+    char *out;
+    char quote;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    if (*s == 0) {
+        *save = s;
+        return 0;
+    }
+    if (*s == '"' || *s == '\'') {
+        quote = *s;
+        s++;
+        out = s;
+        while (*s != 0 && *s != quote) s++;
+        if (*s == quote) {
+            *s = 0;
+            s++;
+        }
+        *save = s;
+        return out;
+    }
+    out = s;
+    while (*s != 0 && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n') s++;
+    if (*s != 0) {
+        *s = 0;
+        s++;
+    }
+    *save = s;
+    return out;
+}
