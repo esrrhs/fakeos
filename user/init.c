@@ -264,11 +264,14 @@ static void wrap_len_test(void) {
  * the grandchild must be reparented to pid 1, whose wait4(-1) then reaps it
  * with the original exit code 77. */
 
-/* kill(SIGKILL) a looping child; parent must reap it. */
+/* kill(SIGKILL) a looping child; parent must reap it.
+ * Use WNOHANG + bounded yields so a broken kernel cannot wedge init
+ * before login (seen on ldfake-linked images with PMM mismatch). */
 static void signal_test(void) {
     long child = u_fork();
     long status = 0;
-    long reaped;
+    long reaped = 0;
+    int spins;
     if (child == 0) {
         for (;;) {
             u_yield();
@@ -278,7 +281,15 @@ static void signal_test(void) {
         puts("[U][FAIL] kill(SIGKILL) returned error");
         return;
     }
-    reaped = u_wait4(child, &status, 0, 0);
+    for (spins = 0; spins < 100000; spins++) {
+        reaped = u_wait4(child, &status, 1, 0); /* WNOHANG */
+        if (reaped == child) {
+            break;
+        }
+        if ((spins & 63) == 0) {
+            u_yield();
+        }
+    }
     if (reaped == child && (status >> 8) == (128 + 9)) {
         puts("[U][PASS] kill SIGKILL + wait status");
     } else {
