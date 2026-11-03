@@ -379,13 +379,17 @@ static int test_block_split(void) {
         mem.pmm_free_pages(block, 3);
         return 0;
     }
+    /* Fill/check with (block+k), same shape as test_single_pages. Avoid
+     * `imm64 ^ k` here: recent fakecc O0 BXOR isel can leave the loop-bound
+     * immediate in the register allocated to k and xor that instead of k
+     * (writes const^0x1000 to every qword; verify then fails at qword 0). */
     volatile u64 *p = page_ptr(block);
     u64 k;
     for (k = 0; k < 8 * 512; k++) {
-        p[k] = 0x5151C0DEC0DEULL ^ k;
+        p[k] = block + k;
     }
     for (k = 0; k < 8 * 512; k++) {
-        if (p[k] != (0x5151C0DEC0DEULL ^ k)) {
+        if (p[k] != block + k) {
             kprintf("      [FAIL] order-3 block data mismatch at qword %u\n", (u64)k);
             mem.pmm_free_pages(block, 3);
             return 0;

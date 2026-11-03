@@ -26,6 +26,11 @@ ROOT_DIR  := $(shell pwd)
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
 # in a throwaway /tmp copy.
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
+# Tip of combine/gcc16-macho-and-o0-ldouble after 2c1f4525 miscompiles
+# `imm64 ^ induction` (PMM order-3 selftest) and breaks kill/wait on the
+# ldfake-rebuilt kernel. Pin when restaging m5blob, e.g.:
+#   FAKECC_SRC=/tmp/fakecc-m5-good   # git worktree at 2c1f4525
+# See docs/ldfake-order3-diagnosis.md.
 
 # Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
 M5STAGE := $(BUILD_DIR)/m5stage

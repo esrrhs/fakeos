@@ -133,6 +133,7 @@ flowchart TD
 - [x] **内核对象逐字节复现**：`/bin/kbuild` 编排器先跑通 编译器→execve 冒烟，再用 OS 内 fakecc 逐个重编 26 个内核 C 模块并与随镜像发布的宿主参考对象（`/ref`）逐字节比对，输出 26 行 `identical` 与汇总 `all 26 kernel objects byte-identical`。
 - [x] **OS 内最小静态链接器 `/bin/ldfake`**：解析 ELF64 可重定位对象（节/符号/RELA/字符串表），处理 `R_X86_64_64/PC32/PLT32/GOTPCREL/32/32S`（含合成 GOT 槽与 SHN_ABS 常量），解析跨对象全局符号与链接脚本边界符号（`_kernel_*`），按 `boot/linker.ld` 的低/高两段布局（低段 `0x100000` 恒等映射、高段 `KERNEL_VMA+LMA`）输出**无节头、双 PT_LOAD 的 ELF32 multiboot 镜像**（QEMU 直接引导）；支持 `@response` 文件绕开 execve 8 参数上限，坏输入一律非零退出 + stderr 诊断。
 - [x] **重建镜像回传与二次引导**：`/bin/dumpbin` 以长度分帧 base64（`===DUMP/BEGIN ... ===`）把镜像经串口导出，`make test` 解码落盘 `build/fakeos-rebuilt.elf`，校验 ELF32/multiboot/程序头/入口后**用第二个 QEMU 实例引导重建镜像**并跑 hello/pid/exit 7/SUCCESS 精简断言。OS 内 `/bin/ldfake` 与宿主 clang 编译的同份 ldfake 源码对同一输入产出**逐字节一致**；重建镜像低 0x5000 字节引导段与 GNU ld 产物完全相同。
+- [x] **重建内核 PMM order-3 / kill 自测**：曾误判为 `ldfake` 高半区 reloc；实为 fakecc tip（`2c1f4525` 之后）O0 对 `imm64 ^ induction` 的 BXOR 误用循环上界寄存器。`test_block_split` 已改为 `block+k` 填充；M5 暂存需钉在良好 fakecc（见 `docs/ldfake-order3-diagnosis.md`）。
 - [x] **确定性回归**：`make test` 单条命令覆盖阶段 1-4 全部既有检查点，并串联 编译→比对→链接→导出→二次引导 完整闭环（可连续多次稳定通过）。
 
 ### 阶段六：持久化块设备与 Ext2（Milestone 6 · 进行中）
