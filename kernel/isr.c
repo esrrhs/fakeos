@@ -17,6 +17,7 @@ extern u32 sched_current_pid(void);
 extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
 extern void kbd_irq(void);
+extern void net_poll(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -150,6 +151,15 @@ void isr_dispatch(struct trap_frame *f) {
     if (v == 36) {
         drivers.uart_irq();
         tty_on_uart_byte();
+        arch.lapic_send_eoi();
+        return;
+    }
+
+    /* Vector 40: VirtIO-net PCI INTx (level). Ack device then drain RX. */
+    if (v == 40) {
+        if (drivers.virtio_net_irq()) {
+            net_poll();
+        }
         arch.lapic_send_eoi();
         return;
     }

@@ -102,3 +102,18 @@ void ioapic_mask_irq(u32 irq) {
     low = ioapic_read(IOAPIC_REDTBL + 2 * irq);
     ioapic_write(IOAPIC_REDTBL + 2 * irq, low | IOAPIC_MASK);
 }
+
+/* PCI INTx: level-triggered, active-low (IOAPIC bits 15 and 13). */
+void ioapic_route_irq_level(u32 irq, u32 vector) {
+    u32 dest;
+    u32 low;
+    u32 high;
+    if (ioapic_regs == 0 || irq > ioapic_max_redir || vector < 32 || vector > 255) {
+        return;
+    }
+    dest = lapic_get_id();
+    high = dest << IOAPIC_DEST_SHIFT;
+    low = (vector & 0xFF) | (1u << 13) | (1u << 15);  /* active-low + level */
+    ioapic_write(IOAPIC_REDTBL + 2 * irq + 1, high);
+    ioapic_write(IOAPIC_REDTBL + 2 * irq, low);
+}

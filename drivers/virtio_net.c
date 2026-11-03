@@ -15,13 +15,17 @@ extern u32 pci_find_vendor_subsystem(u16 vendor, u16 subsystem,
 extern void pci_enable_busmaster(u8 bus, u8 slot, u8 func);
 extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
 extern u16 pci_read16(u8 bus, u8 slot, u8 func, u8 offset);
+extern u8 pci_read8(u8 bus, u8 slot, u8 func, u8 offset);
+extern void ioapic_route_irq_level(u32 irq, u32 vector);
 
 /* ---------------------------------------------------------------------------
- * VirtIO-net legacy (transitional) PCI driver - polling RX/TX.
+ * VirtIO-net legacy (transitional) PCI driver - IRQ RX + polled TX.
  *
  * Target: QEMU `-device virtio-net-pci,disable-modern=on,netdev=...`
  * Queue 0 = RX, queue 1 = TX. Packets carry a 10-byte virtio_net_hdr then
  * a raw Ethernet frame. Guest-physical DMA via HHDM, same pattern as blk.
+ * PCI INTx is routed through the I/O APIC (level, active-low) to vector 40;
+ * virtio_net_irq() acks ISR and the kernel net stack drains RX.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -58,6 +62,8 @@ enum {
     PKT_BUF_SIZE          = 2048, /* hdr + frame, page-friendly */
     RX_BUFS               = 16,
     QUEUE_MAX             = 1024,
+    VNET_IRQ_VECTOR       = 40,
+    PCI_INTERRUPT_LINE    = 0x3C,
     /* order 6 = 64 pages = 256 KiB: two 1024-desc vrings + RX/TX bufs */
     ARENA_ORDER           = 6,
     ARENA_BYTES           = 262144
@@ -76,6 +82,8 @@ struct virtio_net {
     u32 present;
     u16 iobase;
     u8  mac[6];
+    u8  pci_irq;              /* PCI interrupt line */
+    u32 irq_armed;
     struct virtq rx;
     struct virtq tx;
     u64 arena_phys;
@@ -83,6 +91,8 @@ struct virtio_net {
     u64 tx_buf_phys;          /* one TX bounce (PKT_BUF_SIZE) */
     u16 rx_desc[RX_BUFS];     /* desc index per RX slot */
 };
+
+static volatile u64 vnet_irq_count;
 
 static struct virtio_net vn;
 
@@ -336,6 +346,24 @@ u32 virtio_net_rx(void *frame, u32 maxlen) {
     return len;
 }
 
+/* Ack legacy ISR (read-to-clear). Returns non-zero if this device interrupted. */
+u32 virtio_net_irq(void) {
+    u8 isr;
+    if (!vn.present) {
+        return 0;
+    }
+    isr = ior8(REG_ISR);
+    if (isr == 0) {
+        return 0;
+    }
+    vnet_irq_count++;
+    return 1;
+}
+
+u64 virtio_net_irq_count_total(void) {
+    return vnet_irq_count;
+}
+
 static u32 try_init_at(u8 bus, u8 slot, u8 func) {
     u32 bar;
     u32 is_io;
@@ -404,11 +432,25 @@ static u32 try_init_at(u8 bus, u8 slot, u8 func) {
     vn.present = 1;
     rx_fill();
 
+    vn.pci_irq = pci_read8(bus, slot, func, PCI_INTERRUPT_LINE);
+    vn.irq_armed = 0;
+    if (vn.pci_irq != 0 && vn.pci_irq != 0xFF) {
+        ioapic_route_irq_level((u32)vn.pci_irq, VNET_IRQ_VECTOR);
+        vn.irq_armed = 1;
+    }
+
     dev_id = pci_read16(bus, slot, func, 0x02);
-    kprintf("[VNET] ready: pci %u:%u.%u io=0x%x id=0x%x mac=%x:%x:%x:%x:%x:%x\n",
+    kprintf("[VNET] ready: pci %u:%u.%u io=0x%x id=0x%x irq=%u vec=%u mac=%x:%x:%x:%x:%x:%x\n",
             (u64)bus, (u64)slot, (u64)func, (u64)vn.iobase, (u64)dev_id,
+            (u64)vn.pci_irq, (u64)VNET_IRQ_VECTOR,
             (u64)vn.mac[0], (u64)vn.mac[1], (u64)vn.mac[2],
             (u64)vn.mac[3], (u64)vn.mac[4], (u64)vn.mac[5]);
+    if (vn.irq_armed) {
+        kprintf("[VNET] IRQ-driven RX armed (PCI INTx -> vector %u)\n",
+                (u64)VNET_IRQ_VECTOR);
+    } else {
+        kprintf("[VNET] no PCI IRQ line; RX remains poll-only\n");
+    }
     return 1;
 }
 
@@ -420,6 +462,9 @@ void virtio_net_init(void) {
 
     vn.present = 0;
     vn.iobase = 0;
+    vn.pci_irq = 0;
+    vn.irq_armed = 0;
+    vnet_irq_count = 0;
     for (i = 0; i < 6; i++) {
         vn.mac[i] = 0;
     }
