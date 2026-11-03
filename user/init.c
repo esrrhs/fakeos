@@ -22,6 +22,9 @@ extern long u_getdents(long fd, void *buf, unsigned long len);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_kill(long pid, long sig);
+extern int shm_open(const char *name, int oflag, unsigned int mode);
+extern int shm_unlink(const char *name);
+extern int ftruncate(int fd, long length);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
@@ -352,6 +355,65 @@ static void orphan_test(void) {
     }
 }
 
+
+static void shm_test(void) {
+    int fd;
+    unsigned char *p;
+    long pid;
+    long st;
+    /* O_RDWR|O_CREAT */
+    fd = shm_open("fakeos-shm", 0x42, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] shm_open create");
+        return;
+    }
+    if (ftruncate(fd, 4096) != 0) {
+        puts("[U][FAIL] ftruncate shm");
+        u_close(fd);
+        return;
+    }
+    /* MAP_SHARED file (not ANON): flags 0x01 */
+    p = (unsigned char *)u_mmap(0, 4096, 3, 0x01, fd, 0);
+    if (p == (unsigned char *)-1 || p == 0) {
+        puts("[U][FAIL] shm mmap MAP_SHARED");
+        u_close(fd);
+        return;
+    }
+    p[0] = 0xA5;
+    p[1] = 0x5A;
+    pid = u_fork();
+    if (pid < 0) {
+        puts("[U][FAIL] shm fork");
+        u_close(fd);
+        return;
+    }
+    if (pid == 0) {
+        if (p[0] != 0xA5 || p[1] != 0x5A) {
+            puts("[U][FAIL] shm child saw stale");
+            u_exit(1);
+        }
+        p[0] = 0x11;
+        u_exit(0);
+    }
+    u_wait4(pid, &st, 0, 0);
+    if (p[0] != 0x11) {
+        puts("[U][FAIL] shm parent missed child store");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+    if (shm_unlink("fakeos-shm") != 0) {
+        puts("[U][FAIL] shm_unlink");
+        return;
+    }
+    /* Name must be gone; reopen without CREAT fails. */
+    if (shm_open("fakeos-shm", 2, 0) >= 0) {
+        puts("[U][FAIL] shm_unlink left object");
+        return;
+    }
+    puts("[U][PASS] POSIX shm_open/mmap/unlink");
+}
+
 int main(int argc, char **argv) {
     char *sh_argv[2];
     long pid = u_getpid();
@@ -373,6 +435,7 @@ int main(int argc, char **argv) {
     file_test();
     heap_test();
     mmap_test();
+    shm_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

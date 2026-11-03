@@ -322,6 +322,7 @@ def main():
         "[PASS] Permissions: read-only VMA",
         "[PASS] COW clone",
         "[PASS] MAP_SHARED anon",
+        "[U][PASS] POSIX shm_open/mmap/unlink",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
         "[PASS] CFS-lite",
@@ -385,13 +386,13 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: CFS-lite + anon MAP_SHARED + AHCI IRQ online!",
+        "[SUCCESS] fakeos: POSIX shm + AHCI NCQ-lite + SMP stubs online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 37 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 38 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -452,10 +453,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 37 modules accounted for",
-         identical + mismatches == 37),
-        (f"all 37 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 37 and mismatches == 0),
+        ("all 38 modules accounted for",
+         identical + mismatches == 38),
+        (f"all 38 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 38 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

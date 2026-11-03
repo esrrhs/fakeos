@@ -100,6 +100,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     types.uint32_t lapic_id = arch.lapic_get_id();
     kprintf("\n[INT] Local APIC timer calibrated (APIC ID %u), periodic 100 Hz mode armed\n",
             (types.uint64_t)lapic_id);
+    arch.smp_init();
     arch.cpu_sti();
     types.uint64_t ticks_before = arch.lapic_get_ticks();
     arch.pit_busy_wait_500ms();
@@ -181,7 +182,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: CFS-lite + anon MAP_SHARED + AHCI IRQ online!\n");
+    kprintf(" [SUCCESS] fakeos: POSIX shm + AHCI NCQ-lite + SMP stubs online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");

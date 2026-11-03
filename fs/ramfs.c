@@ -55,6 +55,7 @@ enum {
     O_WRONLY  = 1,
     O_RDWR    = 2,
     O_CREAT   = 0x040,
+    O_EXCL    = 0x080,
     O_TRUNC   = 0x200,
     O_APPEND  = 0x400,
 
@@ -571,6 +572,8 @@ u32 fs_file_open(const char *path, u32 flags) {
         if (ino == 0) {
             return FH_BAD;
         }
+    } else if ((flags & O_CREAT) != 0 && (flags & O_EXCL) != 0) {
+        return FH_BAD;                /* O_CREAT|O_EXCL and name exists */
     }
 
     if (inodes[ino].type == INO_CONSOLE) {
@@ -824,6 +827,36 @@ u64 fs_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
         ip->size = off + len;
     }
     return len;
+}
+
+/* Resize a writable dynamic file (POSIX ftruncate). Grow zero-fills;
+ * shrink only updates size (capacity retained). */
+u32 fs_ftruncate_h(u32 fh, u64 size) {
+    struct inode *ip;
+    u64 i;
+    if (fh >= MAX_OPEN_FILES || !opens[fh].used) {
+        return 0;
+    }
+    if (!opens[fh].writable) {
+        return 0;
+    }
+    ip = &inodes[opens[fh].ino];
+    if (ip->type != INO_FILE || ip->ro) {
+        return 0;
+    }
+    if (size > FILE_MAX) {
+        return 0;
+    }
+    if (size > ip->size) {
+        if (!ensure_cap(ip, size)) {
+            return 0;
+        }
+        for (i = ip->size; i < size; i++) {
+            ip->buf[i] = 0;
+        }
+    }
+    ip->size = size;
+    return 1;
 }
 
 u32 fs_ino_kind(u32 ino) {

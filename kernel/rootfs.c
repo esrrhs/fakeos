@@ -116,6 +116,13 @@ void rootfs_publish(void) {
     if (!fs.fs_mkdir("/tmp")) {
         kprintf("[FS] FAILED to publish /tmp\n");
     }
+    /* POSIX shm lives as named Ramfs files under /dev/shm (shm_open path). */
+    if (!fs.fs_mkdir("/dev")) {
+        kprintf("[FS] FAILED to publish /dev\n");
+    }
+    if (!fs.fs_mkdir("/dev/shm")) {
+        kprintf("[FS] FAILED to publish /dev/shm\n");
+    }
 
     for (i = 0; i < m5_blob_count; i++) {
         u64 msize = (u64)m5_blob_table[i].end - (u64)m5_blob_table[i].start;

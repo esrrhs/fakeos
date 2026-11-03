@@ -54,6 +54,7 @@ global u_poll
 global u_ioctl
 global u_rt_sigaction
 global u_rt_sigreturn
+global u_ftruncate
 
 section .text
 
@@ -267,6 +268,9 @@ u_rt_sigreturn:
     mov     eax, 15
     syscall
     ret
+
+; long u_ftruncate(long fd, unsigned long length)
+USYSC1 u_ftruncate, 77
 
 ; void u_exit(long code) - does not return
 align 16

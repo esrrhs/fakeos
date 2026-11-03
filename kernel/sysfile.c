@@ -545,6 +545,25 @@ u64 sys_pipe(u64 upipefd) {
  * Directory and working-directory syscalls
  * ------------------------------------------------------------------------- */
 
+/* int ftruncate(fd, length): resize a regular file (Ramfs). Ext2/pipes/
+ * sockets are rejected for now (shm lives under /dev/shm on Ramfs). */
+u64 sys_ftruncate(u64 fd, u64 length) {
+    u32 fh = sched_fd_get((u32)fd);
+    if (fh == FD_BAD) {
+        return (u64)(-1);
+    }
+    if (pipe_fh_is(fh) || sock_fh_is(fh)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_fh_is(fh)) {
+        return (u64)(-1);            /* Ext2 ftruncate later */
+    }
+    if (fs.fs_file_is_console(fh) || fs.fs_file_is_dir(fh)) {
+        return (u64)(-1);
+    }
+    return fs.fs_ftruncate_h(fh, length) ? 0 : (u64)(-1);
+}
+
 u64 sys_mkdir(u64 upath) {
     char path[PATH_KMAX];
     if (!copy_user_path(path, upath)) {

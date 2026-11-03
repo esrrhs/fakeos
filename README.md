@@ -194,7 +194,10 @@ flowchart TD
 - [x] **shell session-leader / fg**：`setsid` + 本 pgid 前台（不再清成 0）；回收 TTY 走 ioctl/tcsetpgrp。
 - [x] **VMA_FILE 按需分页 + MAP_SHARED 写回**：文件 `mmap` 建 `VMA_FILE`，缺页填充；`MAP_SHARED` 跨 fork 保写，脏页在 munmap/进程退出时写回；`make qemu-modern` 试现代 virtio-blk/net + MSI-X。
 - [x] **CFS-lite 加权公平调度**：TCB `nice`/`weight`/`vruntime`；tick/yield 按 weight 记账；`pick_next` 选最低 vruntime；`nice(2)`；自测 nice0 ≥2× nice+10。
-- [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见；无 `shm_open` 尚。
+- [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
+- [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
+- [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
+- [x] **SMP bootstrap stubs**：`arch/smp.c` + LAPIC INIT/SIPI ICR 助手；BSP-only，无 AP trampoline/per-CPU 栈。
 
 
 

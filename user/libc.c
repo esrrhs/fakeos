@@ -912,3 +912,68 @@ int crypt_check(const char *key, const char *setting) {
     got = crypt(key, setting);
     return strcmp(got, setting) == 0;
 }
+
+/* ---- POSIX shm path: named objects under /dev/shm + ftruncate ------------ */
+extern long u_ftruncate(long fd, unsigned long length);
+extern long u_unlink(const char *path);
+
+enum {
+    SHM_NAME_MAX = 64
+};
+
+int ftruncate(int fd, long length) {
+    long r;
+    if (length < 0) {
+        return -1;
+    }
+    r = u_ftruncate((long)fd, (unsigned long)length);
+    return r < 0 ? -1 : 0;
+}
+
+static int shm_path(char *dst, unsigned int cap, const char *name) {
+    const char *prefix = "/dev/shm/";
+    unsigned int i = 0;
+    unsigned int j = 0;
+    if (name == 0 || name[0] == 0 || name[0] == '/') {
+        return -1;
+    }
+    while (prefix[i] != 0) {
+        if (i + 1 >= cap) {
+            return -1;
+        }
+        dst[i] = prefix[i];
+        i++;
+    }
+    while (name[j] != 0) {
+        if (name[j] == '/' || j >= SHM_NAME_MAX) {
+            return -1;
+        }
+        if (i + 1 >= cap) {
+            return -1;
+        }
+        dst[i++] = name[j++];
+    }
+    dst[i] = 0;
+    return 0;
+}
+
+int shm_open(const char *name, int oflag, unsigned int mode) {
+    char path[96];
+    long fd;
+    (void)mode;
+    if (shm_path(path, (unsigned int)sizeof(path), name) != 0) {
+        return -1;
+    }
+    fd = u_open(path, (long)oflag, 0);
+    return fd < 0 ? -1 : (int)fd;
+}
+
+int shm_unlink(const char *name) {
+    char path[96];
+    long r;
+    if (shm_path(path, (unsigned int)sizeof(path), name) != 0) {
+        return -1;
+    }
+    r = u_unlink(path);
+    return r < 0 ? -1 : 0;
+}

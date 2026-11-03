@@ -36,6 +36,8 @@ enum {
     LAPIC_REG_INITCNT  = 0x380,
     LAPIC_REG_CURCNT   = 0x390,
     LAPIC_REG_DIVCONF  = 0x3E0,
+    LAPIC_REG_ICR_LOW  = 0x300,
+    LAPIC_REG_ICR_HIGH = 0x310,
 
     LAPIC_LVT_MASKED   = 0x00010000,
     LAPIC_LVT_PERIODIC = 0x00020000,
@@ -178,4 +180,36 @@ void lapic_init(void) {
     /* ---- 4. Start periodic 100 Hz timer interrupts on vector 32 ---- */
     lapic_wr(LAPIC_REG_LVTT, LAPIC_LVT_PERIODIC | LAPIC_TIMER_VECTOR);
     lapic_wr(LAPIC_REG_INITCNT, period100hz);
+}
+
+/* Wait until ICR Delivery Status (bit 12) clears. */
+static void lapic_icr_wait(void) {
+    u32 spins = 0;
+    while ((lapic_rd(LAPIC_REG_ICR_LOW) & 0x1000u) != 0) {
+        spins++;
+        if (spins > 1000000) {
+            break;
+        }
+    }
+}
+
+/* Fixed-delivery IPI to one APIC ID (vector in low 8 bits of ICR). */
+void lapic_send_ipi(u32 apic_id, u32 icr_low) {
+    lapic_icr_wait();
+    lapic_wr(LAPIC_REG_ICR_HIGH, (apic_id & 0xFFu) << 24);
+    lapic_wr(LAPIC_REG_ICR_LOW, icr_low);
+    lapic_icr_wait();
+}
+
+/* INIT IPI (level assert then deassert) — SMP bootstrap stub. */
+void lapic_send_init_ipi(u32 apic_id) {
+    /* Assert INIT: delivery mode 5, level assert, edge. */
+    lapic_send_ipi(apic_id, 0x00004500u);
+    /* Deassert INIT. */
+    lapic_send_ipi(apic_id, 0x00006500u);
+}
+
+/* Startup IPI: vector = page number of 4KiB trampoline (0x08 => 0x8000). */
+void lapic_send_startup_ipi(u32 apic_id, u8 vector) {
+    lapic_send_ipi(apic_id, 0x00004600u | (u32)(vector & 0xFFu));
 }

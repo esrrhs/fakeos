@@ -49,6 +49,7 @@ extern u64 sys_accept(u64 fd, u64 uaddr, u64 ualen);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
+extern u64 sys_ftruncate(u64 fd, u64 length);
 
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
@@ -162,7 +163,8 @@ enum {
     SC_TTY_GETFG = 502,   /* tcgetpgrp */
     SC_RT_SIGACTION = 13,
     SC_RT_SIGRETURN = 15,
-    SC_NICE = 89
+    SC_NICE = 89,
+    SC_FTRUNCATE = 77
 };
 
 enum {
@@ -298,6 +300,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_MUNMAP) {
         return sys_munmap(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_FTRUNCATE) {
+        return sys_ftruncate(f->rdi, f->rsi);
     }
     if (f->rax == SC_CHMOD) {
         return sys_chmod(f->rdi, f->rsi);
