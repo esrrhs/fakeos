@@ -1,5 +1,6 @@
 package kernel;
 import arch;
+import drivers;
 import mem;
 import types;
 
@@ -14,6 +15,7 @@ extern void sched_note_user_tick(void);
 extern u64 sched_tick_count(void);
 extern u32 sched_current_pid(void);
 extern void proc_terminate(u64 code);
+extern void tty_on_uart_byte(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -133,6 +135,14 @@ void isr_dispatch(struct trap_frame *f) {
             sched_note_user_tick();     /* tick interrupted a ring-3 thread */
         }
         sched_tick();
+        return;
+    }
+
+    /* Vector 36: COM1 (ISA IRQ4) via I/O APIC. Drain UART RX, wake TTY. */
+    if (v == 36) {
+        drivers.uart_irq();
+        tty_on_uart_byte();
+        arch.lapic_send_eoi();
         return;
     }
 

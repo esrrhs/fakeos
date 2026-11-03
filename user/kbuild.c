@@ -78,6 +78,7 @@ static const struct mod_entry modules[] = {
     { "arch",   "gdt" },
     { "arch",   "idt" },
     { "arch",   "lapic" },
+    { "arch",   "ioapic" },
     { "drivers", "uart" },
     { "drivers", "vga" },
     { "drivers", "pci" },
@@ -317,7 +318,7 @@ int main(void) {
     /* Final link. execve passes at most 8 argv slots, so the
      * object list goes through an @response file:
      *   ldfake -o /tmp/fakeos-new @/tmp/ldfake.args
-     * boot.o leads (low-address multiboot entry); then the 32 C
+     * boot.o leads (low-address multiboot entry); then the 33 C
      * objects, the other 4 nasm objects, and the userblob + empty
      * m5-blob stub. */
     {

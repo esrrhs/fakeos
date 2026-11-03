@@ -267,6 +267,7 @@ def main():
         "[PASS] Exception #UD",
         "[PASS] Exception #PF",
         "[PASS] APIC Timer Calibration",
+        "[PASS] I/O APIC IRQ4 (COM1) routed to vector 36, UART RDA armed",
         "Multiboot Physical Memory Map",
         "Buddy Physical Page Allocator Online",
         "4-Level Page Table Toolchain Online",
@@ -336,7 +337,7 @@ def main():
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 32 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 33 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",

@@ -65,6 +65,7 @@ OBJS := \
 	$(BUILD_DIR)/gdt.o \
 	$(BUILD_DIR)/idt.o \
 	$(BUILD_DIR)/lapic.o \
+	$(BUILD_DIR)/ioapic.o \
 	$(BUILD_DIR)/uart.o \
 	$(BUILD_DIR)/vga.o \
 	$(BUILD_DIR)/pci.o \
@@ -219,6 +220,11 @@ $(BUILD_DIR)/idt.o: arch/idt.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lapic.o: arch/lapic.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/ioapic.o: arch/ioapic.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
