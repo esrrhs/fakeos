@@ -7,6 +7,11 @@ import types;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
+/* pipe.c (same package) */
+extern u32 pipe_fh_is(u32 fh);
+extern void pipe_retain(u32 fh);
+extern u32 pipe_close(u32 fh);
+
 extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
 extern void switch_context(u64 *prev_rsp, u64 next_rsp);
@@ -311,6 +316,8 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
                 /* Shared open-file description; console retain is a no-op. */
                 if (fs.ext2_fh_is(fh)) {
                     fs.ext2_file_retain(fh);
+                } else if (pipe_fh_is(fh)) {
+                    pipe_retain(fh);
                 } else {
                     fs.fs_file_retain(fh);
                 }
@@ -564,6 +571,8 @@ void sched_fd_close_all(void) {
             u32 fh = threads[current].fd[i];
             if (fs.ext2_fh_is(fh)) {
                 fs.ext2_close(fh);
+            } else if (pipe_fh_is(fh)) {
+                pipe_close(fh);
             } else {
                 fs.fs_close(fh);
             }

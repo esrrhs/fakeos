@@ -44,6 +44,14 @@ extern void sched_cwd_set(const char *kpath);
 /* kernel/tty.c (canonical serial input) */
 extern u64 tty_console_read(u64 ubuf, u64 len);
 
+/* kernel/pipe.c */
+extern u32 pipe_fh_is(u32 fh);
+extern u32 pipe_alloc(u32 *rfh, u32 *wfh);
+extern void pipe_retain(u32 fh);
+extern u32 pipe_close(u32 fh);
+extern u64 pipe_read(u32 fh, char *kbuf, u64 len);
+extern u64 pipe_write(u32 fh, const char *kbuf, u64 len);
+
 
 static u32 kstr_len(const char *s) {
     u32 n = 0;
@@ -227,6 +235,8 @@ u64 sys_close(u64 fd) {
     }
     if (fs.ext2_fh_is(fh)) {
         ok = fs.ext2_close(fh);
+    } else if (pipe_fh_is(fh)) {
+        ok = pipe_close(fh);
     } else {
         ok = fs.fs_close(fh);
     }
@@ -252,6 +262,8 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
     if (nfh != FD_BAD) {
         if (fs.ext2_fh_is(nfh)) {
             fs.ext2_close(nfh);
+        } else if (pipe_fh_is(nfh)) {
+            pipe_close(nfh);
         } else {
             fs.fs_close(nfh);
         }
@@ -259,6 +271,8 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
     }
     if (fs.ext2_fh_is(ofh)) {
         fs.ext2_file_retain(ofh);
+    } else if (pipe_fh_is(ofh)) {
+        pipe_retain(ofh);
     } else {
         fs.fs_file_retain(ofh);
     }
@@ -269,6 +283,9 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
 u64 sys_lseek(u64 fd, u64 off, u64 whence) {
     u32 fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD) {
+        return (u64)(-1);
+    }
+    if (pipe_fh_is(fh)) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh)) {
@@ -289,8 +306,39 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
     }
 
     /* fd 0: serial console with canonical line discipline. */
-    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
+    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return tty_console_read(buf, len);
+    }
+    if (pipe_fh_is(fh)) {
+        /* Pipe reads may block; copy one chunk at a time into user memory. */
+        while (done < len) {
+            u64 want = len - done;
+            u64 n;
+            u64 i;
+            if (want > IO_CHUNK) {
+                want = IO_CHUNK;
+            }
+            n = pipe_read(fh, kbuf, want);
+            if (n == (u64)(-1)) {
+                return done != 0 ? done : (u64)(-1);
+            }
+            if (n == 0) {
+                break;
+            }
+            if (!mem.as_user_range_ok(as, buf + done, n)) {
+                return done != 0 ? done : (u64)(-1);
+            }
+            {
+                volatile char *u = (volatile char *)(buf + done);
+                for (i = 0; i < n; i++) {
+                    u[i] = kbuf[i];
+                }
+            }
+            done += n;
+            /* Pipes return whatever is available rather than filling len. */
+            break;
+        }
+        return done;
     }
     if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
         return (u64)(-1);             /* directories use getdents64 */
@@ -337,7 +385,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
 
     /* fd 1/2: serial console sink. Validate the whole user range first, then
      * stream byte by byte (uart_putc performs the \n -> \r\n translation). */
-    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
+    if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         volatile char *p;
         u64 i;
         if (!mem.as_user_range_ok(as, buf, len)) {
@@ -348,6 +396,34 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
             drivers.uart_putc(p[i]);
         }
         return len;
+    }
+    if (pipe_fh_is(fh)) {
+        while (done < len) {
+            u64 want = len - done;
+            u64 n;
+            u64 i;
+            if (want > IO_CHUNK) {
+                want = IO_CHUNK;
+            }
+            if (!mem.as_user_range_ok(as, buf + done, want)) {
+                return done != 0 ? done : (u64)(-1);
+            }
+            {
+                volatile char *u = (volatile char *)(buf + done);
+                for (i = 0; i < want; i++) {
+                    kbuf[i] = u[i];
+                }
+            }
+            n = pipe_write(fh, kbuf, want);
+            if (n == (u64)(-1)) {
+                return done != 0 ? done : (u64)(-1);
+            }
+            done += n;
+            if (n < want) {
+                break;
+            }
+        }
+        return done;
     }
     if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
         return (u64)(-1);
@@ -379,6 +455,43 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
         }
     }
     return done;
+}
+
+
+/* pipe(pipefd[2]): create a unidirectional pipe; pipefd[0] is the read end
+ * and pipefd[1] the write end (Linux int[2] layout). */
+u64 sys_pipe(u64 upipefd) {
+    u64 as = sched_current_as_h();
+    u32 rfh;
+    u32 wfh;
+    u32 rfd;
+    u32 wfd;
+    volatile u32 *u;
+    if (as == 0 || !mem.as_user_range_ok(as, upipefd, 8)) {
+        return (u64)(-1);
+    }
+    if (!pipe_alloc(&rfh, &wfh)) {
+        return (u64)(-1);
+    }
+    rfd = sched_fd_alloc();
+    if (rfd == FD_BAD) {
+        pipe_close(rfh);
+        pipe_close(wfh);
+        return (u64)(-1);
+    }
+    sched_fd_set(rfd, rfh);
+    wfd = sched_fd_alloc();
+    if (wfd == FD_BAD) {
+        sched_fd_set(rfd, FD_BAD);
+        pipe_close(rfh);
+        pipe_close(wfh);
+        return (u64)(-1);
+    }
+    sched_fd_set(wfd, wfh);
+    u = (volatile u32 *)upipefd;
+    u[0] = rfd;
+    u[1] = wfd;
+    return 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -476,6 +589,9 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     char kbuf[DENT_CHUNK];
 
     if (fh == FD_BAD || as == 0) {
+        return (u64)(-1);
+    }
+    if (pipe_fh_is(fh)) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh) ? !fs.ext2_file_is_dir(fh) : !fs.fs_file_is_dir(fh)) {

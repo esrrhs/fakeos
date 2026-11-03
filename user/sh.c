@@ -1,7 +1,6 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, exit [code], help.
- * Simple redirects (> >> <) apply to builtins and external commands via dup2.
- * Other commands fork/exec from /bin and are reaped via wait4. */
+ * Redirects (> >> <) and pipelines (|) via pipe/dup2/fork. */
 package user;
 
 typedef unsigned long u64;
@@ -11,6 +10,7 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_dup2(long oldfd, long newfd);
+extern long u_pipe(int *pipefd);
 extern long u_fork(void);
 extern long u_execve(const char *path, char **argv, char **envp);
 extern void u_exit(long code);
@@ -36,7 +36,9 @@ enum {
     O_CREAT  = 0x40,
     O_TRUNC  = 0x200,
     O_APPEND = 0x400,
-    SAVE_FD  = 8
+    SAVE_FD  = 8,
+    MAX_TOK  = 24,
+    MAX_STAGE = 4
 };
 
 static int eq(const char *a, const char *b) {
@@ -143,6 +145,300 @@ static void pop_redirects(int saved_in, int saved_out) {
     }
 }
 
+static int is_builtin(const char *cmd) {
+    return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
+           eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
+           eq(cmd, "help") || eq(cmd, "pid");
+}
+
+/* Resolve argv[0] into path (may use buf). */
+static const char *resolve_cmd(char **argv, char *buf) {
+    int has_slash = 0;
+    int k;
+    for (k = 0; argv[0][k] != 0; k++) {
+        if (argv[0][k] == '/') {
+            has_slash = 1;
+            break;
+        }
+    }
+    if (has_slash) {
+        return argv[0];
+    }
+    strcpy(buf, "/bin/");
+    strncpy(buf + 5, argv[0], 90);
+    buf[95] = 0;
+    return buf;
+}
+
+/* Run a builtin in the current process. Returns exit status. */
+static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path,
+                        int append) {
+    int saved_in;
+    int saved_out;
+    int i;
+    long rc = rc_in;
+
+    if (eq(tokens[0], "exit")) {
+        long code = tokens[1] != 0 ? strtol_dec(tokens[1]) : rc_in;
+        u_exit(code);
+    }
+    if (eq(tokens[0], "cd")) {
+        const char *target = tokens[1] != 0 ? tokens[1] : "/";
+        if (u_chdir(target) < 0) {
+            printf("sh: cd: %s: No such file or directory\n", target);
+            return 1;
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "mkdir")) {
+        if (tokens[1] == 0) {
+            puts("sh: mkdir: missing operand");
+            return 1;
+        }
+        if (u_mkdir(tokens[1]) < 0) {
+            printf("sh: mkdir: %s: cannot create directory\n", tokens[1]);
+            return 1;
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "rmdir")) {
+        if (tokens[1] == 0) {
+            puts("sh: rmdir: missing operand");
+            return 1;
+        }
+        if (u_rmdir(tokens[1]) < 0) {
+            printf("sh: rmdir: %s: cannot remove directory\n", tokens[1]);
+            return 1;
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "help")) {
+        puts("builtins: echo [args|$?], cd, mkdir, rmdir, pwd, pid, exit, help");
+        puts("redirects: cmd > file | cmd >> file | cmd < file");
+        puts("pipelines: cmd1 | cmd2 [| cmd3]");
+        puts("programs: /bin/hello /bin/cat /bin/ls (PATH prefix auto)");
+        return 0;
+    }
+
+    if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
+        return 1;
+    }
+    if (eq(tokens[0], "pwd")) {
+        char buf[64];
+        if (u_getcwd(buf, sizeof(buf)) == -1) {
+            puts("sh: pwd failed");
+            rc = 1;
+        } else {
+            puts(buf);
+            rc = 0;
+        }
+    } else if (eq(tokens[0], "echo")) {
+        for (i = 1; tokens[i] != 0; i++) {
+            if (i > 1) {
+                u_write(1, " ", 1);
+            }
+            if (eq(tokens[i], "$?")) {
+                printf("%d", (int)rc_in);
+            } else {
+                u_write(1, tokens[i], strlen(tokens[i]));
+            }
+        }
+        u_write(1, "\n", 1);
+        rc = 0;
+    } else if (eq(tokens[0], "pid")) {
+        printf("%d\n", (int)u_getpid());
+        rc = 0;
+    }
+    pop_redirects(saved_in, saved_out);
+    return rc;
+}
+
+/* Child path: apply pipe ends + redirects, then exec or run builtin+exit. */
+static void child_run_stage(char **argv, int stdin_fd, int stdout_fd,
+                            long rc_in) {
+    char *in_path;
+    char *out_path;
+    int append;
+    char path[96];
+    const char *target;
+    int saved_in;
+    int saved_out;
+
+    extract_redirects(argv, &in_path, &out_path, &append);
+    if (argv[0] == 0) {
+        u_exit(1);
+    }
+
+    if (stdin_fd >= 0) {
+        if (u_dup2(stdin_fd, 0) < 0) {
+            u_exit(1);
+        }
+    }
+    if (stdout_fd >= 0) {
+        if (u_dup2(stdout_fd, 1) < 0) {
+            u_exit(1);
+        }
+    }
+    /* Close inherited pipe fds above stderr so they do not leak into exec. */
+    {
+        int fd;
+        for (fd = 3; fd < 16; fd++) {
+            u_close(fd);
+        }
+    }
+
+    if (is_builtin(argv[0])) {
+        /* cd/exit in a pipeline child only affect the child. */
+        long st = run_builtin(argv, rc_in, in_path, out_path, append);
+        u_exit(st);
+    }
+
+    if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
+        u_exit(1);
+    }
+    target = resolve_cmd(argv, path);
+    if (u_execve(target, argv, 0) < 0) {
+        printf("sh: %s: command not found\n", argv[0]);
+        u_exit(127);
+    }
+    u_exit(127);
+}
+
+/* tokens contain '|' separators. Run as a pipeline. */
+static long run_pipeline(char **tokens, long rc_in) {
+    char *stages[MAX_STAGE][MAX_TOK];
+    int nstage = 0;
+    int i = 0;
+    int si;
+    int pipes[MAX_STAGE - 1][2];
+    long pids[MAX_STAGE];
+    long status = 0;
+    long rc = 0;
+    int npipes = 0;
+
+    /* Split on '|'. */
+    while (tokens[i] != 0 && nstage < MAX_STAGE) {
+        int nt = 0;
+        while (tokens[i] != 0 && !eq(tokens[i], "|")) {
+            if (nt < MAX_TOK - 1) {
+                stages[nstage][nt++] = tokens[i];
+            }
+            i++;
+        }
+        stages[nstage][nt] = 0;
+        if (nt == 0) {
+            puts("sh: empty pipeline stage");
+            return 1;
+        }
+        nstage++;
+        if (tokens[i] != 0 && eq(tokens[i], "|")) {
+            i++;
+            if (tokens[i] == 0) {
+                puts("sh: trailing pipe");
+                return 1;
+            }
+        }
+    }
+    if (tokens[i] != 0) {
+        puts("sh: too many pipeline stages");
+        return 1;
+    }
+    if (nstage == 0) {
+        return 0;
+    }
+
+    /* Single stage, no pipe: keep builtins in the shell process. */
+    if (nstage == 1) {
+        char *in_path;
+        char *out_path;
+        int append;
+        extract_redirects(stages[0], &in_path, &out_path, &append);
+        if (stages[0][0] == 0) {
+            return 0;
+        }
+        if (is_builtin(stages[0][0])) {
+            return run_builtin(stages[0], rc_in, in_path, out_path, append);
+        }
+        {
+            long child;
+            long reaped;
+            char path[96];
+            const char *target = resolve_cmd(stages[0], path);
+            int saved_in;
+            int saved_out;
+            child = u_fork();
+            if (child == 0) {
+                if (push_redirects(in_path, out_path, append, &saved_in,
+                                   &saved_out) < 0) {
+                    u_exit(1);
+                }
+                if (u_execve(target, stages[0], 0) < 0) {
+                    printf("sh: %s: command not found\n", stages[0][0]);
+                    u_exit(127);
+                }
+                u_exit(127);
+            }
+            reaped = u_wait4(child, &status, 0, 0);
+            if (reaped == child) {
+                return status >> 8;
+            }
+            return -1;
+        }
+    }
+
+    for (si = 0; si < nstage - 1; si++) {
+        if (u_pipe(pipes[si]) < 0) {
+            puts("sh: pipe failed");
+            while (npipes > 0) {
+                npipes--;
+                u_close(pipes[npipes][0]);
+                u_close(pipes[npipes][1]);
+            }
+            return 1;
+        }
+        npipes++;
+    }
+
+    for (si = 0; si < nstage; si++) {
+        int in_fd = -1;
+        int out_fd = -1;
+        long child;
+        if (si > 0) {
+            in_fd = pipes[si - 1][0];
+        }
+        if (si < nstage - 1) {
+            out_fd = pipes[si][1];
+        }
+        child = u_fork();
+        if (child < 0) {
+            puts("sh: fork failed");
+            rc = 1;
+            break;
+        }
+        if (child == 0) {
+            child_run_stage(stages[si], in_fd, out_fd, rc_in);
+        }
+        pids[si] = child;
+    }
+
+    /* Parent closes all pipe ends so writers can see EOF. */
+    for (si = 0; si < npipes; si++) {
+        u_close(pipes[si][0]);
+        u_close(pipes[si][1]);
+    }
+
+    /* Reap every stage; overall status is the last one's. */
+    for (si = 0; si < nstage; si++) {
+        long reaped = u_wait4(pids[si], &status, 0, 0);
+        if (reaped == pids[si]) {
+            rc = status >> 8;
+        } else {
+            rc = -1;
+        }
+    }
+    return rc;
+}
+
 int main(int argc, char **argv) {
     long rc = 0;
     char line[256];
@@ -150,20 +446,14 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins: help, echo, cd, pwd, mkdir, rmdir, exit; redirects: > >> <");
+    puts("fakeos shell - builtins: help, echo, cd, pwd, mkdir, rmdir, exit; redirects: > >> <; pipes: |");
 
     for (;;) {
-        char *tokens[9];
+        char *tokens[MAX_TOK];
         char *save;
         char *t;
-        char *in_path;
-        char *out_path;
-        int append;
-        int saved_in;
-        int saved_out;
         int nt = 0;
         long n;
-        int i;
 
         u_write(1, "fakeos:~$ ", 10);
 
@@ -174,7 +464,7 @@ int main(int argc, char **argv) {
         line[n] = 0;
 
         save = line;
-        while (nt < 8 && (t = strtok_ws(&save)) != 0) {
+        while (nt < MAX_TOK - 1 && (t = strtok_ws(&save)) != 0) {
             tokens[nt++] = t;
         }
         tokens[nt] = 0;
@@ -182,144 +472,6 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        extract_redirects(tokens, &in_path, &out_path, &append);
-        if (tokens[0] == 0) {
-            continue;
-        }
-
-        if (eq(tokens[0], "exit")) {
-            long code = tokens[1] != 0 ? strtol_dec(tokens[1]) : rc;
-            u_exit(code);
-        }
-        if (eq(tokens[0], "cd")) {
-            const char *target = tokens[1] != 0 ? tokens[1] : "/";
-            if (u_chdir(target) < 0) {
-                printf("sh: cd: %s: No such file or directory\n", target);
-                rc = 1;
-            } else {
-                rc = 0;
-            }
-            continue;
-        }
-        if (eq(tokens[0], "mkdir")) {
-            if (tokens[1] == 0) {
-                puts("sh: mkdir: missing operand");
-                rc = 1;
-            } else if (u_mkdir(tokens[1]) < 0) {
-                printf("sh: mkdir: %s: cannot create directory\n", tokens[1]);
-                rc = 1;
-            } else {
-                rc = 0;
-            }
-            continue;
-        }
-        if (eq(tokens[0], "rmdir")) {
-            if (tokens[1] == 0) {
-                puts("sh: rmdir: missing operand");
-                rc = 1;
-            } else if (u_rmdir(tokens[1]) < 0) {
-                printf("sh: rmdir: %s: cannot remove directory\n", tokens[1]);
-                rc = 1;
-            } else {
-                rc = 0;
-            }
-            continue;
-        }
-        if (eq(tokens[0], "pwd")) {
-            char buf[64];
-            if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
-                rc = 1;
-                continue;
-            }
-            if (u_getcwd(buf, sizeof(buf)) == -1) {
-                puts("sh: pwd failed");
-                rc = 1;
-            } else {
-                puts(buf);
-                rc = 0;
-            }
-            pop_redirects(saved_in, saved_out);
-            continue;
-        }
-        if (eq(tokens[0], "echo")) {
-            if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
-                rc = 1;
-                continue;
-            }
-            for (i = 1; tokens[i] != 0; i++) {
-                if (i > 1) {
-                    u_write(1, " ", 1);
-                }
-                if (eq(tokens[i], "$?")) {
-                    printf("%d", (int)rc);
-                } else {
-                    u_write(1, tokens[i], strlen(tokens[i]));
-                }
-            }
-            u_write(1, "\n", 1);
-            pop_redirects(saved_in, saved_out);
-            rc = 0;
-            continue;
-        }
-        if (eq(tokens[0], "pid")) {
-            if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
-                rc = 1;
-                continue;
-            }
-            printf("%d\n", (int)u_getpid());
-            pop_redirects(saved_in, saved_out);
-            rc = 0;
-            continue;
-        }
-        if (eq(tokens[0], "help")) {
-            puts("builtins: echo [args|$?], cd, mkdir, rmdir, pwd, pid, exit, help");
-            puts("redirects: cmd > file | cmd >> file | cmd < file");
-            puts("programs: /bin/hello /bin/cat /bin/ls (PATH prefix auto)");
-            rc = 0;
-            continue;
-        }
-
-        {
-            char path[96];
-            long child;
-            long status = 0;
-            long reaped;
-            const char *target;
-            int has_slash = 0;
-            int k;
-
-            for (k = 0; tokens[0][k] != 0; k++) {
-                if (tokens[0][k] == '/') {
-                    has_slash = 1;
-                    break;
-                }
-            }
-            if (has_slash) {
-                target = tokens[0];
-            } else {
-                strcpy(path, "/bin/");
-                strncpy(path + 5, tokens[0], 90);
-                path[95] = 0;
-                target = path;
-            }
-
-            child = u_fork();
-            if (child == 0) {
-                if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
-                    u_exit(1);
-                }
-                if (u_execve(target, tokens, 0) < 0) {
-                    printf("sh: %s: command not found\n", tokens[0]);
-                    u_exit(127);
-                }
-                u_exit(127);
-            }
-            reaped = u_wait4(child, &status, 0, 0);
-            if (reaped == child) {
-                rc = status >> 8;
-            } else {
-                rc = -1;
-            }
-        }
+        rc = run_pipeline(tokens, rc);
     }
 }

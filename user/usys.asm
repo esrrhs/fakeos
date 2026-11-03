@@ -25,6 +25,7 @@ global u_getcwd
 global u_getdents
 global u_unlink
 global u_rmdir
+global u_pipe
 
 section .text
 
@@ -102,6 +103,9 @@ USYSC1 u_unlink, 87
 
 ; long u_rmdir(const char *path)
 USYSC1 u_rmdir, 84
+
+; long u_pipe(int *pipefd)
+USYSC1 u_pipe, 22
 
 ; void u_exit(long code) - does not return
 align 16

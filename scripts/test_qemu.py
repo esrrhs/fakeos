@@ -195,6 +195,7 @@ def main():
         "nosuchcmd",        # exec failure -> 127 + not found
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
         "cat /mnt/m6pass.txt",  # persistent Ext2 file written by selftest
+        "echo PIPEOK | cat",    # pipe() + shell | via wait queues
     ]
     session = ""
     for c in commands:
@@ -335,7 +336,7 @@ def main():
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 31 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 32 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -362,6 +363,7 @@ def main():
     contextual = [
         # echo $? right after hello must surface hello's 42 exit status
         ("$? status propagation", 'echo $?' in norm and "exited (code 42)" in norm),
+        ("pipe echo|cat", "PIPEOK\n" in norm and "usage: cat" not in norm),
         # pid builtin reports that the shell kept pid 1 across execve
         ("shell keeps pid 1", "pid\n1\n" in norm),
         # ls /bin lists all five programs

@@ -86,6 +86,7 @@ OBJS := \
 	$(BUILD_DIR)/sysfile.o \
 	$(BUILD_DIR)/sysproc.o \
 	$(BUILD_DIR)/proc.o \
+	$(BUILD_DIR)/pipe.o \
 	$(BUILD_DIR)/tty.o \
 	$(BUILD_DIR)/uproc.o \
 	$(BUILD_DIR)/rootfs.o \
@@ -323,6 +324,11 @@ $(BUILD_DIR)/sysproc.o: kernel/sysproc.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/proc.o: kernel/proc.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pipe.o: kernel/pipe.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
