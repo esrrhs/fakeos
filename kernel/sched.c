@@ -308,9 +308,12 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
             u32 fh = threads[current].fd[f];
             threads[i].fd[f] = fh;
             if (fh != FD_EMPTY) {
-                /* Shared open-file description; the console slot is permanent
-                 * and its retain is a no-op. */
-                fs.fs_file_retain(fh);
+                /* Shared open-file description; console retain is a no-op. */
+                if (fs.ext2_fh_is(fh)) {
+                    fs.ext2_file_retain(fh);
+                } else {
+                    fs.fs_file_retain(fh);
+                }
             }
         }
     }

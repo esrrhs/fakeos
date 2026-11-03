@@ -234,6 +234,38 @@ u64 sys_close(u64 fd) {
     return ok ? 0 : (u64)(-1);
 }
 
+/* dup2(oldfd, newfd): make newfd refer to the same open-file as oldfd. */
+u64 sys_dup2(u64 oldfd, u64 newfd) {
+    u32 ofh;
+    u32 nfh;
+    if (oldfd >= 16 || newfd >= 16) {
+        return (u64)(-1);
+    }
+    ofh = sched_fd_get((u32)oldfd);
+    if (ofh == FD_BAD) {
+        return (u64)(-1);
+    }
+    if (oldfd == newfd) {
+        return newfd;
+    }
+    nfh = sched_fd_get((u32)newfd);
+    if (nfh != FD_BAD) {
+        if (fs.ext2_fh_is(nfh)) {
+            fs.ext2_close(nfh);
+        } else {
+            fs.fs_close(nfh);
+        }
+        sched_fd_set((u32)newfd, FD_BAD);
+    }
+    if (fs.ext2_fh_is(ofh)) {
+        fs.ext2_file_retain(ofh);
+    } else {
+        fs.fs_file_retain(ofh);
+    }
+    sched_fd_set((u32)newfd, ofh);
+    return newfd;
+}
+
 u64 sys_lseek(u64 fd, u64 off, u64 whence) {
     u32 fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD) {
@@ -373,6 +405,17 @@ u64 sys_unlink(u64 upath) {
         return fs.ext2_mounted() && fs.ext2_unlink(path) ? 0 : (u64)(-1);
     }
     return fs.fs_unlink(path) ? 0 : (u64)(-1);
+}
+
+u64 sys_rmdir(u64 upath) {
+    char path[PATH_KMAX];
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        return fs.ext2_mounted() && fs.ext2_rmdir(path) ? 0 : (u64)(-1);
+    }
+    return fs.fs_rmdir(path) ? 0 : (u64)(-1);
 }
 
 u64 sys_chdir(u64 upath) {

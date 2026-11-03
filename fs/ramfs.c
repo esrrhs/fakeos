@@ -422,6 +422,45 @@ static u32 inode_is_open(u32 ino) {
 /* unlink: detach the directory entry. The inode slot is freed only when no
  * open file still references it (POSIX keeps unlinked-but-open files alive);
  * otherwise it lingers detached until reboot, bounded by the slot count. */
+/* Remove an empty directory. Non-empty or non-dir targets fail. */
+u32 fs_rmdir(const char *path) {
+    char last[NAME_LEN];
+    u32 last_n = 0;
+    u32 parent = walk_parent(path, last, &last_n, 0);
+    u32 target;
+    u32 slot;
+    u32 k;
+    if (parent == 0 || inodes[parent].type != INO_DIR || last_n == 0) {
+        return 0;
+    }
+    target = dir_find(parent, last, last_n);
+    if (target == 0 || inodes[target].type != INO_DIR) {
+        return 0;
+    }
+    if (inodes[target].ndent != 0) {
+        return 0;                      /* not empty */
+    }
+    if (inode_is_open(target)) {
+        return 0;
+    }
+    for (slot = 0; slot < inodes[parent].ndent; slot++) {
+        if (inodes[parent].dents[slot].ino == target) {
+            break;
+        }
+    }
+    if (slot >= inodes[parent].ndent) {
+        return 0;
+    }
+    for (k = slot; k + 1 < inodes[parent].ndent; k++) {
+        inodes[parent].dents[k] = inodes[parent].dents[k + 1];
+    }
+    inodes[parent].ndent--;
+    inodes[target].type = INO_FREE;
+    inodes[target].parent = 0;
+    inodes[target].ndent = 0;
+    return 1;
+}
+
 u32 fs_unlink(const char *path) {
     char last[NAME_LEN];
     u32 last_n = 0;

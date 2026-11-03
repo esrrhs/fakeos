@@ -33,6 +33,8 @@ extern u64 sys_write_fd(u64 fd, u64 buf, u64 len);
 extern u64 sys_lseek(u64 fd, u64 off, u64 whence);
 extern u64 sys_mkdir(u64 upath);
 extern u64 sys_unlink(u64 upath);
+extern u64 sys_rmdir(u64 upath);
+extern u64 sys_dup2(u64 oldfd, u64 newfd);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
@@ -79,6 +81,7 @@ enum {
     SC_WRITE = 1,
     SC_OPEN  = 2,
     SC_CLOSE = 3,
+    SC_DUP2  = 33,
     SC_LSEEK = 8,
     SC_MMAP  = 9,
     SC_MUNMAP = 11,
@@ -96,6 +99,7 @@ enum {
     SC_EXECVE = 59,
     SC_EXIT  = 60,
     SC_WAIT4 = 61,
+    SC_RMDIR = 84,
     SC_UNLINK = 87,
     SC_EXIT_GROUP = 231
 };
@@ -185,6 +189,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_CLOSE) {
         return sys_close(f->rdi);
     }
+    if (f->rax == SC_DUP2) {
+        return sys_dup2(f->rdi, f->rsi);
+    }
     if (f->rax == SC_LSEEK) {
         return sys_lseek(f->rdi, f->rsi, f->rdx);
     }
@@ -205,6 +212,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_UNLINK) {
         return sys_unlink(f->rdi);
+    }
+    if (f->rax == SC_RMDIR) {
+        return sys_rmdir(f->rdi);
     }
     if (f->rax == SC_BRK) {
         return sys_brk(f->rdi);

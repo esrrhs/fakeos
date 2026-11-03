@@ -9,6 +9,7 @@ global u_read
 global u_write
 global u_open
 global u_close
+global u_dup2
 global u_lseek
 global u_mmap
 global u_brk
@@ -23,6 +24,7 @@ global u_mkdir
 global u_getcwd
 global u_getdents
 global u_unlink
+global u_rmdir
 
 section .text
 
@@ -49,6 +51,9 @@ USYSC1 u_open, 2
 
 ; long u_close(long fd)
 USYSC1 u_close, 3
+
+; long u_dup2(long oldfd, long newfd)
+USYSC1 u_dup2, 33
 
 ; long u_lseek(long fd, long off, long whence)
 USYSC1 u_lseek, 8
@@ -94,6 +99,9 @@ USYSC1 u_getdents, 217
 
 ; long u_unlink(const char *path)
 USYSC1 u_unlink, 87
+
+; long u_rmdir(const char *path)
+USYSC1 u_rmdir, 84
 
 ; void u_exit(long code) - does not return
 align 16

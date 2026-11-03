@@ -75,6 +75,7 @@ struct ext2_sb {
 
 struct ext2_open {
     u32 used;
+    u32 refs;
     u32 ino;
     u32 mode;
     u32 readable;
@@ -502,6 +503,7 @@ static u32 alloc_fh(void) {
     for (i = 1; i < MAX_OPEN; i++) {
         if (!opens[i].used) {
             opens[i].used = 1;
+            opens[i].refs = 1;
             return FH_BASE | i;
         }
     }
@@ -673,11 +675,24 @@ u32 ext2_open(const char *path, u32 flags) {
     return fh;
 }
 
+void ext2_file_retain(u32 fh) {
+    u32 s;
+    if (!ext2_fh_is(fh)) return;
+    s = fh_slot(fh);
+    if (s >= MAX_OPEN || !opens[s].used) return;
+    opens[s].refs++;
+}
+
 u32 ext2_close(u32 fh) {
     u32 s;
     if (!ext2_fh_is(fh)) return 0;
     s = fh_slot(fh);
     if (s >= MAX_OPEN || !opens[s].used) return 0;
+    if (opens[s].refs > 1) {
+        opens[s].refs--;
+        return 1;
+    }
+    opens[s].refs = 0;
     opens[s].used = 0;
     return 1;
 }
@@ -877,6 +892,35 @@ u32 ext2_mkdir(const char *path) {
     return 1;
 }
 
+static u32 dir_is_empty(u32 dir_ino) {
+    u32 size;
+    u32 fblk;
+    if (!inode_read(dir_ino, ino_raw)) return 0;
+    size = rd32(ino_raw + I_SIZE_LO);
+    for (fblk = 0; fblk * sb.block_size < size; fblk++) {
+        u32 phys = inode_get_block(ino_raw, fblk);
+        u32 pos = 0;
+        if (phys == 0) continue;
+        if (!bread(phys, blk_buf)) return 0;
+        while (pos + 8 <= sb.block_size) {
+            u32 ino = rd32(blk_buf + pos);
+            u16 reclen = rd16(blk_buf + pos + 4);
+            u8 namelen = blk_buf[pos + 6];
+            if (reclen < 8 || pos + reclen > sb.block_size) break;
+            if (ino != 0) {
+                /* Allow only "." and ".." */
+                if (!(namelen == 1 && blk_buf[pos + 8] == '.')
+                    && !(namelen == 2 && blk_buf[pos + 8] == '.'
+                         && blk_buf[pos + 9] == '.')) {
+                    return 0;
+                }
+            }
+            pos += reclen;
+        }
+    }
+    return 1;
+}
+
 u32 ext2_unlink(const char *path) {
     const char *rel;
     char last[NAME_MAX + 1];
@@ -890,13 +934,14 @@ u32 ext2_unlink(const char *path) {
     if (rel == 0 || rel[0] == 0) return 0;
     parent = walk_parent(rel, last, &last_n);
     if (parent == 0 || last_n == 0) return 0;
-    if (!dir_remove(parent, last, last_n, &victim)) return 0;
+    if (!dir_find(parent, last, last_n, &victim)) return 0;
     if (!inode_read(victim, ino_raw)) return 0;
     mode = rd16(ino_raw + I_MODE);
     if ((mode & EXT2_S_IFMT) == EXT2_S_IFDIR) {
-        /* Refuse rmdir for now (use empty check later). Restore dent? */
-        return 0;
+        return 0;                      /* directories need rmdir */
     }
+    if (!dir_remove(parent, last, last_n, &victim)) return 0;
+    if (!inode_read(victim, ino_raw)) return 0;
     for (b = 0; b < 12; b++) {
         u32 phys = rd32(ino_raw + I_BLOCK + b * 4);
         if (phys) free_block_bit(phys);
@@ -916,6 +961,45 @@ u32 ext2_unlink(const char *path) {
         }
     }
     for (b = 0; b < 128; b++) ino_raw[b] = 0;
+    inode_write(victim, ino_raw);
+    free_inode_bit(victim);
+    return 1;
+}
+
+u32 ext2_rmdir(const char *path) {
+    const char *rel;
+    char last[NAME_MAX + 1];
+    u32 last_n;
+    u32 parent;
+    u32 victim;
+    u32 mode;
+    u32 phys;
+    if (!sb.mounted) return 0;
+    rel = mnt_rel(path);
+    if (rel == 0 || rel[0] == 0) return 0;
+    parent = walk_parent(rel, last, &last_n);
+    if (parent == 0 || last_n == 0) return 0;
+    if (!dir_find(parent, last, last_n, &victim)) return 0;
+    if (!inode_read(victim, ino_raw)) return 0;
+    mode = rd16(ino_raw + I_MODE);
+    if ((mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
+    if (!dir_is_empty(victim)) return 0;
+    if (!dir_remove(parent, last, last_n, &victim)) return 0;
+    if (!inode_read(victim, ino_raw)) return 0;
+    phys = rd32(ino_raw + I_BLOCK);
+    if (phys) free_block_bit(phys);
+    /* Drop parent ".." link. */
+    if (inode_read(parent, ino_raw)) {
+        u16 links = rd16(ino_raw + I_LINKS);
+        if (links > 1) {
+            wr16(ino_raw + I_LINKS, (u16)(links - 1));
+            inode_write(parent, ino_raw);
+        }
+    }
+    {
+        u32 z;
+        for (z = 0; z < 128; z++) ino_raw[z] = 0;
+    }
     inode_write(victim, ino_raw);
     free_inode_bit(victim);
     return 1;
