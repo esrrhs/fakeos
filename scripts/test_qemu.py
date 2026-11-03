@@ -140,6 +140,7 @@ def second_boot_checks(disk):
         "[NET] up: ip=10.0.2.15/24",
         "[PASS] ICMP echo reply from gateway",
         "[PASS] UDP loopback (bind/sendto/recv path)",
+        "[PASS] TCP handshake + stream loopback",
         "[KBD] PS/2 keyboard armed (IRQ1)",
         "fakeos:~$",
         "hello from /bin/hello",
@@ -210,6 +211,8 @@ def main():
         "echo PIPEOK | cat",    # pipe() + shell | via wait queues
         "ping -c 1 10.0.2.2",  # sys_ping + VirtIO-net ICMP
         "udptest",            # UDP socket loopback
+        "falsecmd || echo OR_OK",  # shell || short-circuit
+        "echo AND_OK && echo AND2", # shell &&
         "sync",                # ext2 flush builtin
     ]
     session = ""
@@ -317,6 +320,7 @@ def main():
         "[FS] published /bin/ping (",
         "[FS] published /bin/udptest (",
         "[FS] published /bin/nc (",
+        "[FS] published /bin/ed (",
         "[FS] published /etc/motd (",
         # Ring-3 retained + stage-4 user self-tests
         "[U] hello from ring 3, pid=",
@@ -335,7 +339,7 @@ def main():
         "[U][PASS] huge write length rejected",
         "[U][PASS] orphan reparented to pid 1",
         # interactive shell session
-        "fakeos shell - builtins, pipes/redirects; persist under /home",
+        "fakeos shell - builtins, pipes/redirects, &&/||, jobs; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -353,7 +357,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: VFS/Ramfs/shell + Ext2 /home persist + VirtIO-net online!",
+        "[SUCCESS] fakeos: TCP streams + Ext2 default-root + shell jobs online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
@@ -387,6 +391,8 @@ def main():
         # echo $? right after hello must surface hello's 42 exit status
         ("$? status propagation", 'echo $?' in norm and "exited (code 42)" in norm),
         ("pipe echo|cat", "PIPEOK\n" in norm and "usage: cat" not in norm),
+        ("shell || short-circuit", "OR_OK\n" in norm),
+        ("shell && list", "AND_OK\n" in norm and "AND2\n" in norm),
         # pid builtin reports that the shell kept pid 1 across execve
         ("shell keeps pid 1", "pid\n1\n" in norm),
         # ls /bin lists all five programs
@@ -396,7 +402,7 @@ def main():
         ("ls /bin lists cat",      "\ncat\n" in norm),
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
-        ("multiple shell prompts", norm.count("fakeos:~$") >= 12),
+        ("multiple shell prompts", norm.count("fakeos:~$") >= 14),
         ("userland ping replied", "reply from 10.0.2.2" in out),
         ("userland udptest loopback", "UDP loopback OK" in out),
     ]

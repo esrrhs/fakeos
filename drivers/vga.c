@@ -107,3 +107,139 @@ void vga_puts(const char *s) {
         s++;
     }
 }
+
+/* Minimal CSI parser so userspace clear/colors reach the text framebuffer.
+ * Recognizes ESC [ ... <cmd> with up to 2 numeric params. */
+enum {
+    ANSI_NORMAL = 0,
+    ANSI_ESC = 1,
+    ANSI_CSI = 2
+};
+
+static int ansi_state = ANSI_NORMAL;
+static int ansi_n[2];
+static int ansi_ni;
+static int ansi_val;
+static int ansi_has;
+
+static void ansi_reset_params(void) {
+    ansi_n[0] = 0;
+    ansi_n[1] = 0;
+    ansi_ni = 0;
+    ansi_val = 0;
+    ansi_has = 0;
+}
+
+static void ansi_apply_sgr(int p) {
+    if (p == 0) {
+        current_color = 0x0F;
+    } else if (p >= 30 && p <= 37) {
+        current_color = (types.uint8_t)((current_color & 0xF0) | (p - 30));
+    } else if (p >= 40 && p <= 47) {
+        current_color = (types.uint8_t)((current_color & 0x0F) | ((p - 40) << 4));
+    } else if (p >= 90 && p <= 97) {
+        current_color = (types.uint8_t)((current_color & 0xF0) | (8 + (p - 90)));
+    }
+}
+
+static void ansi_exec(char cmd) {
+    int a = ansi_has || ansi_ni > 0 ? ansi_n[0] : 0;
+    int b = ansi_ni > 0 ? ansi_n[1] : 0;
+    if (cmd == 'J') {
+        if (a == 2 || a == 0) {
+            vga_clear();
+        }
+    } else if (cmd == 'H' || cmd == 'f') {
+        int row = a > 0 ? a - 1 : 0;
+        int col = b > 0 ? b - 1 : 0;
+        if (row < 0) row = 0;
+        if (col < 0) col = 0;
+        if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+        if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
+        cursor_row = row;
+        cursor_col = col;
+        update_hardware_cursor();
+    } else if (cmd == 'K') {
+        types.uint16_t blank = (types.uint16_t)(' ' | (current_color << 8));
+        int x;
+        int start = (a == 1) ? 0 : cursor_col;
+        int end = (a == 1) ? cursor_col + 1 : VGA_WIDTH;
+        if (a == 2) {
+            start = 0;
+            end = VGA_WIDTH;
+        }
+        for (x = start; x < end; x++) {
+            VGA_BUFFER[cursor_row * VGA_WIDTH + x] = blank;
+        }
+    } else if (cmd == 'm') {
+        if (!ansi_has && ansi_ni == 0) {
+            ansi_apply_sgr(0);
+        } else {
+            ansi_apply_sgr(ansi_n[0]);
+            if (ansi_ni > 0) {
+                ansi_apply_sgr(ansi_n[1]);
+            }
+        }
+    } else if (cmd == 'A') {
+        int n = a > 0 ? a : 1;
+        cursor_row -= n;
+        if (cursor_row < 0) cursor_row = 0;
+        update_hardware_cursor();
+    } else if (cmd == 'B') {
+        int n = a > 0 ? a : 1;
+        cursor_row += n;
+        if (cursor_row >= VGA_HEIGHT) cursor_row = VGA_HEIGHT - 1;
+        update_hardware_cursor();
+    } else if (cmd == 'C') {
+        int n = a > 0 ? a : 1;
+        cursor_col += n;
+        if (cursor_col >= VGA_WIDTH) cursor_col = VGA_WIDTH - 1;
+        update_hardware_cursor();
+    } else if (cmd == 'D') {
+        int n = a > 0 ? a : 1;
+        cursor_col -= n;
+        if (cursor_col < 0) cursor_col = 0;
+        update_hardware_cursor();
+    }
+}
+
+void vga_ansi_putc(char c) {
+    if (ansi_state == ANSI_NORMAL) {
+        if (c == 0x1B) {
+            ansi_state = ANSI_ESC;
+            return;
+        }
+        vga_putc(c);
+        return;
+    }
+    if (ansi_state == ANSI_ESC) {
+        if (c == '[') {
+            ansi_state = ANSI_CSI;
+            ansi_reset_params();
+            return;
+        }
+        ansi_state = ANSI_NORMAL;
+        vga_putc(c);
+        return;
+    }
+    /* CSI */
+    if (c >= '0' && c <= '9') {
+        ansi_val = ansi_val * 10 + (c - '0');
+        ansi_has = 1;
+        return;
+    }
+    if (c == ';') {
+        if (ansi_ni < 2) {
+            ansi_n[ansi_ni] = ansi_has ? ansi_val : 0;
+            ansi_ni++;
+        }
+        ansi_val = 0;
+        ansi_has = 0;
+        return;
+    }
+    if (ansi_ni < 2) {
+        ansi_n[ansi_ni] = ansi_has ? ansi_val : 0;
+    }
+    ansi_exec(c);
+    ansi_state = ANSI_NORMAL;
+}

@@ -590,9 +590,7 @@ static const char *mnt_rel(const char *path) {
     return path + 5;
 }
 
-/* Daily-driver UX: /home and /home/... alias the Ext2 volume path "home".
- * Keeps Ramfs owning /bin /etc /tmp /proc /src /ref /asm while making the
- * persistent workspace feel like a normal Unix home root. */
+/* Daily-driver UX: /home and /home/... alias the Ext2 volume path "home". */
 static const char *home_rel(const char *path) {
     if (path == 0 || path[0] != '/') return 0;
     if (path[1] != 'h' || path[2] != 'o' || path[3] != 'm' || path[4] != 'e') {
@@ -605,12 +603,41 @@ static const char *home_rel(const char *path) {
     return path + 1;                     /* "home/..." */
 }
 
+/* Ramfs keeps the live root listing and these overlays; everything else
+ * (when Ext2 is mounted) lands on the Ext2 volume — a step toward true root. */
+static u32 ramfs_overlay(const char *path) {
+    /* "/", "/bin", "/etc", "/tmp", "/proc", "/src", "/ref", "/asm", "/dev" */
+    if (path == 0 || path[0] != '/') return 1;
+    if (path[1] == 0) return 1;          /* "/" stays Ramfs for ls / */
+    if (path[1] == 'b' && path[2] == 'i' && path[3] == 'n' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 'e' && path[2] == 't' && path[3] == 'c' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 't' && path[2] == 'm' && path[3] == 'p' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 'p' && path[2] == 'r' && path[3] == 'o' && path[4] == 'c' &&
+        (path[5] == 0 || path[5] == '/')) return 1;
+    if (path[1] == 's' && path[2] == 'r' && path[3] == 'c' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 'r' && path[2] == 'e' && path[3] == 'f' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 'a' && path[2] == 's' && path[3] == 'm' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    if (path[1] == 'd' && path[2] == 'e' && path[3] == 'v' &&
+        (path[4] == 0 || path[4] == '/')) return 1;
+    return 0;
+}
+
 /* Volume-relative path for any Ext2-owned absolute path, or 0. */
 static const char *persist_rel(const char *path) {
     const char *r = mnt_rel(path);
     if (r) return r;
     if (!sb.mounted) return 0;
-    return home_rel(path);
+    r = home_rel(path);
+    if (r) return r;
+    if (ramfs_overlay(path)) return 0;
+    /* Strip leading '/': "/notes" -> "notes", path always absolute here. */
+    return path + 1;
 }
 
 u32 ext2_is_mnt_path(const char *path) {

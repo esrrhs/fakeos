@@ -43,6 +43,8 @@ extern u64 sys_bind(u64 fd, u64 uaddr, u64 ulen);
 extern u64 sys_connect(u64 fd, u64 uaddr, u64 ulen);
 extern u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen);
 extern u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen);
+extern u64 sys_listen(u64 fd, u64 backlog);
+extern u64 sys_accept(u64 fd, u64 uaddr, u64 ualen);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
@@ -117,6 +119,8 @@ enum {
     SC_SENDTO = 44,
     SC_RECVFROM = 45,
     SC_BIND = 49,
+    SC_LISTEN = 50,
+    SC_ACCEPT = 43,
     SC_PING = 500
 };
 
@@ -231,6 +235,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_RECVFROM) {
         return sys_recvfrom(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_LISTEN) {
+        return sys_listen(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_ACCEPT) {
+        return sys_accept(f->rdi, f->rsi, f->rdx);
     }
     if (f->rax == SC_LSEEK) {
         return sys_lseek(f->rdi, f->rsi, f->rdx);

@@ -56,6 +56,8 @@ extern u64 pipe_write(u32 fh, const char *kbuf, u64 len);
 extern u32 sock_fh_is(u32 fh);
 extern void sock_retain(u32 fh);
 extern u32 sock_close(u32 fh);
+extern u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen);
+extern u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen);
 
 
 static u32 kstr_len(const char *s) {
@@ -318,7 +320,7 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
 
     /* fd 0: serial console with canonical line discipline. */
     if (sock_fh_is(fh)) {
-        return (u64)(-1);             /* use recvfrom */
+        return sys_recvfrom(fd, buf, len, 0, 0, 0);
     }
     if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return tty_console_read(buf, len);
@@ -400,7 +402,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
     /* fd 1/2: serial console sink. Validate the whole user range first, then
      * stream byte by byte (uart_putc performs the \n -> \r\n translation). */
     if (sock_fh_is(fh)) {
-        return (u64)(-1);             /* use sendto */
+        return sys_sendto(fd, buf, len, 0, 0, 0);
     }
     if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         volatile char *p;
@@ -411,6 +413,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
         p = (volatile char *)buf;
         for (i = 0; i < len; i++) {
             drivers.uart_putc(p[i]);
+            drivers.vga_ansi_putc(p[i]);
         }
         return len;
     }

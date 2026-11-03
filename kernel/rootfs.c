@@ -32,6 +32,8 @@ extern char user_udptest_start;
 extern char user_udptest_end;
 extern char user_nc_start;
 extern char user_nc_end;
+extern char user_ed_start;
+extern char user_ed_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -87,6 +89,7 @@ void rootfs_publish(void) {
     publish_one("/bin/ping",  (u64)(&user_ping_start),  (u64)(&user_ping_end));
     publish_one("/bin/udptest", (u64)(&user_udptest_start), (u64)(&user_udptest_end));
     publish_one("/bin/nc", (u64)(&user_nc_start), (u64)(&user_nc_end));
+    publish_one("/bin/ed", (u64)(&user_ed_start), (u64)(&user_ed_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
     publish_one("/bin/dumpbin", (u64)(&user_dumpbin_start), (u64)(&user_dumpbin_end));

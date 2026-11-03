@@ -33,6 +33,8 @@ global u_bind
 global u_connect
 global u_sendto
 global u_recvfrom
+global u_listen
+global u_accept
 
 section .text
 
@@ -144,6 +146,12 @@ u_recvfrom:
     mov     eax, 45
     syscall
     ret
+
+; long u_listen(long fd, long backlog)
+USYSC1 u_listen, 50
+
+; long u_accept(long fd, void *addr, unsigned int *alen)
+USYSC1 u_accept, 43
 
 ; void u_exit(long code) - does not return
 align 16

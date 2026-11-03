@@ -1,6 +1,6 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, exit [code], help.
- * Redirects (> >> <) and pipelines (|) via pipe/dup2/fork. */
+ * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, exit [code], help,
+ * jobs, fg. Redirects (> >> <), pipelines (|), && / || lists, and & jobs. */
 package user;
 
 typedef unsigned long u64;
@@ -38,9 +38,14 @@ enum {
     O_TRUNC  = 0x200,
     O_APPEND = 0x400,
     SAVE_FD  = 8,
-    MAX_TOK  = 24,
-    MAX_STAGE = 4
+    MAX_TOK  = 32,
+    MAX_STAGE = 4,
+    WNOHANG = 1
 };
+
+static long bg_pid = 0;
+static char bg_name[64];
+static int bg_active = 0;
 
 static int eq(const char *a, const char *b) {
     return strcmp(a, b) == 0;
@@ -150,7 +155,7 @@ static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
            eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "sync") ||
-           eq(cmd, "clear");
+           eq(cmd, "clear") || eq(cmd, "jobs") || eq(cmd, "fg");
 }
 
 /* Resolve argv[0] into path (may use buf). */
@@ -228,10 +233,30 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, exit, help");
-        puts("redirects: > >> <   pipelines: |");
-        puts("programs: hello cat ls cp rm touch mv ping (auto /bin)");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, jobs, fg, exit, help");
+        puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
+        puts("programs: hello cat ls cp rm touch mv ping nc ed (auto /bin)");
         return 0;
+    }
+    if (eq(tokens[0], "jobs")) {
+        if (bg_active) {
+            printf("[%d]+ Running %s\n", (int)bg_pid, bg_name);
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "fg")) {
+        long status = 0;
+        long reaped;
+        if (!bg_active) {
+            puts("sh: fg: no current job");
+            return 1;
+        }
+        reaped = u_wait4(bg_pid, &status, 0, 0);
+        bg_active = 0;
+        if (reaped == bg_pid) {
+            return status >> 8;
+        }
+        return 1;
     }
 
     if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
@@ -453,6 +478,116 @@ static long run_pipeline(char **tokens, long rc_in) {
     return rc;
 }
 
+/* Run tokens as && / || list of pipelines; optional trailing &. */
+static long run_list(char **tokens, long rc_in) {
+    int i = 0;
+    long rc = rc_in;
+    int background = 0;
+    int end;
+
+    /* Detect trailing & for job control (single trailing amp). */
+    end = 0;
+    while (tokens[end] != 0) end++;
+    if (end > 0 && eq(tokens[end - 1], "&")) {
+        background = 1;
+        tokens[end - 1] = 0;
+        end--;
+        if (end == 0) {
+            puts("sh: syntax error near &");
+            return 1;
+        }
+    }
+
+    while (tokens[i] != 0) {
+        char *stage[MAX_TOK];
+        int ns = 0;
+        int op = 0; /* 0 none, 1 &&, 2 || */
+        long child;
+        long status = 0;
+
+        while (tokens[i] != 0 && !eq(tokens[i], "&&") && !eq(tokens[i], "||")) {
+            if (ns < MAX_TOK - 1) {
+                stage[ns++] = tokens[i];
+            }
+            i++;
+        }
+        stage[ns] = 0;
+        if (tokens[i] != 0 && eq(tokens[i], "&&")) {
+            op = 1;
+            i++;
+        } else if (tokens[i] != 0 && eq(tokens[i], "||")) {
+            op = 2;
+            i++;
+        }
+        if (ns == 0) {
+            puts("sh: empty command in list");
+            return 1;
+        }
+
+        if (background && op == 0 && tokens[i] == 0) {
+            /* Background only the final (or sole) pipeline. */
+            if (bg_active) {
+                puts("sh: already have a background job");
+                return 1;
+            }
+            child = u_fork();
+            if (child < 0) {
+                puts("sh: fork failed");
+                return 1;
+            }
+            if (child == 0) {
+                long st = run_pipeline(stage, rc);
+                u_exit(st);
+            }
+            bg_pid = child;
+            bg_active = 1;
+            {
+                int k;
+                bg_name[0] = 0;
+                for (k = 0; stage[k] != 0 && k < 3; k++) {
+                    int p = 0;
+                    while (bg_name[p] != 0) p++;
+                    if (k > 0 && p < 62) {
+                        bg_name[p++] = ' ';
+                        bg_name[p] = 0;
+                    }
+                    {
+                        int j = 0;
+                        while (stage[k][j] != 0 && p < 62) {
+                            bg_name[p++] = stage[k][j++];
+                        }
+                        bg_name[p] = 0;
+                    }
+                }
+            }
+            printf("[%d] %d\n", 1, (int)child);
+            return 0;
+        }
+
+        rc = run_pipeline(stage, rc);
+        if (op == 1 && rc != 0) {
+            /* skip until next || or end — simple: stop list */
+            return rc;
+        }
+        if (op == 2 && rc == 0) {
+            return rc;
+        }
+        (void)status;
+    }
+    return rc;
+}
+
+static void reap_background(void) {
+    long status = 0;
+    long reaped;
+    if (!bg_active) return;
+    reaped = u_wait4(bg_pid, &status, WNOHANG, 0);
+    if (reaped == bg_pid) {
+        printf("[%d]+ Done %s\n", (int)bg_pid, bg_name);
+        bg_active = 0;
+    }
+}
+
 int main(int argc, char **argv) {
     long rc = 0;
     char line[256];
@@ -460,7 +595,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -468,6 +603,8 @@ int main(int argc, char **argv) {
         char *t;
         int nt = 0;
         long n;
+
+        reap_background();
 
         {
             char cwd[64];
@@ -494,6 +631,6 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        rc = run_pipeline(tokens, rc);
+        rc = run_list(tokens, rc);
     }
 }

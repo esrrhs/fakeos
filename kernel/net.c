@@ -22,12 +22,13 @@ extern void sched_fd_set(u32 idx, u32 fh);
 extern u32 sched_fd_get(u32 idx);
 
 /* ---------------------------------------------------------------------------
- * Minimal L2/L3 + BSD-ish UDP sockets.
+ * Minimal L2/L3 + BSD-ish UDP/TCP sockets.
  *
  * Static addressing matches QEMU user-mode networking defaults:
  *   guest 10.0.2.15/24, gateway/DNS 10.0.2.2.
- * ICMP echo (sys_ping) plus socket/bind/connect/sendto/recvfrom for UDP.
- * SOCK_STREAM is accepted as a scaffold (create/bind only; I/O returns -1).
+ * ICMP echo (sys_ping); UDP socket/bind/connect/sendto/recvfrom;
+ * TCP 3-way handshake, listen/accept, and byte-stream send/recv
+ * (loopback fully exercised; remote best-effort, no retransmit timer).
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -61,9 +62,29 @@ enum {
     MAX_SOCKS     = 16,
     SOCK_RXQ      = 8,
     UDP_MAX_PAYLOAD = 1400,
+    TCP_HDR       = 20,
+    TCP_MAX_PAYLOAD = 1360,
+    TCP_RX_CAP    = 2048,
+    TCP_BACKLOG   = 4,
     SOCKADDR_IN_LEN = 16,
     EPHEMERAL_BASE = 49152,
-    EPHEMERAL_MAX  = 65535
+    EPHEMERAL_MAX  = 65535,
+
+    /* TCP states (subset) */
+    TCPS_CLOSED      = 0,
+    TCPS_LISTEN      = 1,
+    TCPS_SYN_SENT    = 2,
+    TCPS_SYN_RCVD    = 3,
+    TCPS_ESTABLISHED = 4,
+    TCPS_CLOSE_WAIT  = 5,
+    TCPS_LAST_ACK    = 6,
+    TCPS_FIN_WAIT    = 7,
+
+    TCPF_FIN = 0x01,
+    TCPF_SYN = 0x02,
+    TCPF_RST = 0x04,
+    TCPF_PSH = 0x08,
+    TCPF_ACK = 0x10
 };
 
 struct arp_entry {
@@ -93,6 +114,23 @@ struct sock {
     u32 rx_tail;
     u32 rx_count;
     struct udp_pkt rxq[SOCK_RXQ];
+    /* TCP */
+    u32 tcp_state;
+    u32 snd_una;       /* first unacked seq (= next seq for our minimal stack) */
+    u32 snd_nxt;
+    u32 rcv_nxt;
+    u32 iss;
+    u32 irs;
+    u32 listen_parent; /* slot of LISTEN parent; 0 = none */
+    u32 accept_head;
+    u32 accept_tail;
+    u32 accept_count;
+    u32 accept_q[TCP_BACKLOG];
+    u32 s_head;
+    u32 s_tail;
+    u32 s_count;
+    u8  sbuf[TCP_RX_CAP];
+    u32 peer_fin;      /* saw FIN; recv returns 0 after drain */
 };
 
 static u8  local_mac[6];
@@ -110,6 +148,13 @@ static u32 ping_got_reply;
 static u32 ping_target;
 static struct sock socks[MAX_SOCKS];
 static u16 next_eph = EPHEMERAL_BASE;
+
+static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len);
+static u32 resolve_mac(u32 ip, u8 *mac_out);
+static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
+                      u32 seq, u32 ack, u8 flags,
+                      const u8 *payload, u16 plen);
+
 
 static u16 checksum(const u8 *data, u32 len) {
     u32 sum = 0;
@@ -353,11 +398,28 @@ u32 sock_close(u32 fh) {
         sk->refs--;
         return 1;
     }
+    if (sk->type == SOCK_STREAM) {
+        if (sk->tcp_state == TCPS_ESTABLISHED) {
+            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                       sk->snd_nxt, sk->rcv_nxt,
+                       (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
+            sk->snd_nxt++;
+            sk->tcp_state = TCPS_FIN_WAIT;
+        } else if (sk->tcp_state == TCPS_CLOSE_WAIT) {
+            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                       sk->snd_nxt, sk->rcv_nxt,
+                       (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
+            sk->snd_nxt++;
+            sk->tcp_state = TCPS_LAST_ACK;
+        }
+    }
     sk->used = 0;
     sk->refs = 0;
     sk->rx_count = 0;
     sk->rx_head = 0;
     sk->rx_tail = 0;
+    sk->s_count = 0;
+    sk->tcp_state = TCPS_CLOSED;
     sched_wakeup((u64)sk);
     return 1;
 }
@@ -512,6 +574,8 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
         handle_icmp(src, pkt + ihl, (u32)(total - ihl), src_mac);
     } else if (proto == IP_PROTO_UDP) {
         handle_udp(src, dst, pkt + ihl, (u32)(total - ihl));
+    } else if (proto == IP_PROTO_TCP) {
+        handle_tcp(src, dst, pkt + ihl, (u32)(total - ihl));
     }
 }
 
@@ -608,6 +672,326 @@ static u32 udp_tx(u16 sport, u32 dst_ip, u16 dport,
     }
     return ip_send(dst_ip, IP_PROTO_UDP, udp, UDP_HDR + plen, dst_mac);
 }
+
+
+/* ---------------- TCP ---------------- */
+
+static u16 tcp_checksum(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 tcp_len) {
+    u32 sum = 0;
+    u32 i;
+    /* Pseudo-header */
+    sum += (src_ip >> 16) & 0xFFFF;
+    sum += src_ip & 0xFFFF;
+    sum += (dst_ip >> 16) & 0xFFFF;
+    sum += dst_ip & 0xFFFF;
+    sum += IP_PROTO_TCP;
+    sum += tcp_len;
+    i = 0;
+    while (i + 1 < tcp_len) {
+        sum += ((u32)tcp[i] << 8) | (u32)tcp[i + 1];
+        i += 2;
+    }
+    if (i < tcp_len) {
+        sum += ((u32)tcp[i] << 8);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (u16)(~sum);
+}
+
+static void stream_push(struct sock *sk, const u8 *data, u16 plen) {
+    u32 i;
+    for (i = 0; i < plen; i++) {
+        if (sk->s_count >= TCP_RX_CAP) {
+            break;
+        }
+        sk->sbuf[sk->s_tail] = data[i];
+        sk->s_tail++;
+        if (sk->s_tail >= TCP_RX_CAP) {
+            sk->s_tail = 0;
+        }
+        sk->s_count++;
+    }
+    if (plen > 0) {
+        sched_wakeup((u64)sk);
+    }
+}
+
+static u32 stream_pop(struct sock *sk, u8 *dst, u32 want) {
+    u32 n = 0;
+    while (n < want && sk->s_count > 0) {
+        dst[n] = sk->sbuf[sk->s_head];
+        sk->s_head++;
+        if (sk->s_head >= TCP_RX_CAP) {
+            sk->s_head = 0;
+        }
+        sk->s_count--;
+        n++;
+    }
+    return n;
+}
+
+static void accept_enqueue(struct sock *listener, u32 child_slot) {
+    if (listener->accept_count >= TCP_BACKLOG) {
+        return;
+    }
+    listener->accept_q[listener->accept_tail] = child_slot;
+    listener->accept_tail++;
+    if (listener->accept_tail >= TCP_BACKLOG) {
+        listener->accept_tail = 0;
+    }
+    listener->accept_count++;
+    sched_wakeup((u64)listener);
+}
+
+static u32 accept_dequeue(struct sock *listener) {
+    u32 slot;
+    if (listener->accept_count == 0) {
+        return 0;
+    }
+    slot = listener->accept_q[listener->accept_head];
+    listener->accept_head++;
+    if (listener->accept_head >= TCP_BACKLOG) {
+        listener->accept_head = 0;
+    }
+    listener->accept_count--;
+    return slot;
+}
+
+static struct sock *tcp_find_sock(u32 src_ip, u16 sport, u32 dst_ip, u16 dport) {
+    u32 i;
+    struct sock *listen_sk = 0;
+    for (i = 1; i < MAX_SOCKS; i++) {
+        struct sock *sk = &socks[i];
+        if (!sk->used || sk->type != SOCK_STREAM || !sk->bound) {
+            continue;
+        }
+        if (sk->local_port != dport) {
+            continue;
+        }
+        if (sk->local_ip != 0 && sk->local_ip != dst_ip) {
+            continue;
+        }
+        if (sk->tcp_state == TCPS_LISTEN) {
+            listen_sk = sk;
+            continue;
+        }
+        if (sk->peer_ip == src_ip && sk->peer_port == sport) {
+            return sk;
+        }
+    }
+    return listen_sk;
+}
+
+static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
+    u16 sport;
+    u16 dport;
+    u32 seq;
+    u32 ack;
+    u8  doff;
+    u8  flags;
+    u16 plen;
+    const u8 *payload;
+    struct sock *sk;
+    if (len < TCP_HDR) {
+        return;
+    }
+    sport = get16(tcp + 0);
+    dport = get16(tcp + 2);
+    seq = get32(tcp + 4);
+    ack = get32(tcp + 8);
+    doff = (u8)((tcp[12] >> 4) * 4);
+    if (doff < TCP_HDR || doff > len) {
+        return;
+    }
+    flags = tcp[13];
+    plen = (u16)(len - doff);
+    payload = tcp + doff;
+
+    sk = tcp_find_sock(src_ip, sport, dst_ip, dport);
+    if (!sk) {
+        if (flags & TCPF_SYN) {
+            /* No listener: RST */
+            tcp_tx_seg(dport, src_ip, sport, 0, seq + 1,
+                       (u8)(TCPF_RST | TCPF_ACK), 0, 0);
+        }
+        return;
+    }
+
+    if (sk->tcp_state == TCPS_LISTEN) {
+        struct sock *child;
+        u32 cslot;
+        if (!(flags & TCPF_SYN) || (flags & TCPF_ACK)) {
+            return;
+        }
+        if (sk->accept_count >= TCP_BACKLOG) {
+            return;
+        }
+        cslot = sock_alloc_slot();
+        if (cslot == 0) {
+            return;
+        }
+        child = &socks[cslot];
+        child->type = SOCK_STREAM;
+        child->bound = 1;
+        child->local_ip = sk->local_ip;
+        child->local_port = sk->local_port;
+        child->peer_ip = src_ip;
+        child->peer_port = sport;
+        child->connected = 1;
+        {
+            u32 pi;
+            child->listen_parent = 0;
+            for (pi = 1; pi < MAX_SOCKS; pi++) {
+                if (&socks[pi] == sk) {
+                    child->listen_parent = pi;
+                    break;
+                }
+            }
+        }
+        child->iss = 1000 + cslot * 97;
+        child->snd_nxt = child->iss;
+        child->snd_una = child->iss;
+        child->irs = seq;
+        child->rcv_nxt = seq + 1;
+        child->tcp_state = TCPS_SYN_RCVD;
+        /* SYN consumes iss; peer's ACK must see snd_nxt == iss+1 even when
+         * the SYN-ACK is delivered synchronously on loopback. */
+        child->snd_nxt = child->iss + 1;
+        tcp_tx_seg(child->local_port, src_ip, sport,
+                   child->iss, child->rcv_nxt,
+                   (u8)(TCPF_SYN | TCPF_ACK), 0, 0);
+        return;
+    }
+
+    if (sk->tcp_state == TCPS_SYN_SENT) {
+        if ((flags & (TCPF_SYN | TCPF_ACK)) == (TCPF_SYN | TCPF_ACK)) {
+            sk->irs = seq;
+            sk->rcv_nxt = seq + 1;
+            sk->snd_una = ack;
+            sk->snd_nxt = ack;
+            sk->tcp_state = TCPS_ESTABLISHED;
+            sk->connected = 1;
+            tcp_tx_seg(sk->local_port, src_ip, sport,
+                       sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
+            sched_wakeup((u64)sk);
+        } else if (flags & TCPF_RST) {
+            sk->tcp_state = TCPS_CLOSED;
+            sched_wakeup((u64)sk);
+        }
+        return;
+    }
+
+    if (sk->tcp_state == TCPS_SYN_RCVD) {
+        if (flags & TCPF_RST) {
+            sk->used = 0;
+            return;
+        }
+        if ((flags & TCPF_ACK) && ack == sk->snd_nxt) {
+            sk->tcp_state = TCPS_ESTABLISHED;
+            sk->snd_una = ack;
+            if (sk->listen_parent > 0 && sk->listen_parent < MAX_SOCKS) {
+                accept_enqueue(&socks[sk->listen_parent],
+                               (u32)(sk - socks));
+            }
+            /* fall through to process any payload/FIN on same segment */
+        } else {
+            return;
+        }
+    }
+
+    if (sk->tcp_state != TCPS_ESTABLISHED &&
+        sk->tcp_state != TCPS_CLOSE_WAIT &&
+        sk->tcp_state != TCPS_FIN_WAIT &&
+        sk->tcp_state != TCPS_LAST_ACK) {
+        return;
+    }
+
+    if (flags & TCPF_RST) {
+        sk->tcp_state = TCPS_CLOSED;
+        sk->peer_fin = 1;
+        sched_wakeup((u64)sk);
+        return;
+    }
+
+    if (plen > 0 && seq == sk->rcv_nxt) {
+        stream_push(sk, payload, plen);
+        sk->rcv_nxt += plen;
+        tcp_tx_seg(sk->local_port, src_ip, sport,
+                   sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
+    }
+
+    if (flags & TCPF_FIN) {
+        u32 fin_seq = seq + plen;
+        if (fin_seq == sk->rcv_nxt) {
+            sk->rcv_nxt = fin_seq + 1;
+            sk->peer_fin = 1;
+            tcp_tx_seg(sk->local_port, src_ip, sport,
+                       sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
+            if (sk->tcp_state == TCPS_ESTABLISHED) {
+                sk->tcp_state = TCPS_CLOSE_WAIT;
+            } else if (sk->tcp_state == TCPS_FIN_WAIT) {
+                sk->tcp_state = TCPS_CLOSED;
+            }
+            sched_wakeup((u64)sk);
+        }
+    }
+
+    if ((flags & TCPF_ACK) && sk->tcp_state == TCPS_LAST_ACK) {
+        if (ack == sk->snd_nxt) {
+            sk->tcp_state = TCPS_CLOSED;
+            sched_wakeup((u64)sk);
+        }
+    }
+}
+
+static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
+                      u32 seq, u32 ack, u8 flags,
+                      const u8 *payload, u16 plen) {
+    u8 seg[FRAME_MAX];
+    u8 dst_mac[6];
+    u32 i;
+    u16 csum;
+    u32 seglen = TCP_HDR + plen;
+
+    if (seglen > FRAME_MAX - ETH_HDR - IP_HDR) {
+        return 0;
+    }
+    for (i = 0; i < seglen; i++) {
+        seg[i] = 0;
+    }
+    put16(seg + 0, sport);
+    put16(seg + 2, dport);
+    put32(seg + 4, seq);
+    put32(seg + 8, ack);
+    seg[12] = (u8)((TCP_HDR / 4) << 4);
+    seg[13] = flags;
+    put16(seg + 14, 8192);            /* window */
+    put16(seg + 16, 0);               /* checksum filled below */
+    for (i = 0; i < plen; i++) {
+        seg[TCP_HDR + i] = payload[i];
+    }
+
+    /* Loopback: deliver without leaving the host. */
+    if (dst_ip == local_ip) {
+        csum = tcp_checksum(local_ip, dst_ip, seg, seglen);
+        put16(seg + 16, csum);
+        tcp_input(local_ip, dst_ip, seg, seglen);
+        return 1;
+    }
+    if (!resolve_mac(dst_ip, dst_mac)) {
+        return 0;
+    }
+    csum = tcp_checksum(local_ip, dst_ip, seg, seglen);
+    put16(seg + 16, csum);
+    return ip_send(dst_ip, IP_PROTO_TCP, seg, seglen, dst_mac);
+}
+
+static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
+    tcp_input(src_ip, dst_ip, tcp, len);
+}
+
 
 /* Blocking ICMP echo to `dst_ip` (host order). Returns 1 on reply. */
 u32 net_icmp_ping(u32 dst_ip, u32 timeout_iters) {
@@ -804,12 +1188,10 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
     struct sock *sk;
     u32 ip;
     u16 port;
+    u32 spins;
     sk = sock_from_fh(fh);
     if (!sk) {
         return (u64)(-1);
-    }
-    if (sk->type == SOCK_STREAM) {
-        return (u64)(-1);             /* TCP not implemented yet */
     }
     if (!parse_sockaddr_in(uaddr, ulen, &ip, &port)) {
         return (u64)(-1);
@@ -828,8 +1210,42 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
     }
     sk->peer_ip = ip;
     sk->peer_port = port;
-    sk->connected = 1;
-    return 0;
+    if (sk->type == SOCK_DGRAM) {
+        sk->connected = 1;
+        return 0;
+    }
+    /* TCP active open */
+    if (sk->tcp_state != TCPS_CLOSED && sk->tcp_state != 0) {
+        return (u64)(-1);
+    }
+    sk->iss = 5000 + sk->local_port;
+    sk->snd_nxt = sk->iss;
+    sk->snd_una = sk->iss;
+    sk->tcp_state = TCPS_SYN_SENT;
+    if (!tcp_tx_seg(sk->local_port, ip, port, sk->iss, 0, TCPF_SYN, 0, 0)) {
+        sk->tcp_state = TCPS_CLOSED;
+        return (u64)(-1);
+    }
+    sk->snd_nxt = sk->iss + 1;
+    for (spins = 0; spins < 2000000; spins++) {
+        net_poll();
+        if (sk->tcp_state == TCPS_ESTABLISHED) {
+            sk->connected = 1;
+            return 0;
+        }
+        if (sk->tcp_state == TCPS_CLOSED) {
+            return (u64)(-1);
+        }
+        if ((spins & 255) == 0) {
+            sched_yield();
+        }
+        /* Retransmit SYN occasionally (no timer). */
+        if ((spins & 65535) == 65535) {
+            tcp_tx_seg(sk->local_port, ip, port, sk->iss, 0, TCPF_SYN, 0, 0);
+        }
+    }
+    sk->tcp_state = TCPS_CLOSED;
+    return (u64)(-1);
 }
 
 u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
@@ -845,6 +1261,34 @@ u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
     sk = sock_from_fh(fh);
     if (!sk || as == 0) {
         return (u64)(-1);
+    }
+    if (sk->type == SOCK_STREAM) {
+        u8 tbuf[TCP_MAX_PAYLOAD];
+        if (sk->tcp_state != TCPS_ESTABLISHED && sk->tcp_state != TCPS_CLOSE_WAIT) {
+            return (u64)(-1);
+        }
+        if (len > TCP_MAX_PAYLOAD) {
+            len = TCP_MAX_PAYLOAD;
+        }
+        plen = (u16)len;
+        if (plen > 0) {
+            if (!mem.as_user_range_ok(as, ubuf, plen)) {
+                return (u64)(-1);
+            }
+            {
+                volatile u8 *u = (volatile u8 *)ubuf;
+                for (i = 0; i < plen; i++) {
+                    tbuf[i] = u[i];
+                }
+            }
+        }
+        if (!tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                        sk->snd_nxt, sk->rcv_nxt,
+                        (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen)) {
+            return (u64)(-1);
+        }
+        sk->snd_nxt += plen;
+        return (u64)plen;
     }
     if (sk->type != SOCK_DGRAM) {
         return (u64)(-1);
@@ -905,6 +1349,59 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
     if (!sk || as == 0) {
         return (u64)(-1);
     }
+    if (sk->type == SOCK_STREAM) {
+        u8 tbuf[TCP_MAX_PAYLOAD];
+        u32 got;
+        if (!sk->bound) {
+            return (u64)(-1);
+        }
+        spins = 0;
+        while (sk->s_count == 0) {
+            if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED) {
+                return 0;             /* EOF */
+            }
+            net_poll();
+            if (sk->s_count > 0) {
+                break;
+            }
+            if ((spins & 63) == 0) {
+                sched_sleep((u64)sk);
+            } else {
+                sched_yield();
+            }
+            spins++;
+            if (spins > 4000000) {
+                return (u64)(-1);
+            }
+            if (!sk->used) {
+                return (u64)(-1);
+            }
+        }
+        if (sk->s_count == 0 && sk->peer_fin) {
+            return 0;
+        }
+        if (len > TCP_MAX_PAYLOAD) {
+            len = TCP_MAX_PAYLOAD;
+        }
+        got = stream_pop(sk, tbuf, (u32)len);
+        if (got > 0) {
+            if (!mem.as_user_range_ok(as, ubuf, got)) {
+                return (u64)(-1);
+            }
+            {
+                volatile u8 *u = (volatile u8 *)ubuf;
+                for (i = 0; i < got; i++) {
+                    u[i] = tbuf[i];
+                }
+            }
+        }
+        if (uaddr != 0) {
+            if (!write_sockaddr_in(uaddr, ualen, sk->peer_ip, sk->peer_port)) {
+                return (u64)(-1);
+            }
+        }
+        return (u64)got;
+    }
     if (sk->type != SOCK_DGRAM || !sk->bound) {
         return (u64)(-1);
     }
@@ -955,6 +1452,69 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
     }
     sk->rx_count--;
     return (u64)n;
+}
+
+
+u64 sys_listen(u64 fd, u64 backlog) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    (void)backlog;
+    if (!sk || sk->type != SOCK_STREAM || !sk->bound) {
+        return (u64)(-1);
+    }
+    sk->tcp_state = TCPS_LISTEN;
+    sk->accept_head = 0;
+    sk->accept_tail = 0;
+    sk->accept_count = 0;
+    return 0;
+}
+
+u64 sys_accept(u64 fd, u64 uaddr, u64 ualen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    u32 child_slot;
+    u32 nfd;
+    u32 spins;
+    if (!sk || sk->type != SOCK_STREAM || sk->tcp_state != TCPS_LISTEN) {
+        return (u64)(-1);
+    }
+    spins = 0;
+    while (sk->accept_count == 0) {
+        net_poll();
+        if (sk->accept_count > 0) {
+            break;
+        }
+        if ((spins & 63) == 0) {
+            sched_sleep((u64)sk);
+        } else {
+            sched_yield();
+        }
+        spins++;
+        if (spins > 4000000) {
+            return (u64)(-1);
+        }
+        if (!sk->used) {
+            return (u64)(-1);
+        }
+    }
+    child_slot = accept_dequeue(sk);
+    if (child_slot == 0 || !socks[child_slot].used) {
+        return (u64)(-1);
+    }
+    nfd = sched_fd_alloc();
+    if (nfd == FD_BAD) {
+        socks[child_slot].used = 0;
+        return (u64)(-1);
+    }
+    sched_fd_set(nfd, FH_SOCK_BASE | child_slot);
+    if (uaddr != 0) {
+        if (!write_sockaddr_in(uaddr, ualen,
+                               socks[child_slot].peer_ip,
+                               socks[child_slot].peer_port)) {
+            /* still return the fd; address copy is best-effort */
+        }
+    }
+    return (u64)nfd;
 }
 
 void net_udp_selftest(void) {
@@ -1010,6 +1570,99 @@ void net_udp_selftest(void) {
     socks[b].used = 0;
 }
 
+void net_tcp_selftest(void) {
+    u32 listen_s;
+    u32 client_s;
+    u32 child_s;
+    u8 payload[4];
+    u8 got[4];
+    u32 i;
+    u32 ok;
+
+    if (!net_up) {
+        return;
+    }
+    listen_s = sock_alloc_slot();
+    client_s = sock_alloc_slot();
+    if (listen_s == 0 || client_s == 0) {
+        kprintf("      [FAIL] TCP selftest: no socket slots\n");
+        if (listen_s) socks[listen_s].used = 0;
+        if (client_s) socks[client_s].used = 0;
+        return;
+    }
+    socks[listen_s].type = SOCK_STREAM;
+    socks[listen_s].local_ip = 0;
+    socks[listen_s].local_port = 9;
+    socks[listen_s].bound = 1;
+    socks[listen_s].tcp_state = TCPS_LISTEN;
+
+    socks[client_s].type = SOCK_STREAM;
+    socks[client_s].local_ip = 0;
+    socks[client_s].local_port = alloc_ephemeral();
+    socks[client_s].bound = 1;
+    socks[client_s].peer_ip = local_ip;
+    socks[client_s].peer_port = 9;
+    socks[client_s].iss = 9000;
+    socks[client_s].snd_nxt = 9000;
+    socks[client_s].snd_una = 9000;
+    socks[client_s].tcp_state = TCPS_SYN_SENT;
+    if (!tcp_tx_seg(socks[client_s].local_port, local_ip, 9,
+                    socks[client_s].iss, 0, TCPF_SYN, 0, 0)) {
+        kprintf("      [FAIL] TCP selftest: SYN send\n");
+        socks[listen_s].used = 0;
+        socks[client_s].used = 0;
+        return;
+    }
+    socks[client_s].snd_nxt = socks[client_s].iss + 1;
+
+    if (socks[client_s].tcp_state != TCPS_ESTABLISHED) {
+        kprintf("      [FAIL] TCP selftest: client not established (state=%u)\n",
+                (u64)socks[client_s].tcp_state);
+        socks[listen_s].used = 0;
+        socks[client_s].used = 0;
+        return;
+    }
+    if (socks[listen_s].accept_count == 0) {
+        kprintf("      [FAIL] TCP selftest: no accepted child\n");
+        socks[listen_s].used = 0;
+        socks[client_s].used = 0;
+        return;
+    }
+    child_s = accept_dequeue(&socks[listen_s]);
+    if (child_s == 0 || socks[child_s].tcp_state != TCPS_ESTABLISHED) {
+        kprintf("      [FAIL] TCP selftest: child not established\n");
+        socks[listen_s].used = 0;
+        socks[client_s].used = 0;
+        if (child_s) socks[child_s].used = 0;
+        return;
+    }
+    payload[0] = 'T'; payload[1] = 'C'; payload[2] = 'P'; payload[3] = '!';
+    if (!tcp_tx_seg(socks[client_s].local_port, local_ip,
+                    socks[child_s].local_port,
+                    socks[client_s].snd_nxt, socks[client_s].rcv_nxt,
+                    (u8)(TCPF_PSH | TCPF_ACK), payload, 4)) {
+        kprintf("      [FAIL] TCP selftest: data send\n");
+    } else {
+        socks[client_s].snd_nxt += 4;
+    }
+    ok = (socks[child_s].s_count >= 4);
+    if (ok) {
+        stream_pop(&socks[child_s], got, 4);
+        for (i = 0; i < 4; i++) {
+            if (got[i] != payload[i]) ok = 0;
+        }
+    }
+    if (ok) {
+        kprintf("      [PASS] TCP handshake + stream loopback\n");
+    } else {
+        kprintf("      [FAIL] TCP selftest: payload mismatch (count=%u)\n",
+                (u64)socks[child_s].s_count);
+    }
+    socks[listen_s].used = 0;
+    socks[client_s].used = 0;
+    socks[child_s].used = 0;
+}
+
 void net_selftest(void) {
     u32 ok;
     if (!net_up) {
@@ -1023,6 +1676,7 @@ void net_selftest(void) {
         kprintf("      [FAIL] no ICMP echo reply (is virtio-net + user netdev attached?)\n");
     }
     net_udp_selftest();
+    net_tcp_selftest();
 }
 
 void net_init(void) {
