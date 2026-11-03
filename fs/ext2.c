@@ -582,7 +582,6 @@ static u32 walk_parent(const char *rel, char *last, u32 *last_n) {
 
 /* Strip the "/mnt" prefix; returns pointer into path, or 0 if not under /mnt. */
 static const char *mnt_rel(const char *path) {
-    u32 i = 0;
     if (path == 0 || path[0] != '/') return 0;
     /* accept "/mnt" or "/mnt/..." */
     if (path[1] != 'm' || path[2] != 'n' || path[3] != 't') return 0;
@@ -591,8 +590,31 @@ static const char *mnt_rel(const char *path) {
     return path + 5;
 }
 
+/* Daily-driver UX: /home and /home/... alias the Ext2 volume path "home".
+ * Keeps Ramfs owning /bin /etc /tmp /proc /src /ref /asm while making the
+ * persistent workspace feel like a normal Unix home root. */
+static const char *home_rel(const char *path) {
+    if (path == 0 || path[0] != '/') return 0;
+    if (path[1] != 'h' || path[2] != 'o' || path[3] != 'm' || path[4] != 'e') {
+        return 0;
+    }
+    if (path[5] == 0) {
+        return path + 1;                 /* "home" */
+    }
+    if (path[5] != '/') return 0;
+    return path + 1;                     /* "home/..." */
+}
+
+/* Volume-relative path for any Ext2-owned absolute path, or 0. */
+static const char *persist_rel(const char *path) {
+    const char *r = mnt_rel(path);
+    if (r) return r;
+    if (!sb.mounted) return 0;
+    return home_rel(path);
+}
+
 u32 ext2_is_mnt_path(const char *path) {
-    return mnt_rel(path) != 0;
+    return persist_rel(path) != 0;
 }
 
 u32 ext2_mounted(void) {
@@ -679,7 +701,7 @@ u32 ext2_mount(void) {
 
     sb.mounted = 1;
     bg0 = sb.bg_block;
-    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u bg=%u /mnt ready\n",
+    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u bg=%u /mnt+/home ready\n",
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)bg0);
     return 1;
@@ -698,7 +720,7 @@ u32 ext2_open(const char *path, u32 flags) {
     u32 want_trunc = (flags & O_TRUNC) != 0;
 
     if (!sb.mounted) return 0;
-    rel = mnt_rel(path);
+    rel = persist_rel(path);
     if (rel == 0) return 0;
 
     /* Open the mount root itself. */
@@ -938,7 +960,7 @@ u32 ext2_mkdir(const char *path) {
     u32 k;
     u32 phys;
     if (!sb.mounted) return 0;
-    rel = mnt_rel(path);
+    rel = persist_rel(path);
     if (rel == 0 || rel[0] == 0) return 0;
     if (walk_rel(rel, 0) != 0) return 0;       /* exists */
     parent = walk_parent(rel, last, &last_n);
@@ -1014,7 +1036,7 @@ u32 ext2_unlink(const char *path) {
     u32 mode;
     u32 b;
     if (!sb.mounted) return 0;
-    rel = mnt_rel(path);
+    rel = persist_rel(path);
     if (rel == 0 || rel[0] == 0) return 0;
     parent = walk_parent(rel, last, &last_n);
     if (parent == 0 || last_n == 0) return 0;
@@ -1042,7 +1064,7 @@ u32 ext2_rmdir(const char *path) {
     u32 mode;
     u32 phys;
     if (!sb.mounted) return 0;
-    rel = mnt_rel(path);
+    rel = persist_rel(path);
     if (rel == 0 || rel[0] == 0) return 0;
     parent = walk_parent(rel, last, &last_n);
     if (parent == 0 || last_n == 0) return 0;

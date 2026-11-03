@@ -185,8 +185,12 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         u_exit(code);
     }
     if (eq(tokens[0], "cd")) {
-        const char *target = tokens[1] != 0 ? tokens[1] : "/";
+        const char *target = tokens[1] != 0 ? tokens[1] : "/home";
         if (u_chdir(target) < 0) {
+            /* Fall back to / when Ext2 home is offline. */
+            if (tokens[1] == 0 && u_chdir("/") == 0) {
+                return 0;
+            }
             printf("sh: cd: %s: No such file or directory\n", target);
             return 1;
         }
@@ -456,7 +460,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - help | sync | clear | pipes/redirects; persist under /mnt/home");
+    puts("fakeos shell - builtins, pipes/redirects; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -465,7 +469,15 @@ int main(int argc, char **argv) {
         int nt = 0;
         long n;
 
-        u_write(1, "fakeos:~$ ", 10);
+        {
+            char cwd[64];
+            if (u_getcwd(cwd, sizeof(cwd)) != -1
+                && (eq(cwd, "/home") || eq(cwd, "/mnt/home"))) {
+                u_write(1, "fakeos:~$ ", 10);
+            } else {
+                u_write(1, "fakeos:$ ", 9);
+            }
+        }
 
         n = u_read(0, line, sizeof(line) - 1);
         if (n <= 0) {

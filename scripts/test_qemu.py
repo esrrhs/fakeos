@@ -282,7 +282,7 @@ def main():
         "[PASS] Exception #UD",
         "[PASS] Exception #PF",
         "[PASS] APIC Timer Calibration",
-        "[PASS] I/O APIC IRQ4 (COM1) routed to vector 36, UART RDA armed",
+        "[PASS] I/O APIC IRQ1 (kbd) -> 33, IRQ4 (COM1) -> 36 armed",
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
         "[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB",
         "Multiboot Physical Memory Map",
@@ -335,7 +335,7 @@ def main():
         "[U][PASS] huge write length rejected",
         "[U][PASS] orphan reparented to pid 1",
         # interactive shell session
-        "fakeos shell - builtins",
+        "fakeos shell - builtins, pipes/redirects; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -353,7 +353,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: VFS/Ramfs/shell + VirtIO-blk/Ext2 /mnt persistence online!",
+        "[SUCCESS] fakeos: VFS/Ramfs/shell + Ext2 /home persist + VirtIO-net online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

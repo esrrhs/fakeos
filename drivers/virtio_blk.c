@@ -16,13 +16,15 @@ extern void pci_enable_busmaster(u8 bus, u8 slot, u8 func);
 extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
 extern u16 pci_read16(u8 bus, u8 slot, u8 func, u8 offset);
 extern u32 pci_read32(u8 bus, u8 slot, u8 func, u8 offset);
+extern void cpu_pause(void);
 
 /* ---------------------------------------------------------------------------
- * VirtIO-blk legacy (transitional) PCI driver - polling only.
+ * VirtIO-blk legacy (transitional) PCI driver - polling completion.
  *
  * Target: QEMU `-device virtio-blk-pci,disable-modern=on,drive=...` which
- * exposes the legacy I/O BAR0 register set. No I/O APIC / MSI yet: every
- * request is submitted and then the used ring is polled.
+ * exposes the legacy I/O BAR0 register set. Completion is still polled (no
+ * blk IRQ yet); requests may cover multiple 512-byte sectors so Ext2 block
+ * writes do not thrash the used ring and hit the old per-sector timeout.
  *
  * Guest-physical DMA buffers come from the buddy allocator and are accessed
  * through the HHDM. Sector size is fixed at 512 bytes (VirtIO-blk default).
@@ -68,9 +70,13 @@ enum {
      * read-only so the guest must size the vring to match exactly. */
     QUEUE_MAX           = 1024,
     /* pmm_alloc_pages(order) returns 2^order contiguous pages.
-     * order 4 = 16 pages = 64 KiB: queue (~28 KiB at 1024 descs) + req page. */
+     * order 4 = 16 pages = 64 KiB: queue (~28 KiB at 1024 descs) + req/bounce. */
     ARENA_ORDER         = 4,
-    ARENA_BYTES         = 65536
+    ARENA_BYTES         = 65536,
+    /* One Ext2 block is at most 4096 bytes = 8 sectors; bounce that size. */
+    BOUNCE_SECTORS      = 8,
+    BOUNCE_BYTES        = 4096,
+    POLL_SPINS_MAX      = 20000000
 };
 
 /* Virtqueue descriptor (16 bytes) - laid out manually as bytes to avoid any
@@ -91,7 +97,8 @@ struct virtio_blk {
     u64 desc_phys;
     u64 avail_phys;
     u64 used_phys;
-    u64 req_phys;              /* request header + status (+ data bounce) */
+    u64 req_phys;              /* request header + status byte */
+    u64 bounce_phys;           /* multi-sector data bounce (BOUNCE_BYTES) */
     u16 free_head;
     u16 last_used_idx;
 };
@@ -203,8 +210,13 @@ static u32 setup_queue(void) {
     vb.avail_phys = arena + desc_sz;
     vb.used_phys = arena + used_off;
     vb.req_phys = arena + used_off + align_up(used_sz, 4096);
-    kprintf("[VIRTIO] vring desc=%u avail=%u used=%u req=%u\n",
-            vb.desc_phys, vb.avail_phys, vb.used_phys, vb.req_phys);
+    vb.bounce_phys = vb.req_phys + 4096;   /* dedicated page after hdr/status */
+    if (vb.bounce_phys + BOUNCE_BYTES > arena + ARENA_BYTES) {
+        kprintf("[VIRTIO] arena too small for bounce\n");
+        return 0;
+    }
+    kprintf("[VIRTIO] vring desc=%u avail=%u used=%u req=%u bounce=%u\n",
+            vb.desc_phys, vb.avail_phys, vb.used_phys, vb.req_phys, vb.bounce_phys);
     (void)total;
 
     /* Build a free list of descriptors 0..qsz-1. */
@@ -303,7 +315,7 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
 
     iow16(REG_QUEUE_NOTIFY, 0);
 
-    /* Poll the used ring. */
+    /* Poll the used ring; pause to avoid starving the host under TCG. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vb.used_phys + 2);
@@ -311,7 +323,10 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
             break;
         }
         spins++;
-        if (spins > 2000000) {
+        if ((spins & 63) == 0) {
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS_MAX) {
             kprintf("[VIRTIO] blk request timeout (type=%u sector=%u)\n",
                     (u64)type, sector);
             free_desc_chain(d0);
@@ -339,48 +354,62 @@ u64 virtio_blk_capacity(void) {
     return vb.capacity;
 }
 
-/* Read `count` 512-byte sectors starting at `sector` into kernel buffer. */
+/* Read `count` 512-byte sectors starting at `sector` into kernel buffer.
+ * Issues multi-sector requests up to BOUNCE_SECTORS to keep large Ext2
+ * sequential I/O inside one used-ring completion. */
 u32 virtio_blk_read(u64 sector, void *kbuf, u32 count) {
-    u32 i;
     u8 *dst = (u8 *)kbuf;
+    u32 done = 0;
     if (!vb.present || count == 0) {
         return 0;
     }
     if (sector + (u64)count > vb.capacity) {
         return 0;
     }
-    for (i = 0; i < count; i++) {
-        u64 bounce = vb.req_phys + 32;     /* after hdr+status in req page */
+    while (done < count) {
+        u32 n = count - done;
         u32 b;
-        if (!blk_request(VIRTIO_BLK_T_IN, sector + (u64)i, bounce, SECTOR_SIZE)) {
+        u32 bytes;
+        if (n > BOUNCE_SECTORS) {
+            n = BOUNCE_SECTORS;
+        }
+        bytes = n * SECTOR_SIZE;
+        if (!blk_request(VIRTIO_BLK_T_IN, sector + (u64)done, vb.bounce_phys, bytes)) {
             return 0;
         }
-        for (b = 0; b < SECTOR_SIZE; b++) {
-            dst[(u64)i * SECTOR_SIZE + b] = hhdm8(bounce)[b];
+        for (b = 0; b < bytes; b++) {
+            dst[(u64)done * SECTOR_SIZE + b] = hhdm8(vb.bounce_phys)[b];
         }
+        done += n;
     }
     return 1;
 }
 
-/* Write `count` 512-byte sectors from kernel buffer. */
+/* Write `count` 512-byte sectors from kernel buffer (multi-sector chunks). */
 u32 virtio_blk_write(u64 sector, const void *kbuf, u32 count) {
-    u32 i;
     const u8 *src = (const u8 *)kbuf;
+    u32 done = 0;
     if (!vb.present || count == 0) {
         return 0;
     }
     if (sector + (u64)count > vb.capacity) {
         return 0;
     }
-    for (i = 0; i < count; i++) {
-        u64 bounce = vb.req_phys + 32;
+    while (done < count) {
+        u32 n = count - done;
         u32 b;
-        for (b = 0; b < SECTOR_SIZE; b++) {
-            hhdm8(bounce)[b] = src[(u64)i * SECTOR_SIZE + b];
+        u32 bytes;
+        if (n > BOUNCE_SECTORS) {
+            n = BOUNCE_SECTORS;
         }
-        if (!blk_request(VIRTIO_BLK_T_OUT, sector + (u64)i, bounce, SECTOR_SIZE)) {
+        bytes = n * SECTOR_SIZE;
+        for (b = 0; b < bytes; b++) {
+            hhdm8(vb.bounce_phys)[b] = src[(u64)done * SECTOR_SIZE + b];
+        }
+        if (!blk_request(VIRTIO_BLK_T_OUT, sector + (u64)done, vb.bounce_phys, bytes)) {
             return 0;
         }
+        done += n;
     }
     return 1;
 }

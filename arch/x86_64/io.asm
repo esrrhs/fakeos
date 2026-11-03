@@ -15,6 +15,7 @@ global io_wait
 global cpu_halt
 global cpu_cli
 global cpu_sti
+global cpu_pause
 
 section .text
 
@@ -84,6 +85,11 @@ cpu_cli:
 ; void cpu_sti(void)
 cpu_sti:
     sti
+    ret
+
+; void cpu_pause(void)
+cpu_pause:
+    pause
     ret
 
 section .note.GNU-stack noalloc noexec nowrite progbits

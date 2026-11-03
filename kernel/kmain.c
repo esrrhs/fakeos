@@ -43,7 +43,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (Milestone 6/7: Ext2 /mnt + VirtIO-net ICMP)\n");
+    kprintf(" Welcome to fakeos! (M6/7: Ext2 /home persist + VirtIO-net)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -141,8 +141,12 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     drivers.blk_init();
     if (fs.ext2_mount()) {
         fs.ext2_selftest();
-        /* Persistent workspace on the Ext2 volume. */
+        /* Persistent workspace; /home is an Ext2 path alias for /mnt/home. */
         fs.ext2_mkdir("/mnt/home");
+        /* Ramfs markers so ls / shows mount points while open(/home) hits Ext2. */
+        fs.fs_mkdir("/mnt");
+        fs.fs_mkdir("/home");
+        kprintf("[EXT2] persist root UX: /home -> Ext2 volume (also /mnt/home)\n");
     }
 
     /* Milestone 7 scaffolding: VirtIO-net + ARP/IPv4/ICMP (QEMU user net). */
@@ -177,7 +181,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: VFS/Ramfs/shell + VirtIO-blk/Ext2 /mnt persistence online!\n");
+    kprintf(" [SUCCESS] fakeos: VFS/Ramfs/shell + Ext2 /home persist + VirtIO-net online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");

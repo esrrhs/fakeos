@@ -154,9 +154,10 @@ flowchart TD
 - [x] **pipe + shell `|`**：`pipe()`（Linux nr 22）+ 环形缓冲；读写阻塞走 `sched_sleep`/`sched_wakeup`；shell 支持多段管道（builtin 与外部命令）。
 - [x] **VirtIO-net + L2/L3/ICMP**：遗留/过渡 `virtio-net-pci,disable-modern=on`；静态 `10.0.2.15/24`；ARP + IPv4 + ICMP echo 请求/应答；启动自测 ping QEMU user 网关 `10.0.2.2`。
 - [x] **用户态 ping**：`sys_ping`（nr 500）+ `/bin/ping`；完整 BSD sockets 仍待做。
-- [x] **shell 抛光**：`sync`/`clear` builtin；`/bin/touch` `/bin/mv`；启动进入 `/mnt/home`（Ext2 持久工作区）。
+- [x] **shell 抛光**：`sync`/`clear` builtin；`/bin/touch` `/bin/mv`；启动进入 `/home`（Ext2 持久工作区，`/home` 与 `/mnt/home` 同卷）。
 - [x] **最小套接字 API**：`socket`/`bind`/`connect`/`sendto`/`recvfrom`（UDP 可用；TCP 仅 scaffold）；`/bin/udptest` 环回自测与 `/bin/nc -u`。
 - [x] **PS/2 键盘 IRQ1**：i8042 + set-1 扫描码；I/O APIC IRQ1→vector 33；`tty_push_byte` 与串口共享行规程，回显至 UART+VGA。
+- [x] **Ext2 persist-root UX**：`/home` 路径别名到 Ext2 卷；Ramfs 保留 `/bin` `/etc` `/tmp` 等；VirtIO-blk 多扇区请求缓解大块顺序写超时。
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。
 

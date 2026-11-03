@@ -321,9 +321,11 @@ int main(int argc, char **argv) {
     wrap_len_test();
     orphan_test();
 
-    /* Prefer persistent Ext2 home when the disk is mounted. */
+    /* Prefer persistent Ext2 home (/home aliases /mnt/home) when mounted. */
     u_mkdir("/mnt/home");
-    if (u_chdir("/mnt/home") == 0) {
+    if (u_chdir("/home") == 0) {
+        puts("[U] cwd -> /home (persistent Ext2)");
+    } else if (u_chdir("/mnt/home") == 0) {
         puts("[U] cwd -> /mnt/home (persistent Ext2)");
     }
 

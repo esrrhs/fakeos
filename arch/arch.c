@@ -13,3 +13,4 @@ extern void io_wait(void);
 extern void cpu_halt(void);
 extern void cpu_cli(void);
 extern void cpu_sti(void);
+extern void cpu_pause(void);
