@@ -95,6 +95,7 @@ struct virtio_blk {
 
 static struct virtio_blk vb;
 
+
 static volatile u8 *hhdm8(u64 phys) {
     return (volatile u8 *)(HHDM_BASE + phys);
 }
@@ -179,7 +180,9 @@ static u32 setup_queue(void) {
     used_sz = 6 + (u64)qsz * 8;            /* flags + idx + used_elem[qsz] */
     total = used_off + used_sz;
 
-    /* 8 contiguous pages (32 KiB): queue (~12 KiB at 256 descs) + req page. */
+    /* 8 contiguous pages (32 KiB): queue (~12 KiB at 256 descs) + req page.
+     * Queue DMA path still times out under QEMU 10 legacy virtio-blk; ATA
+     * remains the default working backend via blk_init(). */
     arena = mem.pmm_alloc_pages(3);
     if (arena == 0) {
         return 0;
