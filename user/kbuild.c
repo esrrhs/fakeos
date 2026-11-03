@@ -80,6 +80,10 @@ static const struct mod_entry modules[] = {
     { "arch",   "lapic" },
     { "drivers", "uart" },
     { "drivers", "vga" },
+    { "drivers", "pci" },
+    { "drivers", "virtio_blk" },
+    { "drivers", "ata" },
+    { "drivers", "blk" },
     { "kernel",  "kprintf" },
     { "kernel",  "isr" },
     { "mem",    "pmm" },
@@ -87,6 +91,7 @@ static const struct mod_entry modules[] = {
     { "mem",    "slab" },
     { "mem",    "as" },
     { "fs",     "ramfs" },
+    { "fs",     "ext2" },
     { "kernel",  "memtest" },
     { "kernel",  "sched" },
     { "kernel",  "proctest" },
@@ -311,7 +316,7 @@ int main(void) {
     /* Final link. execve passes at most 8 argv slots, so the
      * object list goes through an @response file:
      *   ldfake -o /tmp/fakeos-new @/tmp/ldfake.args
-     * boot.o leads (low-address multiboot entry); then the 26 C
+     * boot.o leads (low-address multiboot entry); then the 31 C
      * objects, the other 4 nasm objects, and the userblob + empty
      * m5-blob stub. */
     {

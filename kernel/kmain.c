@@ -39,7 +39,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (Milestone 4: VFS, Ramfs, POSIX syscalls, shell)\n");
+    kprintf(" Welcome to fakeos! (Milestone 6: Block device + Ext2 persistent /mnt)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -124,6 +124,13 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     rootfs_publish();
     vfs_selftest();
 
+    // Milestone 6: PCI VirtIO-blk (legacy/transitional) + Ext2 at /mnt.
+    // Graceful when QEMU was started without a disk: boot still succeeds.
+    drivers.blk_init();
+    if (fs.ext2_mount()) {
+        fs.ext2_selftest();
+    }
+
     // Kernel threads, round-robin preemptive scheduling and spinlocks; then
     // per-process address spaces with VMA demand paging and COW forks.
     sched_selftest();
@@ -152,7 +159,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: VFS, Ramfs, POSIX syscalls, TTY input, libc and interactive shell online!\n");
+    kprintf(" [SUCCESS] fakeos: VFS/Ramfs/shell + VirtIO-blk/Ext2 /mnt persistence online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
@@ -174,6 +181,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - SYSCALL/SYSRET (read/write/open/execve/wait4/mmap/...): OK\n");
     kprintf("           - brk heap + anonymous mmap, getdents, chdir/getcwd: OK\n");
     kprintf("           - Canonical serial TTY stdin + libc + interactive /bin/sh: OK\n");
+    kprintf("           - Block device (VirtIO/ATA) + Ext2 persistent /mnt: OK\n");
     kprintf("================================================================================\n");
     kprintf(" System idle. CPU halted.\n");
 }

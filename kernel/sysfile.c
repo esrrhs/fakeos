@@ -44,6 +44,7 @@ extern void sched_cwd_set(const char *kpath);
 /* kernel/tty.c (canonical serial input) */
 extern u64 tty_console_read(u64 ubuf, u64 len);
 
+
 static u32 kstr_len(const char *s) {
     u32 n = 0;
     while (s[n] != 0) {
@@ -194,13 +195,24 @@ u64 sys_open(u64 upath, u64 flags, u64 mode) {
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
     }
-    fh = fs.fs_file_open(path, (u32)flags);
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted()) {
+            return (u64)(-1);
+        }
+        fh = fs.ext2_open(path, (u32)flags);
+    } else {
+        fh = fs.fs_file_open(path, (u32)flags);
+    }
     if (fh == 0) {
         return (u64)(-1);
     }
     fd = sched_fd_alloc();
     if (fd == FD_BAD) {
-        fs.fs_close(fh);
+        if (fs.ext2_fh_is(fh)) {
+            fs.ext2_close(fh);
+        } else {
+            fs.fs_close(fh);
+        }
         return (u64)(-1);
     }
     sched_fd_set(fd, fh);
@@ -213,7 +225,11 @@ u64 sys_close(u64 fd) {
     if (fh == FD_BAD) {
         return (u64)(-1);
     }
-    ok = fs.fs_close(fh);
+    if (fs.ext2_fh_is(fh)) {
+        ok = fs.ext2_close(fh);
+    } else {
+        ok = fs.fs_close(fh);
+    }
     sched_fd_set((u32)fd, FD_BAD);
     return ok ? 0 : (u64)(-1);
 }
@@ -222,6 +238,9 @@ u64 sys_lseek(u64 fd, u64 off, u64 whence) {
     u32 fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD) {
         return (u64)(-1);
+    }
+    if (fs.ext2_fh_is(fh)) {
+        return fs.ext2_lseek(fh, off, (u32)whence);
     }
     return fs.fs_lseek_h(fh, off, (u32)whence);
 }
@@ -238,10 +257,10 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
     }
 
     /* fd 0: serial console with canonical line discipline. */
-    if (fs.fs_file_is_console(fh)) {
+    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
         return tty_console_read(buf, len);
     }
-    if (fs.fs_file_is_dir(fh)) {
+    if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
         return (u64)(-1);             /* directories use getdents64 */
     }
 
@@ -252,7 +271,7 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
         if (want > IO_CHUNK) {
             want = IO_CHUNK;
         }
-        n = fs.fs_read_h(fh, kbuf, want);
+        n = fs.ext2_fh_is(fh) ? fs.ext2_read(fh, kbuf, want) : fs.fs_read_h(fh, kbuf, want);
         if (n == (u64)(-1)) {
             return done != 0 ? done : (u64)(-1);
         }
@@ -286,7 +305,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
 
     /* fd 1/2: serial console sink. Validate the whole user range first, then
      * stream byte by byte (uart_putc performs the \n -> \r\n translation). */
-    if (fs.fs_file_is_console(fh)) {
+    if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
         volatile char *p;
         u64 i;
         if (!mem.as_user_range_ok(as, buf, len)) {
@@ -298,7 +317,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
         }
         return len;
     }
-    if (fs.fs_file_is_dir(fh)) {
+    if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
         return (u64)(-1);
     }
 
@@ -318,7 +337,7 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
                 kbuf[i] = u[i];
             }
         }
-        n = fs.fs_write_h(fh, kbuf, want);
+        n = fs.ext2_fh_is(fh) ? fs.ext2_write(fh, kbuf, want) : fs.fs_write_h(fh, kbuf, want);
         if (n == (u64)(-1)) {
             return done != 0 ? done : (u64)(-1);
         }
@@ -339,6 +358,9 @@ u64 sys_mkdir(u64 upath) {
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
     }
+    if (fs.ext2_is_mnt_path(path)) {
+        return fs.ext2_mounted() && fs.ext2_mkdir(path) ? 0 : (u64)(-1);
+    }
     return fs.fs_mkdir(path) != 0 ? 0 : (u64)(-1);
 }
 
@@ -346,6 +368,9 @@ u64 sys_unlink(u64 upath) {
     char path[PATH_KMAX];
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        return fs.ext2_mounted() && fs.ext2_unlink(path) ? 0 : (u64)(-1);
     }
     return fs.fs_unlink(path) ? 0 : (u64)(-1);
 }
@@ -356,9 +381,22 @@ u64 sys_chdir(u64 upath) {
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
     }
-    ino = fs.fs_lookup(path);
-    if (fs.fs_ino_kind(ino) != INO_DIR_K) {
-        return (u64)(-1);
+    if (fs.ext2_is_mnt_path(path)) {
+        u32 fh;
+        if (!fs.ext2_mounted()) {
+            return (u64)(-1);
+        }
+        fh = fs.ext2_open(path, O_RDONLY);
+        if (fh == 0 || !fs.ext2_file_is_dir(fh)) {
+            if (fh) fs.ext2_close(fh);
+            return (u64)(-1);
+        }
+        fs.ext2_close(fh);
+    } else {
+        ino = fs.fs_lookup(path);
+        if (fs.fs_ino_kind(ino) != INO_DIR_K) {
+            return (u64)(-1);
+        }
     }
     if (kstr_len(path) >= CWD_LEN) {
         return (u64)(-1);            /* would silently truncate the cwd */
@@ -397,7 +435,7 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     if (fh == FD_BAD || as == 0) {
         return (u64)(-1);
     }
-    if (!fs.fs_file_is_dir(fh)) {
+    if (fs.ext2_fh_is(fh) ? !fs.ext2_file_is_dir(fh) : !fs.fs_file_is_dir(fh)) {
         return (u64)(-1);
     }
     while (done < len) {
@@ -407,7 +445,8 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
         if (want > DENT_CHUNK) {
             want = DENT_CHUNK;
         }
-        n = fs.fs_getdents_h(fh, kbuf, want);
+        n = fs.ext2_fh_is(fh) ? fs.ext2_getdents(fh, kbuf, want)
+                           : fs.fs_getdents_h(fh, kbuf, want);
         if (n == (u64)(-1)) {
             return done != 0 ? done : (u64)(-1);
         }

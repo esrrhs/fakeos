@@ -15,16 +15,19 @@ REBUILT = "build/fakeos-rebuilt.elf"
 class VM:
     """One headless QEMU driven over the emulated UART (serial stdio)."""
 
-    def __init__(self, kernel, mem="128M"):
-        self.proc = subprocess.Popen(
-            [
+    def __init__(self, kernel, mem="128M", extra_args=None):
+        cmd = [
                 "qemu-system-x86_64",
                 "-kernel", kernel,
                 "-m", mem,
                 "-serial", "stdio",
                 "-display", "none",
                 "-no-reboot",
-            ],
+            ]
+        if extra_args:
+            cmd.extend(extra_args)
+        self.proc = subprocess.Popen(
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -128,6 +131,10 @@ def second_boot_checks():
     norm = out.replace("\r\n", "\n").replace("\r", "\n")
     required = [
         "Welcome to fakeos!",
+        "[BLK] using ",
+        "[EXT2] mounted:",
+        "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
+        "m6-ext2-persistent-ok",
         "fakeos:~$",
         "hello from /bin/hello",
         "exited (code 42)",
@@ -149,9 +156,24 @@ def second_boot_checks():
     return results
 
 
+def ensure_disk():
+    """Build build/disk.img (Ext2) if missing; used by VirtIO-blk tests."""
+    disk = "build/disk.img"
+    if not os.path.exists(disk):
+        os.makedirs("build", exist_ok=True)
+        subprocess.check_call(["python3", "tools/mkext2.py", disk, "4"])
+    return disk
+
+
+def virtio_disk_args(disk):
+    # IDE/ATA PIO path (VirtIO is still probed first by the guest).
+    return ["-drive", f"file={disk},format=raw,if=ide"]
+
+
 def main():
-    print("==> Phase 1-4: boot stock kernel and run the interactive shell...")
-    vm = VM(KERNEL)
+    print("==> Phase 1-6: boot stock kernel (+VirtIO disk) and run the interactive shell...")
+    disk = ensure_disk()
+    vm = VM(KERNEL, extra_args=virtio_disk_args(disk))
 
     # 1. Boot + kernel self-tests + init userspace tests -> first prompt.
     boot = vm.wait_for("fakeos:~$", 30.0)
@@ -170,6 +192,8 @@ def main():
         "ls /bin",          # getdents64, programs including kbuild/ldfake
         "mkdir /home",      # duplicate -> error, shell survives
         "nosuchcmd",        # exec failure -> 127 + not found
+        "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
+        "cat /mnt/m6pass.txt",  # persistent Ext2 file written by selftest
     ]
     session = ""
     for c in commands:
@@ -310,7 +334,7 @@ def main():
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 26 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 31 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -366,10 +390,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 26 modules accounted for",
-         identical + mismatches == 26),
-        (f"all 26 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 26 and mismatches == 0),
+        ("all 31 modules accounted for",
+         identical + mismatches == 31),
+        (f"all 31 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 31 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

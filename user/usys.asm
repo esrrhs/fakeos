@@ -22,6 +22,7 @@ global u_chdir
 global u_mkdir
 global u_getcwd
 global u_getdents
+global u_unlink
 
 section .text
 
@@ -90,6 +91,9 @@ USYSC1 u_getcwd, 79
 
 ; long u_getdents(long fd, void *buf, unsigned long len)
 USYSC1 u_getdents, 217
+
+; long u_unlink(const char *path)
+USYSC1 u_unlink, 87
 
 ; void u_exit(long code) - does not return
 align 16

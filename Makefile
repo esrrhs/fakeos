@@ -45,6 +45,9 @@ FCC_HAS_TARGET := $(shell '$(FCC)' 2>&1 | grep -q -- '--target' && echo yes)
 FCCFLAGS  := -O0 $(if $(filter yes,$(FCC_HAS_TARGET)),--target=x86_64-linux)
 LDFLAGS   := -T boot/linker.ld -n --gc-sections
 QEMUFLAGS := -m 128M -serial stdio
+DISK_IMG  := $(BUILD_DIR)/disk.img
+# Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
+QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
 
 # Target ELF files
 KERNEL_64  := $(BUILD_DIR)/fakeos64.elf
@@ -64,6 +67,10 @@ OBJS := \
 	$(BUILD_DIR)/lapic.o \
 	$(BUILD_DIR)/uart.o \
 	$(BUILD_DIR)/vga.o \
+	$(BUILD_DIR)/pci.o \
+	$(BUILD_DIR)/virtio_blk.o \
+	$(BUILD_DIR)/ata.o \
+	$(BUILD_DIR)/blk.o \
 	$(BUILD_DIR)/kprintf.o \
 	$(BUILD_DIR)/isr.o \
 	$(BUILD_DIR)/pmm.o \
@@ -71,6 +78,7 @@ OBJS := \
 	$(BUILD_DIR)/slab.o \
 	$(BUILD_DIR)/as.o \
 	$(BUILD_DIR)/ramfs.o \
+	$(BUILD_DIR)/ext2.o \
 	$(BUILD_DIR)/memtest.o \
 	$(BUILD_DIR)/sched.o \
 	$(BUILD_DIR)/proctest.o \
@@ -86,7 +94,7 @@ OBJS := \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
 
-.PHONY: all build run qemu qemu-gui clean help
+.PHONY: all build run qemu qemu-gui qemu-disk disk clean help
 
 all: build
 
@@ -134,7 +142,7 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
-USER_PROGS := init sh hello cat ls kbuild ldfake dumpbin
+USER_PROGS := init sh hello cat ls cp rm kbuild ldfake dumpbin
 USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
@@ -224,6 +232,26 @@ $(BUILD_DIR)/vga.o: drivers/vga.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/pci.o: drivers/pci.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/virtio_blk.o: drivers/virtio_blk.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/ata.o: drivers/ata.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/blk.o: drivers/blk.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/kprintf.o: kernel/kprintf.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -255,6 +283,11 @@ $(BUILD_DIR)/as.o: mem/as.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/ramfs.o: fs/ramfs.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/ext2.o: fs/ext2.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
@@ -332,6 +365,18 @@ qemu run: build
 qemu-gui: build
 	@echo "Launching fakeos in QEMU graphical window..."
 	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS)
+
+# Minimal Ext2 disk image for VirtIO-blk persistence tests.
+disk: $(DISK_IMG)
+$(DISK_IMG): tools/mkext2.py
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [MKEXT2] $@"
+	@python3 tools/mkext2.py $@ 4
+
+# Headless QEMU with a persistent Ext2 disk at /mnt
+qemu-disk: build $(DISK_IMG)
+	@echo "Launching fakeos + VirtIO-blk disk (Ctrl-A X to exit)..."
+	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK) -display none -no-reboot
 
 clean:
 	@echo "Cleaning build artifacts..."

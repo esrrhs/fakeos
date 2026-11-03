@@ -480,7 +480,12 @@ void sched_fd_close_all(void) {
     u32 i;
     for (i = 0; i < FD_MAX; i++) {
         if (threads[current].fd[i] != FD_EMPTY) {
-            fs.fs_close(threads[current].fd[i]);
+            u32 fh = threads[current].fd[i];
+            if (fs.ext2_fh_is(fh)) {
+                fs.ext2_close(fh);
+            } else {
+                fs.fs_close(fh);
+            }
             threads[current].fd[i] = FD_EMPTY;
         }
     }
