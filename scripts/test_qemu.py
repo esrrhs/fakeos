@@ -139,6 +139,7 @@ def second_boot_checks(disk):
         "[VNET] ready:",
         "[NET] up: ip=10.0.2.15/24",
         "[PASS] ICMP echo reply from gateway",
+        "[KBD] PS/2 keyboard armed (IRQ1)",
         "fakeos:~$",
         "hello from /bin/hello",
         "exited (code 42)",
@@ -349,7 +350,7 @@ def main():
         "[kbuild] ping compile+run OK",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 35 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 36 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /tmp/fakeos-new",
         "[kbuild] kernel image linked: /tmp/fakeos-new",
@@ -406,10 +407,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 35 modules accounted for",
-         identical + mismatches == 35),
-        (f"all 35 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 35 and mismatches == 0),
+        ("all 36 modules accounted for",
+         identical + mismatches == 36),
+        (f"all 36 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 36 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

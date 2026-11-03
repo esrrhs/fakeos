@@ -10,20 +10,28 @@ typedef types.uint64_t u64;
  * Serial TTY: canonical line discipline over COM1.
  *
  * read(0) blocks until a full line has been received, echoing input as it
- * arrives. With I/O APIC IRQ4 + UART RDA interrupts the RX path sleeps on a
- * wait channel; uart_irq drains into the UART ring and tty_on_uart_byte wakes
- * sleepers. Empty-ring checks run under CLI with sched_sleep_cli so a byte
- * that arrives between poll and sleep cannot be lost.
+ * arrives. UART (IRQ4) and PS/2 keyboard (IRQ1) both feed this path: UART
+ * via its own ring, keyboard via tty_push_byte. Sleepers wake on either
+ * source; empty checks use sched_sleep_cli so a byte cannot be lost between
+ * poll and sleep. Echo goes to UART and VGA.
  * ------------------------------------------------------------------------- */
 
 enum {
-    LINE_MAX = 256
+    LINE_MAX = 256,
+    IN_CAP = 512
 };
 
 static char tty_buf[LINE_MAX];
 static u32 tty_editing;
 static u32 tty_line_len;
 static u32 tty_pos;
+
+/* Shared input ring for PS/2 (and any non-UART source). UART still has its
+ * own ring in drivers/uart.c; both feed tty_getc_block. */
+static char tty_in[IN_CAP];
+static u32 tty_in_head;
+static u32 tty_in_tail;
+static u32 tty_in_count;
 
 extern u64 sched_current_as_h(void);
 extern void sched_sleep_cli(u64 chan);
@@ -37,6 +45,34 @@ void tty_on_uart_byte(void) {
     sched_wakeup((u64)&tty_wait_token);
 }
 
+/* Called from kbd_irq (interrupts masked). */
+void tty_push_byte(char c) {
+    if (tty_in_count >= IN_CAP) {
+        return;
+    }
+    tty_in[tty_in_tail] = c;
+    tty_in_tail++;
+    if (tty_in_tail >= IN_CAP) {
+        tty_in_tail = 0;
+    }
+    tty_in_count++;
+    sched_wakeup((u64)&tty_wait_token);
+}
+
+static int tty_in_pop(void) {
+    char c;
+    if (tty_in_count == 0) {
+        return -1;
+    }
+    c = tty_in[tty_in_head];
+    tty_in_head++;
+    if (tty_in_head >= IN_CAP) {
+        tty_in_head = 0;
+    }
+    tty_in_count--;
+    return (int)(unsigned char)c;
+}
+
 static int tty_getc_block(void) {
     int c;
     /* Syscall entry clears IF; allow device IRQs, then close the race under
@@ -44,7 +80,10 @@ static int tty_getc_block(void) {
     cpu_sti();
     cpu_cli();
     for (;;) {
-        c = drivers.uart_getc_nonblock();
+        c = tty_in_pop();
+        if (c < 0) {
+            c = drivers.uart_getc_nonblock();
+        }
         if (c >= 0) {
             cpu_sti();
             return c;
@@ -63,6 +102,7 @@ static void tty_recv_line(void) {
             tty_pos = 0;
             tty_editing = 0;
             drivers.uart_putc('\n');
+            drivers.vga_putc('\n');
             return;
         }
         if (c == 0x7F || c == 0x08) {
@@ -71,6 +111,9 @@ static void tty_recv_line(void) {
                 drivers.uart_putc('\b');
                 drivers.uart_putc(' ');
                 drivers.uart_putc('\b');
+                drivers.vga_putc('\b');
+                drivers.vga_putc(' ');
+                drivers.vga_putc('\b');
             }
             continue;
         }
@@ -79,12 +122,14 @@ static void tty_recv_line(void) {
                 tty_buf[tty_editing] = (char)c;
                 tty_editing++;
                 drivers.uart_putc((char)c);
+                drivers.vga_putc((char)c);
             } else {
                 tty_buf[tty_editing] = '\n';
                 tty_line_len = tty_editing + 1;
                 tty_pos = 0;
                 tty_editing = 0;
                 drivers.uart_putc('\n');
+                drivers.vga_putc('\n');
                 return;
             }
         }

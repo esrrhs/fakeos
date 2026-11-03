@@ -16,6 +16,7 @@ extern u64 sched_tick_count(void);
 extern u32 sched_current_pid(void);
 extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
+extern void kbd_irq(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -135,6 +136,13 @@ void isr_dispatch(struct trap_frame *f) {
             sched_note_user_tick();     /* tick interrupted a ring-3 thread */
         }
         sched_tick();
+        return;
+    }
+
+    /* Vector 33: PS/2 keyboard (ISA IRQ1) via I/O APIC. */
+    if (v == 33) {
+        drivers.kbd_irq();
+        arch.lapic_send_eoi();
         return;
     }
 

@@ -69,6 +69,7 @@ OBJS := \
 	$(BUILD_DIR)/lapic.o \
 	$(BUILD_DIR)/ioapic.o \
 	$(BUILD_DIR)/uart.o \
+	$(BUILD_DIR)/kbd.o \
 	$(BUILD_DIR)/vga.o \
 	$(BUILD_DIR)/pci.o \
 	$(BUILD_DIR)/virtio_blk.o \
@@ -234,6 +235,11 @@ $(BUILD_DIR)/ioapic.o: arch/ioapic.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/uart.o: drivers/uart.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/kbd.o: drivers/kbd.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@

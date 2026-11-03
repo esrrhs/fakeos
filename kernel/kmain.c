@@ -113,11 +113,13 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
                 ticks_delta);
     }
 
-    /* I/O APIC + IRQ-driven COM1 (ISA IRQ4 -> vector 36). */
+    /* I/O APIC: IRQ1 PS/2 keyboard -> 33, IRQ4 COM1 -> 36. */
     arch.ioapic_init();
+    arch.ioapic_route_irq(1, 33);
     arch.ioapic_route_irq(4, 36);
+    drivers.kbd_init();
     drivers.uart_enable_rx_irq();
-    kprintf("      [PASS] I/O APIC IRQ4 (COM1) routed to vector 36, UART RDA armed\n");
+    kprintf("      [PASS] I/O APIC IRQ1 (kbd) -> 33, IRQ4 (COM1) -> 36 armed\n");
     // Enable NXE and bring up the memory subsystem: the VMM toolchain comes
     // first so the PMM can extend the HHDM direct map (2 MiB pages allocated
     // through the first-gigabyte buddy) to cover all RAM above 1 GiB.
