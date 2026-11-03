@@ -804,6 +804,25 @@ void *signal(int sig, void *handler) {
     return old.sa_handler;
 }
 
+
+/* ---- wait status helpers (subset) --------------------------------------- */
+enum {
+    WNOHANG_V = 1,
+    WUNTRACED_V = 2
+};
+
+int WIFEXITED(long st) { return (st & 0x7f) == 0; }
+int WEXITSTATUS(long st) { return (int)((st >> 8) & 0xff); }
+int WIFSTOPPED(long st) { return (st & 0xff) == 0x7f; }
+int WSTOPSIG(long st) { return (int)((st >> 8) & 0xff); }
+int WIFSIGNALED(long st) { return ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f); }
+
+extern long u_fsync(long fd);
+int fsync(int fd) {
+    long r = u_fsync((long)fd);
+    return r < 0 ? -1 : 0;
+}
+
 /* ---- auth crypt stub ---------------------------------------------------- */
 /* Format: $fake$<4-char-salt>$<8-hex> where hash = FNV-1a(salt || ":" || key). */
 static unsigned int fnv1a(const char *s) {

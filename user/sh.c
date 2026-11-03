@@ -45,12 +45,16 @@ enum {
     MAX_TOK  = 32,
     MAX_STAGE = 4,
     MAX_JOBS = 4,
-    WNOHANG = 1
+    WNOHANG = 1,
+    WUNTRACED = 2,
+    SIGCONT_N = 18,
+    SIGTSTP_N = 20
 };
 
 struct job {
     long pid;
     int active;
+    int stopped;
     char name[64];
 };
 
@@ -135,6 +139,36 @@ static void job_set_name(int ji, char **stage) {
         jobs[ji].name[p] = 0;
     }
 }
+
+static int status_stopped(long st) {
+    return (st & 0xff) == 0x7f;
+}
+
+static int status_exit(long st) {
+    return (int)((st >> 8) & 0xff);
+}
+
+static int job_note_stopped(long pid, const char *fallback_name) {
+    int ji = job_find_pid(pid);
+    int k;
+    if (ji < 0) {
+        ji = job_alloc();
+        if (ji < 0) return -1;
+        jobs[ji].pid = pid;
+        jobs[ji].active = 1;
+        jobs[ji].name[0] = 0;
+        if (fallback_name) {
+            for (k = 0; fallback_name[k] && k < 63; k++) {
+                jobs[ji].name[k] = fallback_name[k];
+            }
+            jobs[ji].name[k] = 0;
+        }
+    }
+    jobs[ji].stopped = 1;
+    jobs[ji].active = 1;
+    return ji;
+}
+
 
 /* Pull < / > / >> out of argv. Returns 0 on success. */
 static int extract_redirects(char **argv, char **in_path, char **out_path,
@@ -358,7 +392,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
-        puts("signals: Ctrl-C -> SIGINT to fg job; kill builtin; !! / history / arrows / Ctrl-A/E/U");
+        puts("signals: Ctrl-C SIGINT, Ctrl-Z SIGTSTP stop; fg/bg/jobs; kill; history/readline");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -370,7 +404,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int cur = job_current();
         for (i = 0; i < MAX_JOBS; i++) {
             if (!jobs[i].active) continue;
-            printf("[%d]%c Running %s\n", i + 1, (i == cur) ? '+' : '-', jobs[i].name);
+            printf("[%d]%c %s %s\n", i + 1, (i == cur) ? '+' : '-',
+                   jobs[i].stopped ? "Stopped" : "Running", jobs[i].name);
         }
         return 0;
     }
@@ -389,12 +424,23 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             return 1;
         }
         pid = jobs[ji].pid;
+        if (jobs[ji].stopped) {
+            u_kill(pid, SIGCONT_N);
+            jobs[ji].stopped = 0;
+        }
         u_tty_setfg(pid);
-        reaped = u_wait4(pid, &status, 0, 0);
+        reaped = u_wait4(pid, &status, WUNTRACED, 0);
         u_tty_setfg(0);
+        if (reaped == pid && status_stopped(status)) {
+            jobs[ji].stopped = 1;
+            jobs[ji].active = 1;
+            printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+            return 148; /* 128+SIGTSTP */
+        }
         jobs[ji].active = 0;
+        jobs[ji].stopped = 0;
         if (reaped == pid) {
-            return status >> 8;
+            return status_exit(status);
         }
         return 1;
     }
@@ -409,7 +455,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             puts("sh: bg: no current job");
             return 1;
         }
-        /* No SIGCONT yet; keep the job in the table and report it. */
+        if (jobs[ji].stopped) {
+            u_kill(jobs[ji].pid, SIGCONT_N);
+            jobs[ji].stopped = 0;
+        }
         printf("[%d]+ %s &\n", ji + 1, jobs[ji].name);
         return 0;
     }
@@ -592,10 +641,17 @@ static long run_pipeline(char **tokens, long rc_in) {
                 u_exit(127);
             }
             u_tty_setfg(child);
-            reaped = u_wait4(child, &status, 0, 0);
+            reaped = u_wait4(child, &status, WUNTRACED, 0);
             u_tty_setfg(0);
+            if (reaped == child && status_stopped(status)) {
+                int ji = job_note_stopped(child, stages[0][0]);
+                if (ji >= 0) {
+                    printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+                }
+                return 148;
+            }
             if (reaped == child) {
-                return status >> 8;
+                return status_exit(status);
             }
             return -1;
         }
@@ -647,9 +703,15 @@ static long run_pipeline(char **tokens, long rc_in) {
         u_tty_setfg(pids[nstage - 1]);
     }
     for (si = 0; si < nstage; si++) {
-        long reaped = u_wait4(pids[si], &status, 0, 0);
-        if (reaped == pids[si]) {
-            rc = status >> 8;
+        long reaped = u_wait4(pids[si], &status, WUNTRACED, 0);
+        if (reaped == pids[si] && status_stopped(status)) {
+            int ji = job_note_stopped(pids[si], stages[si][0]);
+            if (ji >= 0) {
+                printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+            }
+            rc = 148;
+        } else if (reaped == pids[si]) {
+            rc = status_exit(status);
         } else {
             rc = -1;
         }
@@ -721,6 +783,7 @@ static long run_list(char **tokens, long rc_in) {
             }
             jobs[ji].pid = child;
             jobs[ji].active = 1;
+            jobs[ji].stopped = 0;
             job_set_name(ji, stage);
             job_seq++;
             printf("[%d] %d\n", ji + 1, (int)child);
@@ -746,10 +809,14 @@ static void reap_background(void) {
         long status = 0;
         long reaped;
         if (!jobs[i].active) continue;
-        reaped = u_wait4(jobs[i].pid, &status, WNOHANG, 0);
-        if (reaped == jobs[i].pid) {
+        reaped = u_wait4(jobs[i].pid, &status, WNOHANG | WUNTRACED, 0);
+        if (reaped == jobs[i].pid && status_stopped(status)) {
+            jobs[i].stopped = 1;
+            printf("[%d]+ Stopped %s\n", i + 1, jobs[i].name);
+        } else if (reaped == jobs[i].pid) {
             printf("[%d]+ Done %s\n", i + 1, jobs[i].name);
             jobs[i].active = 0;
+            jobs[i].stopped = 0;
         }
     }
 }
@@ -761,7 +828,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg, history/!!/arrows/readline, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z, history/!!/readline, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

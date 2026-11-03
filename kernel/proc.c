@@ -23,7 +23,8 @@ extern void kprintf(const char *fmt, ...);
 
 enum {
     MAX_EXIT = 32,
-    WNOHANG  = 1
+    WNOHANG    = 1,
+    WUNTRACED  = 2
 };
 
 struct exit_record {
@@ -55,6 +56,8 @@ extern u32 sched_signal_send(u32 pid, u32 sig);
 extern u32 sched_pid_exists(u32 pid);
 extern void sched_check_signals(void);
 extern u32 sched_has_pending_fatal(void);
+extern u32 sched_take_stopped(u32 ppid, u32 want_pid, u32 *out_pid, u32 *out_sig);
+extern u32 sched_stopped_exists(u32 ppid, u32 want_pid);
 extern void tty_set_fg(u32 pid);
 extern u32 tty_get_fg(void);
 
@@ -126,12 +129,23 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
     for (;;) {
         u32 got_pid = 0;
         u32 got_code = 0;
+        u32 got_sig = 0;
         /* Exact wait for a pid that is neither a live child nor a pending
          * record fails immediately instead of blocking forever, even if the
          * caller happens to have other children. */
         if (want != (u32)(-1) && !exit_exists(want, parent)
-            && !sched_is_live_child(parent, want)) {
+            && !sched_is_live_child(parent, want)
+            && !((options & WUNTRACED) && sched_stopped_exists(parent, want))) {
             return (u64)(-1);
+        }
+        /* Stopped children (Ctrl-Z / SIGTSTP) when WUNTRACED is set. */
+        if ((options & WUNTRACED)
+            && sched_take_stopped(parent, want, &got_pid, &got_sig)) {
+            if (status_u != 0 && mem.as_user_range_ok(as, status_u, 8)) {
+                volatile u64 *sp = (volatile u64 *)status_u;
+                *sp = ((u64)got_sig << 8) | 0x7f;
+            }
+            return (u64)got_pid;
         }
         if (take_exit(want, parent, &got_pid, &got_code)) {
             if (status_u != 0 && mem.as_user_range_ok(as, status_u, 8)) {
@@ -154,7 +168,8 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
         {
             u64 chan = sched_wait4_chan(parent);
             arch.cpu_cli();
-            if (exit_exists(want, parent)) {
+            if (exit_exists(want, parent)
+                || ((options & WUNTRACED) && sched_stopped_exists(parent, want))) {
                 arch.cpu_sti();
                 continue;
             }

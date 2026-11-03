@@ -47,6 +47,7 @@ enum {
     TCB_RUNNABLE = 1,
     TCB_DEAD     = 2,
     TCB_SLEEPING = 3,
+    TCB_STOPPED  = 4,
 
     MAX_THREADS  = 32,
     STACK_ORDER  = 2,                 /* 4 frames = 16 KiB per kernel stack  */
@@ -75,6 +76,8 @@ struct tcb {
     u64 sig_handler[32]; /* 0=DFL, 1=IGN, else user handler VA            */
     u64 sig_restorer[32]; /* user rt_sigreturn trampoline (may be 0)      */
     u64 sig_flags[32];   /* sa_flags (SA_RESTART=0x10000000, ...)         */
+    u32 stop_sig;      /* Last stop signal (SIGTSTP/SIGSTOP)             */
+    u32 stop_notify;   /* 1 => parent may reap via wait4 WUNTRACED       */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -111,6 +114,8 @@ void sched_init(void) {
         threads[i].ppid = 0;
         threads[i].is_user = 0;
         threads[i].pending_sigs = 0;
+        threads[i].stop_sig = 0;
+        threads[i].stop_notify = 0;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -682,6 +687,8 @@ u32 sched_reap_dead(u32 pid) {
             threads[i].is_user = 0;
             threads[i].pending_sigs = 0;
             threads[i].sig_ignore = 0;
+            threads[i].stop_sig = 0;
+            threads[i].stop_notify = 0;
             return 1;
         }
     }
@@ -701,13 +708,17 @@ void sched_reparent_children(u32 old_ppid, u32 new_ppid) {
 /* ---------------------------------------------------------------------------
  * Minimal POSIX-ish signals (default actions only).
  * SIGINT=2 SIGKILL=9 SIGTERM=15 SIGCHLD=17
+ * SIGCONT=18 SIGSTOP=19 SIGTSTP=20
  * ------------------------------------------------------------------------- */
 
 enum {
     SIGINT_N  = 2,
     SIGKILL_N = 9,
     SIGTERM_N = 15,
-    SIGCHLD_N = 17
+    SIGCHLD_N = 17,
+    SIGCONT_N = 18,
+    SIGSTOP_N = 19,
+    SIGTSTP_N = 20
 };
 
 extern void proc_terminate(u64 code);
@@ -812,14 +823,68 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             if (sig == 0) {
                 continue;               /* existence probe */
             }
+            /* SIGCONT: resume stopped tasks even when ignored. */
+            if (sig == SIGCONT_N) {
+                if (threads[i].state == TCB_STOPPED) {
+                    threads[i].state = TCB_RUNNABLE;
+                    threads[i].wait_chan = 0;
+                }
+                threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N));
+            }
             threads[i].pending_sigs |= (1u << sig);
+            /* Wake sleepers so they can observe stop/kill/cont. */
             if (threads[i].state == TCB_SLEEPING) {
                 threads[i].wait_chan = 0;
+                threads[i].state = TCB_RUNNABLE;
+            }
+            /* KILL must not leave a process stuck STOPPED. */
+            if (sig == SIGKILL_N && threads[i].state == TCB_STOPPED) {
                 threads[i].state = TCB_RUNNABLE;
             }
         }
     }
     return found;
+}
+
+/* Stop the current process and switch away until SIGCONT. */
+void sched_stop_self(u32 sig) {
+    u32 ppid = threads[current].ppid;
+    threads[current].state = TCB_STOPPED;
+    threads[current].wait_chan = 0;
+    threads[current].stop_sig = sig;
+    threads[current].stop_notify = 1;
+    threads[current].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N));
+    if (ppid != 0) {
+        sched_wakeup(sched_wait4_chan(ppid));
+    }
+    sched_switch_to(pick_next(current));
+}
+
+/* Consume one stopped child notification for wait4(WUNTRACED). */
+u32 sched_take_stopped(u32 ppid, u32 want_pid, u32 *out_pid, u32 *out_sig) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].state != TCB_STOPPED) continue;
+        if (threads[i].ppid != ppid) continue;
+        if (want_pid != (u32)(-1) && threads[i].pid != want_pid) continue;
+        if (!threads[i].stop_notify) continue;
+        threads[i].stop_notify = 0;
+        if (out_pid) *out_pid = threads[i].pid;
+        if (out_sig) *out_sig = threads[i].stop_sig;
+        return 1;
+    }
+    return 0;
+}
+
+u32 sched_stopped_exists(u32 ppid, u32 want_pid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].state != TCB_STOPPED) continue;
+        if (threads[i].ppid != ppid) continue;
+        if (want_pid != (u32)(-1) && threads[i].pid != want_pid) continue;
+        if (threads[i].stop_notify) return 1;
+    }
+    return 0;
 }
 
 u32 sched_pid_exists(u32 pid) {
@@ -889,12 +954,49 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
     threads[current].pending_sigs &= ~ign;
     pend = threads[current].pending_sigs;
 
-    /* Prefer delivering a custom handler for INT/TERM when a frame is available. */
+    /* Prefer custom handlers; default INT/TERM terminate; STOP/TSTP stop. */
     for (sig = 1; sig <= 31; sig++) {
         u64 h;
         if ((pend & (1u << sig)) == 0) continue;
         if (sig == SIGKILL_N) continue;
         h = threads[current].sig_handler[sig];
+
+        /* SIGSTOP cannot be caught or ignored. */
+        if (sig == SIGSTOP_N) {
+            threads[current].pending_sigs &= ~(1u << sig);
+            sched_stop_self(SIGSTOP_N);
+            pend = threads[current].pending_sigs;
+            continue;
+        }
+        /* SIGTSTP: custom handler if framed; else default stop. */
+        if (sig == SIGTSTP_N) {
+            if (h > 1 && f_rip != 0) {
+                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+                    return;
+                }
+            }
+            if (h == 1) {
+                threads[current].pending_sigs &= ~(1u << sig);
+                pend = threads[current].pending_sigs;
+                continue;
+            }
+            threads[current].pending_sigs &= ~(1u << sig);
+            sched_stop_self(SIGTSTP_N);
+            pend = threads[current].pending_sigs;
+            continue;
+        }
+        /* SIGCONT: resume already done in signal_send; optional handler. */
+        if (sig == SIGCONT_N) {
+            if (h > 1 && f_rip != 0) {
+                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+                    return;
+                }
+            }
+            threads[current].pending_sigs &= ~(1u << sig);
+            pend = threads[current].pending_sigs;
+            continue;
+        }
+
         if (h > 1 && f_rip != 0) {
             if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
                 return; /* one at a time */

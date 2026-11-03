@@ -16,7 +16,8 @@ extern void kprintf(const char *fmt, ...);
  * unlink (regular files), sync. Block size 1024/2048/4096. Multi block
  * group (BGDT indexed). Direct + single-/double-/triple-indirect maps.
  * Hardening: free-count bookkeeping in SB/BGDT, s_state dirty-on-mount /
- * clean-on-sync (not a full journal).
+ * clean-on-sync. Journal-lite: ordered-write recovery markers in unused SB
+ * space (magic/gen/flags); dirty or META_PENDING mount recounts free bits.
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -183,7 +184,22 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
     return bwrite(blk, blk_buf);
 }
 
-/* Superblock at byte 1024: update free counts + optional state. */
+/* Journal-lite markers in otherwise-unused SB bytes (not a full jbd). */
+enum {
+    JL_MAGIC = 0x4C4A3146u,   /* 'F1JL' */
+    JL_OFF_MAGIC = 248,
+    JL_OFF_GEN = 252,
+    JL_OFF_FLAGS = 256,
+    JL_IDLE = 0,
+    JL_META_PENDING = 1,
+    EXT2_VALID_FS = 1,
+    EXT2_ERROR_FS = 2
+};
+
+static u32 jl_gen;
+static u32 jl_flags;
+
+/* Superblock at byte 1024: update free counts + optional state + jl markers. */
 static u32 sb_write_counts(u16 state) {
     u8 sbsec[1024];
     if (!drivers.blk_read(2, sbsec, 2)) return 0;
@@ -192,7 +208,68 @@ static u32 sb_write_counts(u16 state) {
     if (state != 0xFFFF) {
         wr16(sbsec + 58, state);
     }
+    wr32(sbsec + JL_OFF_MAGIC, JL_MAGIC);
+    wr32(sbsec + JL_OFF_GEN, jl_gen);
+    wr16(sbsec + JL_OFF_FLAGS, (u16)jl_flags);
     return drivers.blk_write(2, sbsec, 2);
+}
+
+static u32 jl_write_flags(u32 flags) {
+    jl_flags = flags;
+    return sb_write_counts(0xFFFF);
+}
+
+static void jl_begin(void) {
+    jl_gen++;
+    jl_write_flags(JL_META_PENDING);
+}
+
+static void jl_commit(void) {
+    jl_write_flags(JL_IDLE);
+}
+
+/* Recount free blocks/inodes from bitmaps (recovery after dirty/pending). */
+static u32 ext2_recount_free(void) {
+    u32 g;
+    u32 total_fb = 0;
+    u32 total_fi = 0;
+    for (g = 0; g < sb.groups_count; g++) {
+        struct ext2_bg bg;
+        u32 base;
+        u32 lim;
+        u32 i;
+        u32 free_b = 0;
+        u32 free_i = 0;
+        u32 start;
+        u32 end;
+        if (!bg_load(g, &bg)) return 0;
+        base = sb.first_data_block + g * sb.blocks_per_group;
+        lim = base + sb.blocks_per_group;
+        if (lim > sb.blocks_count) lim = sb.blocks_count;
+        if (!bread(bg.block_bitmap, blk_buf)) return 0;
+        for (i = (g == 0 ? sb.first_data_block : base); i < lim; i++) {
+            u32 local = i - base;
+            if (sb.groups_count == 1) local = i;
+            if (!bitmap_test(blk_buf, local)) free_b++;
+        }
+        if (!bread(bg.inode_bitmap, blk_buf)) return 0;
+        start = g * sb.inodes_per_group + 1;
+        end = start + sb.inodes_per_group - 1;
+        if (end > sb.inodes_count) end = sb.inodes_count;
+        for (i = start; i <= end; i++) {
+            u32 bit = (i - 1) % sb.inodes_per_group;
+            if (!bitmap_test(blk_buf, bit)) free_i++;
+        }
+        bg.free_blocks = free_b;
+        bg.free_inodes = free_i;
+        if (!bg_store(g, &bg)) return 0;
+        total_fb += free_b;
+        total_fi += free_i;
+    }
+    sb.free_blocks = total_fb;
+    sb.free_inodes = total_fi;
+    jl_flags = JL_IDLE;
+    return sb_write_counts(EXT2_ERROR_FS);
 }
 
 static u32 group_of_block(u32 blk) {
@@ -993,13 +1070,34 @@ u32 ext2_mount(void) {
         return 0;
     }
 
+    {
+        u16 st = rd16(sbsec + 58);
+        u32 magic = rd32(sbsec + JL_OFF_MAGIC);
+        jl_gen = rd32(sbsec + JL_OFF_GEN);
+        jl_flags = rd16(sbsec + JL_OFF_FLAGS);
+        if (magic != JL_MAGIC) {
+            jl_gen = 0;
+            jl_flags = JL_IDLE;
+        }
+        if (st != EXT2_VALID_FS || jl_flags == JL_META_PENDING) {
+            kprintf("[EXT2] dirty/pending mount — journal-lite recovery recount\n");
+            if (!ext2_recount_free()) {
+                kprintf("[EXT2] [FAIL] recovery recount\n");
+                return 0;
+            }
+            kprintf("[EXT2] [PASS] journal-lite recovery (free_blocks=%u free_inodes=%u)\n",
+                    (u64)sb.free_blocks, (u64)sb.free_inodes);
+        }
+    }
+
     sb.mounted = 1;
-    /* Hardening: mark filesystem not-valid until sync (s_state=2). */
-    sb_write_counts(2);
+    /* Hardening: mark filesystem not-valid until sync (s_state=ERROR). */
+    sb_write_counts(EXT2_ERROR_FS);
     bg0 = sb.bg_block;
-    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u /mnt+/home ready\n",
+    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u jl_gen=%u /mnt+/home ready\n",
             (u64)sb.blocks_count, (u64)sb.inodes_count,
-            (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0);
+            (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen);
+    kprintf("[EXT2] journal-lite ordered markers online (not a full journal)\n");
     return 1;
 }
 
@@ -1040,18 +1138,24 @@ u32 ext2_open(const char *path, u32 flags) {
         if (!want_creat) return 0;
         parent = walk_parent(rel, last, &last_n);
         if (parent == 0 || last_n == 0) return 0;
-        /* Create a regular file. */
+        /* Create a regular file (journal-lite ordered meta). */
         {
-            u32 neu = alloc_inode_num();
+            u32 neu;
             u32 k;
-            if (neu == 0) return 0;
+            jl_begin();
+            neu = alloc_inode_num();
+            if (neu == 0) { jl_commit(); return 0; }
             for (k = 0; k < 128; k++) ino_raw[k] = 0;
             wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFREG | 0x1A4));
             wr16(ino_raw + I_LINKS, 1);
             wr32(ino_raw + I_SIZE_LO, 0);
             wr32(ino_raw + I_BLOCKS, 0);
-            if (!inode_write(neu, ino_raw)) return 0;
-            if (!dir_add(parent, last, last_n, neu, EXT2_FT_REG)) return 0;
+            if (!inode_write(neu, ino_raw)) { jl_commit(); return 0; }
+            if (!dir_add(parent, last, last_n, neu, EXT2_FT_REG)) {
+                jl_commit();
+                return 0;
+            }
+            jl_commit();
             ino = neu;
             is_dir = 0;
         }
@@ -1061,8 +1165,10 @@ u32 ext2_open(const char *path, u32 flags) {
     if (!inode_read(ino, ino_raw)) return 0;
 
     if (want_trunc && !is_dir && (acc == O_WRONLY || acc == O_RDWR)) {
+        jl_begin();
         inode_free_all_blocks(ino_raw);
-        if (!inode_write(ino, ino_raw)) return 0;
+        if (!inode_write(ino, ino_raw)) { jl_commit(); return 0; }
+        jl_commit();
     }
 
     fh = alloc_fh();
@@ -1166,6 +1272,7 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
     opens[s].size = rd32(raw + I_SIZE_LO);
     if (opens[s].append) opens[s].off = opens[s].size;
 
+    jl_begin();
     while (done < len) {
         u32 fblk = (u32)(opens[s].off / sb.block_size);
         u32 boff = (u32)(opens[s].off % sb.block_size);
@@ -1173,13 +1280,13 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
         u64 can = sb.block_size - boff;
         u64 take = len - done;
         u64 k;
-        if (phys == 0) return done != 0 ? done : (u64)(-1);
+        if (phys == 0) { jl_commit(); return done != 0 ? done : (u64)(-1); }
         if (take > can) take = can;
         if (boff != 0 || take != sb.block_size) {
-            if (!bread(phys, blk_buf)) return done != 0 ? done : (u64)(-1);
+            if (!bread(phys, blk_buf)) { jl_commit(); return done != 0 ? done : (u64)(-1); }
         }
         for (k = 0; k < take; k++) blk_buf[boff + k] = (u8)kbuf[done + k];
-        if (!bwrite(phys, blk_buf)) return done != 0 ? done : (u64)(-1);
+        if (!bwrite(phys, blk_buf)) { jl_commit(); return done != 0 ? done : (u64)(-1); }
         opens[s].off += take;
         done += take;
         if (opens[s].off > opens[s].size) {
@@ -1188,8 +1295,10 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
         }
     }
     if (!inode_write(opens[s].ino, raw)) {
+        jl_commit();
         return done != 0 ? done : (u64)(-1);
     }
+    jl_commit();
     return done;
 }
 
@@ -1261,14 +1370,15 @@ u32 ext2_mkdir(const char *path) {
     if (walk_rel(rel, 0) != 0) return 0;       /* exists */
     parent = walk_parent(rel, last, &last_n);
     if (parent == 0 || last_n == 0) return 0;
+    jl_begin();
     neu = alloc_inode_num();
-    if (neu == 0) return 0;
+    if (neu == 0) { jl_commit(); return 0; }
     for (k = 0; k < 128; k++) ino_raw[k] = 0;
     wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFDIR | 0x1ED));
     wr16(ino_raw + I_LINKS, 2);                /* . and parent link */
     wr32(ino_raw + I_SIZE_LO, sb.block_size);
     phys = alloc_block();
-    if (phys == 0) return 0;
+    if (phys == 0) { jl_commit(); return 0; }
     wr32(ino_raw + I_BLOCK, phys);
     wr32(ino_raw + I_BLOCKS, sb.block_size / 512);
     /* Build . and .. entries. */
@@ -1284,13 +1394,14 @@ u32 ext2_mkdir(const char *path) {
     blk_buf[19] = EXT2_FT_DIR;
     blk_buf[20] = '.';
     blk_buf[21] = '.';
-    if (!bwrite(phys, blk_buf)) return 0;
-    if (!inode_write(neu, ino_raw)) return 0;
-    if (!dir_add(parent, last, last_n, neu, EXT2_FT_DIR)) return 0;
+    if (!bwrite(phys, blk_buf)) { jl_commit(); return 0; }
+    if (!inode_write(neu, ino_raw)) { jl_commit(); return 0; }
+    if (!dir_add(parent, last, last_n, neu, EXT2_FT_DIR)) { jl_commit(); return 0; }
     /* Bump parent link count. */
-    if (!inode_read(parent, ino_raw)) return 0;
+    if (!inode_read(parent, ino_raw)) { jl_commit(); return 0; }
     wr16(ino_raw + I_LINKS, (u16)(rd16(ino_raw + I_LINKS) + 1));
-    if (!inode_write(parent, ino_raw)) return 0;
+    if (!inode_write(parent, ino_raw)) { jl_commit(); return 0; }
+    jl_commit();
     return 1;
 }
 
@@ -1342,12 +1453,14 @@ u32 ext2_unlink(const char *path) {
     if ((mode & EXT2_S_IFMT) == EXT2_S_IFDIR) {
         return 0;                      /* directories need rmdir */
     }
-    if (!dir_remove(parent, last, last_n, &victim)) return 0;
-    if (!inode_read(victim, ino_raw)) return 0;
+    jl_begin();
+    if (!dir_remove(parent, last, last_n, &victim)) { jl_commit(); return 0; }
+    if (!inode_read(victim, ino_raw)) { jl_commit(); return 0; }
     inode_free_all_blocks(ino_raw);
     for (b = 0; b < 128; b++) ino_raw[b] = 0;
     inode_write(victim, ino_raw);
     free_inode_bit(victim);
+    jl_commit();
     return 1;
 }
 
@@ -1369,8 +1482,9 @@ u32 ext2_rmdir(const char *path) {
     mode = rd16(ino_raw + I_MODE);
     if ((mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
     if (!dir_is_empty(victim)) return 0;
-    if (!dir_remove(parent, last, last_n, &victim)) return 0;
-    if (!inode_read(victim, ino_raw)) return 0;
+    jl_begin();
+    if (!dir_remove(parent, last, last_n, &victim)) { jl_commit(); return 0; }
+    if (!inode_read(victim, ino_raw)) { jl_commit(); return 0; }
     phys = rd32(ino_raw + I_BLOCK);
     if (phys) free_block_bit(phys);
     /* Drop parent ".." link. */
@@ -1387,13 +1501,15 @@ u32 ext2_rmdir(const char *path) {
     }
     inode_write(victim, ino_raw);
     free_inode_bit(victim);
+    jl_commit();
     return 1;
 }
 
 u32 ext2_sync(void) {
     if (!sb.mounted) return 0;
-    /* Write barrier: persist free counts + mark VALID_FS before FLUSH. */
-    sb_write_counts(1);
+    /* Write barrier: clear jl pending, mark VALID_FS, then FLUSH. */
+    jl_flags = JL_IDLE;
+    sb_write_counts(EXT2_VALID_FS);
     return drivers.blk_flush();
 }
 

@@ -652,3 +652,17 @@ u64 sys_sync(void) {
     }
     return 0;
 }
+
+/* fsync(fd): flush Ext2 volume if fd is an Ext2 handle; else no-op success.
+ * Not a per-inode journal commit — pairs with journal-lite ordered markers. */
+u64 sys_fsync(u64 fd) {
+    u32 fh;
+    if (fd >= 16) return (u64)(-1);
+    fh = sched_fd_get((u32)fd);
+    if (fh == FD_BAD || fh == 0xFFFFFFFF) return (u64)(-1);
+    if (fs.ext2_mounted() && fs.ext2_fh_is(fh)) {
+        fs.ext2_sync();
+    }
+    return 0;
+}
+

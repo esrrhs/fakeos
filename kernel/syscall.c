@@ -37,6 +37,7 @@ extern u64 sys_rmdir(u64 upath);
 extern u64 sys_dup2(u64 oldfd, u64 newfd);
 extern u64 sys_pipe(u64 upipefd);
 extern u64 sys_sync(void);
+extern u64 sys_fsync(u64 fd);
 extern u64 sys_ping(u64 ip);
 extern u64 sys_socket(u64 domain, u64 type, u64 protocol);
 extern u64 sys_bind(u64 fd, u64 uaddr, u64 ulen);
@@ -121,6 +122,7 @@ enum {
     SC_UNLINK = 87,
     SC_EXIT_GROUP = 231,
     SC_SYNC = 162,
+    SC_FSYNC = 74,
     SC_SOCKET = 41,
     SC_CONNECT = 42,
     SC_SENDTO = 44,
@@ -232,6 +234,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_SYNC) {
         return sys_sync();
+    }
+    if (f->rax == SC_FSYNC) {
+        return sys_fsync(f->rdi);
     }
     if (f->rax == SC_PING) {
         return sys_ping(f->rdi);

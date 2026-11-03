@@ -149,7 +149,7 @@ flowchart TD
 - [x] **I/O APIC + 中断驱动 UART**：映射 I/O APIC，ISA IRQ4→vector 36；COM1 RDA 中断填环，TTY `sched_sleep_cli` 阻塞唤醒（键盘/VirtIO IRQ 仍待接）。
 - [x] **Ext2 rmdir**：空目录删除；`unlink` 不再误拆目录项。Ramfs 同步支持 `rmdir`。
 - [x] **Ext2 双间接块**：文件可跨 single-indirect（1K 块下 >268KiB）；trunc/unlink 回收双重间接；自测 `/mnt/big.bin` 270KiB（越过双间接）。
-- [x] **Ext2 多块组 + 写入硬化**：按 BGDT 索引多 block group；分配/释放维护 SB/BG 空闲计数；挂载置 `s_state` 脏、`sync` 写回 VALID（非完整 journal）。
+- [x] **Ext2 多块组 + 写入硬化**：按 BGDT 索引多 block group；分配/释放维护 SB/BG 空闲计数；挂载置 `s_state` 脏、`sync` 写回 VALID；journal-lite 恢复标记见下。
 - [x] **Ext2 三重间接**：`i_block[14]` 读写/回收；稀疏自测 `/mnt/trip.bin`（越过双间接上限，无需 64MiB 镜像）。`mkext2.py` 默认 4MiB 镜像为 2 个 block group；分配/释放拒绝 SB/BGDT/bitmap/itable，避免多块组相对位图误清 bit0 毁掉元数据。
 - [x] **等待队列 / kmutex**：`TCB_SLEEPING` + `sched_sleep`/`sched_wakeup`；`wait4` 阻塞唤醒；内核 `kmutex`。
 - [x] **dup2 + shell 重定向**：`>` / `>>` / `<` 对 builtin 与外部命令生效。
@@ -176,6 +176,9 @@ flowchart TD
 - [x] **shell history / `!!` + readline**：环形 32 条；`history`/`!!`；TTY CSI A/B 历史、Left/Right、Home/End、Ctrl-A/E/U。
 - [x] **auth crypt stub**：`/etc/passwd` 支持 `$fake$salt$hash`（FNV-1a）；libc `crypt`/`crypt_check`；默认 root 口令 `root`。
 - [x] **fakecc M5 tip pin 文档**：`docs/ldfake-order3-diagnosis.md` + Makefile/`m5_stage.sh` 明确要求 restage 钉在 `2c1f4525`。
+- [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags 作 ordered-write 恢复标记；脏挂载或 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
+- [x] **SIGTSTP / Ctrl-Z 作业停止**：`TCB_STOPPED` + `wait4(WUNTRACED)`；TTY ISIG 在 UART/PS2 输入路径拦截 Ctrl-C/Z（wait4 阻塞时也可投递）；shell `jobs`/`fg`/`bg` 续跑 `SIGCONT`。
+- [x] **fsync(2)**：nr 74；Ext2 fd 触发卷级 sync（与 journal-lite 标记配对）。
 
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。

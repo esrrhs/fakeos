@@ -27,6 +27,7 @@ global u_unlink
 global u_rmdir
 global u_pipe
 global u_sync
+global u_fsync
 global u_ping
 global u_socket
 global u_bind
@@ -122,6 +123,9 @@ USYSC1 u_pipe, 22
 
 ; long u_sync(void)
 USYSC1 u_sync, 162
+
+; long u_fsync(long fd)
+USYSC1 u_fsync, 74
 
 ; long u_ping(unsigned int ip_host_order)
 USYSC1 u_ping, 500

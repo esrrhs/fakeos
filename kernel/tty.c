@@ -15,7 +15,8 @@ typedef types.uint64_t u64;
  * source; empty checks use sched_sleep_cli so a byte cannot be lost between
  * poll and sleep. Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
- * provide basic readline-style editing.
+ * provide basic readline-style editing. ISIG: Ctrl-C/Ctrl-Z are intercepted
+ * on input (UART IRQ + PS/2) even while the shell is blocked in wait4.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -57,9 +58,11 @@ extern u32 sched_current_pid(void);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern u32 sched_has_pending_fatal(void);
 extern u32 sched_should_eintr(void);
+extern void sched_check_signals(void);
 
 enum {
-    SIGINT_N = 2,
+    SIGINT_N  = 2,
+    SIGTSTP_N = 20,
     EINTR_NEG = (u64)-4
 };
 
@@ -71,12 +74,7 @@ u32 tty_get_fg(void) {
     return tty_fg_pid;
 }
 
-void tty_on_uart_byte(void) {
-    sched_wakeup((u64)&tty_wait_token);
-}
-
-/* Called from kbd_irq (interrupts masked). */
-void tty_push_byte(char c) {
+static void tty_queue_byte(char c) {
     if (tty_in_count >= IN_CAP) {
         return;
     }
@@ -86,7 +84,57 @@ void tty_push_byte(char c) {
         tty_in_tail = 0;
     }
     tty_in_count++;
+}
+
+/* ISIG processing for UART + keyboard. Control chars never enter the line buf. */
+static void tty_ingest_byte(char c) {
+    if (c == 0x03) { /* Ctrl-C -> SIGINT */
+        drivers.uart_putc('^');
+        drivers.uart_putc('C');
+        drivers.uart_putc('\n');
+        drivers.vga_putc('^');
+        drivers.vga_putc('C');
+        drivers.vga_putc('\n');
+        tty_editing = 0;
+        tty_cursor = 0;
+        tty_line_len = 0;
+        tty_pos = 0;
+        tty_got_intr = 1;
+        if (tty_fg_pid != 0) {
+            sched_signal_send(tty_fg_pid, SIGINT_N);
+        }
+        sched_wakeup((u64)&tty_wait_token);
+        return;
+    }
+    if (c == 0x1A) { /* Ctrl-Z -> SIGTSTP */
+        drivers.uart_putc('^');
+        drivers.uart_putc('Z');
+        drivers.uart_putc('\n');
+        drivers.vga_putc('^');
+        drivers.vga_putc('Z');
+        drivers.vga_putc('\n');
+        if (tty_fg_pid != 0) {
+            sched_signal_send(tty_fg_pid, SIGTSTP_N);
+        }
+        sched_wakeup((u64)&tty_wait_token);
+        return;
+    }
+    tty_queue_byte(c);
     sched_wakeup((u64)&tty_wait_token);
+}
+
+void tty_on_uart_byte(void) {
+    /* Drain the UART IRQ ring through ISIG so Ctrl-C/Z work during wait4. */
+    for (;;) {
+        int c = drivers.uart_getc_nonblock();
+        if (c < 0) break;
+        tty_ingest_byte((char)c);
+    }
+}
+
+/* Called from kbd_irq (interrupts masked). */
+void tty_push_byte(char c) {
+    tty_ingest_byte(c);
 }
 
 static int tty_in_pop(void) {
@@ -110,7 +158,7 @@ static int tty_getc_block(void) {
     cpu_sti();
     cpu_cli();
     for (;;) {
-        if (sched_has_pending_fatal()) {
+        if (tty_got_intr || sched_has_pending_fatal()) {
             cpu_sti();
             return -2;                  /* interrupted */
         }
@@ -123,7 +171,10 @@ static int tty_getc_block(void) {
             return c;
         }
         sched_sleep_cli((u64)&tty_wait_token);
-        /* Still CLI after sleep_cli; re-check the ring / signals. */
+        /* Still CLI after sleep_cli; deliver stop/kill before re-polling. */
+        cpu_sti();
+        sched_check_signals();
+        cpu_cli();
     }
 }
 
@@ -238,6 +289,7 @@ static void tty_recv_line(void) {
             return;
         }
         if (c == 0x03) {
+            /* Backup ISIG path (polled RX before IRQ arming). */
             drivers.uart_putc('^');
             drivers.uart_putc('C');
             drivers.uart_putc('\n');
@@ -253,6 +305,19 @@ static void tty_recv_line(void) {
                 sched_signal_send(tty_fg_pid, SIGINT_N);
             }
             return;
+        }
+        if (c == 0x1A) {
+            drivers.uart_putc('^');
+            drivers.uart_putc('Z');
+            drivers.uart_putc('\n');
+            drivers.vga_putc('^');
+            drivers.vga_putc('Z');
+            drivers.vga_putc('\n');
+            if (tty_fg_pid != 0) {
+                sched_signal_send(tty_fg_pid, SIGTSTP_N);
+            }
+            /* Do not abort the reader's line; parent wait4(WUNTRACED) observes stop. */
+            continue;
         }
         if (c == 0x01) { /* Ctrl-A home */
             tty_move_cursor_to(0);
