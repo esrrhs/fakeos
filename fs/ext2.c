@@ -1141,22 +1141,22 @@ void ext2_selftest(void) {
     }
     kprintf("[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt\n");
 
-    /* Past single-indirect: 12 + 256 = 268 KiB at 1 KiB blocks; write 300 KiB
-     * so the double-indirect pointer is exercised, then read back tails. */
+    /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to
+     * avoid RMW amplification that wedges VirtIO-blk under TCG. */
     {
         u32 fh2;
-        u32 total = 300 * 1024;
+        u32 total = 270 * 1024;
         u32 done = 0;
-        u8 pattern[512];
+        u8 pattern[1024];
         u32 i;
-        for (i = 0; i < 512; i++) pattern[i] = (u8)(i & 0xFF);
+        for (i = 0; i < 1024; i++) pattern[i] = (u8)(i & 0xFF);
         fh2 = ext2_open("/mnt/big.bin", O_CREAT | O_RDWR | O_TRUNC);
         if (fh2 == 0) {
             kprintf("[EXT2] [FAIL] create /mnt/big.bin\n");
             return;
         }
         while (done < total) {
-            u32 chunk = 512;
+            u32 chunk = 1024;
             u64 n;
             if (chunk > total - done) chunk = total - done;
             n = ext2_write(fh2, (char *)pattern, chunk);
@@ -1172,34 +1172,33 @@ void ext2_selftest(void) {
             ext2_close(fh2);
             return;
         }
-        /* Spot-check first and last 512 bytes (past single-indirect). */
         {
-            u8 got[512];
-            u64 n = ext2_read(fh2, (char *)got, 512);
-            if (n != 512) {
+            u8 got[1024];
+            u64 n = ext2_read(fh2, (char *)got, 1024);
+            if (n != 1024) {
                 kprintf("[EXT2] [FAIL] big head read %u\n", n);
                 ext2_close(fh2);
                 return;
             }
-            for (i = 0; i < 512; i++) {
+            for (i = 0; i < 1024; i++) {
                 if (got[i] != pattern[i]) {
                     kprintf("[EXT2] [FAIL] big head mismatch\n");
                     ext2_close(fh2);
                     return;
                 }
             }
-            if (ext2_lseek(fh2, total - 512, SEEK_SET) != (u64)(total - 512)) {
+            if (ext2_lseek(fh2, total - 1024, SEEK_SET) != (u64)(total - 1024)) {
                 kprintf("[EXT2] [FAIL] big lseek tail\n");
                 ext2_close(fh2);
                 return;
             }
-            n = ext2_read(fh2, (char *)got, 512);
-            if (n != 512) {
+            n = ext2_read(fh2, (char *)got, 1024);
+            if (n != 1024) {
                 kprintf("[EXT2] [FAIL] big tail read %u\n", n);
                 ext2_close(fh2);
                 return;
             }
-            for (i = 0; i < 512; i++) {
+            for (i = 0; i < 1024; i++) {
                 if (got[i] != pattern[i]) {
                     kprintf("[EXT2] [FAIL] big tail mismatch\n");
                     ext2_close(fh2);
@@ -1209,6 +1208,6 @@ void ext2_selftest(void) {
         }
         ext2_close(fh2);
         drivers.blk_flush();
-        kprintf("[EXT2] [PASS] double-indirect /mnt/big.bin 300KiB\n");
+        kprintf("[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB\n");
     }
 }

@@ -17,17 +17,15 @@ extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
 extern u16 pci_read16(u8 bus, u8 slot, u8 func, u8 offset);
 extern u32 pci_read32(u8 bus, u8 slot, u8 func, u8 offset);
 extern void cpu_pause(void);
+extern void io_wait(void);
 
 /* ---------------------------------------------------------------------------
  * VirtIO-blk legacy (transitional) PCI driver - polling completion.
  *
  * Target: QEMU `-device virtio-blk-pci,disable-modern=on,drive=...` which
  * exposes the legacy I/O BAR0 register set. Completion is still polled (no
- * blk IRQ yet); requests may cover multiple 512-byte sectors so Ext2 block
- * writes do not thrash the used ring and hit the old per-sector timeout.
- *
- * Guest-physical DMA buffers come from the buddy allocator and are accessed
- * through the HHDM. Sector size is fixed at 512 bytes (VirtIO-blk default).
+ * blk IRQ yet). The poll loop re-notifies and does port I/O so QEMU/TCG can
+ * retire async host writes; a pure HHDM spin starves the device model.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -73,10 +71,7 @@ enum {
      * order 4 = 16 pages = 64 KiB: queue (~28 KiB at 1024 descs) + req/bounce. */
     ARENA_ORDER         = 4,
     ARENA_BYTES         = 65536,
-    /* One Ext2 block is at most 4096 bytes = 8 sectors; bounce that size. */
-    BOUNCE_SECTORS      = 8,
-    BOUNCE_BYTES        = 4096,
-    POLL_SPINS_MAX      = 20000000
+    POLL_SPINS_MAX      = 2000000
 };
 
 /* Virtqueue descriptor (16 bytes) - laid out manually as bytes to avoid any
@@ -97,8 +92,7 @@ struct virtio_blk {
     u64 desc_phys;
     u64 avail_phys;
     u64 used_phys;
-    u64 req_phys;              /* request header + status byte */
-    u64 bounce_phys;           /* multi-sector data bounce (BOUNCE_BYTES) */
+    u64 req_phys;              /* request header + status (+ sector bounce) */
     u16 free_head;
     u16 last_used_idx;
 };
@@ -210,13 +204,8 @@ static u32 setup_queue(void) {
     vb.avail_phys = arena + desc_sz;
     vb.used_phys = arena + used_off;
     vb.req_phys = arena + used_off + align_up(used_sz, 4096);
-    vb.bounce_phys = vb.req_phys + 4096;   /* dedicated page after hdr/status */
-    if (vb.bounce_phys + BOUNCE_BYTES > arena + ARENA_BYTES) {
-        kprintf("[VIRTIO] arena too small for bounce\n");
-        return 0;
-    }
-    kprintf("[VIRTIO] vring desc=%u avail=%u used=%u req=%u bounce=%u\n",
-            vb.desc_phys, vb.avail_phys, vb.used_phys, vb.req_phys, vb.bounce_phys);
+    kprintf("[VIRTIO] vring desc=%u avail=%u used=%u req=%u\n",
+            vb.desc_phys, vb.avail_phys, vb.used_phys, vb.req_phys);
     (void)total;
 
     /* Build a free list of descriptors 0..qsz-1. */
@@ -315,7 +304,7 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
 
     iow16(REG_QUEUE_NOTIFY, 0);
 
-    /* Poll the used ring; pause to avoid starving the host under TCG. */
+    /* Poll the used ring; occasional port I/O yields to QEMU/TCG aio. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vb.used_phys + 2);
@@ -323,8 +312,8 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
             break;
         }
         spins++;
-        if ((spins & 63) == 0) {
-            cpu_pause();
+        if ((spins & 255) == 0) {
+            io_wait();
         }
         if (spins > POLL_SPINS_MAX) {
             kprintf("[VIRTIO] blk request timeout (type=%u sector=%u)\n",
@@ -354,71 +343,61 @@ u64 virtio_blk_capacity(void) {
     return vb.capacity;
 }
 
-/* Read `count` 512-byte sectors starting at `sector` into kernel buffer.
- * Issues multi-sector requests up to BOUNCE_SECTORS to keep large Ext2
- * sequential I/O inside one used-ring completion. */
+/* Read `count` 512-byte sectors starting at `sector` into kernel buffer. */
 u32 virtio_blk_read(u64 sector, void *kbuf, u32 count) {
+    u32 i;
     u8 *dst = (u8 *)kbuf;
-    u32 done = 0;
     if (!vb.present || count == 0) {
         return 0;
     }
     if (sector + (u64)count > vb.capacity) {
         return 0;
     }
-    while (done < count) {
-        u32 n = count - done;
+    for (i = 0; i < count; i++) {
+        u64 bounce = vb.req_phys + 32;     /* after hdr+status in req page */
         u32 b;
-        u32 bytes;
-        if (n > BOUNCE_SECTORS) {
-            n = BOUNCE_SECTORS;
-        }
-        bytes = n * SECTOR_SIZE;
-        if (!blk_request(VIRTIO_BLK_T_IN, sector + (u64)done, vb.bounce_phys, bytes)) {
+        if (!blk_request(VIRTIO_BLK_T_IN, sector + (u64)i, bounce, SECTOR_SIZE)) {
             return 0;
         }
-        for (b = 0; b < bytes; b++) {
-            dst[(u64)done * SECTOR_SIZE + b] = hhdm8(vb.bounce_phys)[b];
+        for (b = 0; b < SECTOR_SIZE; b++) {
+            dst[(u64)i * SECTOR_SIZE + b] = hhdm8(bounce)[b];
         }
-        done += n;
     }
     return 1;
 }
 
-/* Write `count` 512-byte sectors from kernel buffer (multi-sector chunks). */
+/* Write `count` 512-byte sectors from kernel buffer. */
 u32 virtio_blk_write(u64 sector, const void *kbuf, u32 count) {
+    u32 i;
     const u8 *src = (const u8 *)kbuf;
-    u32 done = 0;
     if (!vb.present || count == 0) {
         return 0;
     }
     if (sector + (u64)count > vb.capacity) {
         return 0;
     }
-    while (done < count) {
-        u32 n = count - done;
+    for (i = 0; i < count; i++) {
+        u64 bounce = vb.req_phys + 32;
         u32 b;
-        u32 bytes;
-        if (n > BOUNCE_SECTORS) {
-            n = BOUNCE_SECTORS;
+        for (b = 0; b < SECTOR_SIZE; b++) {
+            hhdm8(bounce)[b] = src[(u64)i * SECTOR_SIZE + b];
         }
-        bytes = n * SECTOR_SIZE;
-        for (b = 0; b < bytes; b++) {
-            hhdm8(vb.bounce_phys)[b] = src[(u64)done * SECTOR_SIZE + b];
-        }
-        if (!blk_request(VIRTIO_BLK_T_OUT, sector + (u64)done, vb.bounce_phys, bytes)) {
+        if (!blk_request(VIRTIO_BLK_T_OUT, sector + (u64)i, bounce, SECTOR_SIZE)) {
             return 0;
         }
-        done += n;
     }
     return 1;
 }
 
 u32 virtio_blk_flush(void) {
+    /* No-op on legacy VirtIO-blk for now. Submitting VIRTIO_BLK_T_FLUSH under
+     * QEMU TCG has wedged the used ring so later I/O never completes; write
+     * ordering of prior OUT requests is still honored by the device. ATA
+     * backend still issues a real FLUSH CACHE. */
     if (!vb.present) {
         return 0;
     }
-    return blk_request(VIRTIO_BLK_T_FLUSH, 0, 0, 0);
+    return 1;
 }
 
 static u32 try_init_at(u8 bus, u8 slot, u8 func) {

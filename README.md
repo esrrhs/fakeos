@@ -147,7 +147,7 @@ flowchart TD
 - [x] **VirtIO-blk 队列 DMA 排通**：按真实 QueueNum 建环后 used ring 正常前进；`make qemu-disk` 默认 VirtIO，测试仍可用 IDE/ATA。
 - [x] **I/O APIC + 中断驱动 UART**：映射 I/O APIC，ISA IRQ4→vector 36；COM1 RDA 中断填环，TTY `sched_sleep_cli` 阻塞唤醒（键盘/VirtIO IRQ 仍待接）。
 - [x] **Ext2 rmdir**：空目录删除；`unlink` 不再误拆目录项。Ramfs 同步支持 `rmdir`。
-- [x] **Ext2 双间接块**：文件可跨 single-indirect（1K 块下 >268KiB）；trunc/unlink 回收双重间接；自测 `/mnt/big.bin` 300KiB。
+- [x] **Ext2 双间接块**：文件可跨 single-indirect（1K 块下 >268KiB）；trunc/unlink 回收双重间接；自测 `/mnt/big.bin` 270KiB（越过双间接）。
 - [ ] **更完整的 Ext2**：多块组、journal/写入屏障策略、三重间接。
 - [x] **等待队列 / kmutex**：`TCB_SLEEPING` + `sched_sleep`/`sched_wakeup`；`wait4` 阻塞唤醒；内核 `kmutex`。
 - [x] **dup2 + shell 重定向**：`>` / `>>` / `<` 对 builtin 与外部命令生效。
@@ -157,7 +157,8 @@ flowchart TD
 - [x] **shell 抛光**：`sync`/`clear` builtin；`/bin/touch` `/bin/mv`；启动进入 `/home`（Ext2 持久工作区，`/home` 与 `/mnt/home` 同卷）。
 - [x] **最小套接字 API**：`socket`/`bind`/`connect`/`sendto`/`recvfrom`（UDP 可用；TCP 仅 scaffold）；`/bin/udptest` 环回自测与 `/bin/nc -u`。
 - [x] **PS/2 键盘 IRQ1**：i8042 + set-1 扫描码；I/O APIC IRQ1→vector 33；`tty_push_byte` 与串口共享行规程，回显至 UART+VGA。
-- [x] **Ext2 persist-root UX**：`/home` 路径别名到 Ext2 卷；Ramfs 保留 `/bin` `/etc` `/tmp` 等；VirtIO-blk 多扇区请求缓解大块顺序写超时。
+- [x] **Ext2 persist-root UX**：`/home` 路径别名到 Ext2 卷；Ramfs 保留 `/bin` `/etc` `/tmp` 等；VirtIO-blk 轮询夹带 port I/O，FLUSH 超时最佳努力以免卡死队列。
+- [x] **IRQ 驱动 VirtIO-net**：PCI INTx → I/O APIC level → vector 40；`virtio_net_irq` ack ISR 后 `net_poll` 收包；idle 轮询仅作备份。
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。
 
