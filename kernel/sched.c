@@ -78,6 +78,9 @@ struct tcb {
     u64 sig_flags[32];   /* sa_flags (SA_RESTART=0x10000000, ...)         */
     u32 stop_sig;      /* Last stop signal (SIGTSTP/SIGSTOP)             */
     u32 stop_notify;   /* 1 => parent may reap via wait4 WUNTRACED       */
+    u32 cont_notify;   /* 1 => parent may reap via wait4 WCONTINUED      */
+    u32 pgid;          /* Process group id (setpgid / kill -pgid)        */
+    u32 sid;           /* Session id (setsid); 0 = none                  */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -116,6 +119,9 @@ void sched_init(void) {
         threads[i].pending_sigs = 0;
         threads[i].stop_sig = 0;
         threads[i].stop_notify = 0;
+        threads[i].cont_notify = 0;
+        threads[i].pgid = 0;
+        threads[i].sid = 0;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -284,6 +290,11 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].wait_chan = 0;
     threads[i].pid = pid;
     threads[i].ppid = 0;
+    threads[i].pgid = pid;             /* new session/pgrp for pid 1 etc. */
+    threads[i].sid = pid;
+    threads[i].stop_sig = 0;
+    threads[i].stop_notify = 0;
+    threads[i].cont_notify = 0;
     threads[i].is_user = 1;
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = (1u << 17);
@@ -348,6 +359,11 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].wait_chan = 0;
     threads[i].pid = child_pid;
     threads[i].ppid = threads[current].pid;
+    threads[i].pgid = threads[current].pgid;
+    threads[i].sid = threads[current].sid;
+    threads[i].stop_sig = 0;
+    threads[i].stop_notify = 0;
+    threads[i].cont_notify = 0;
     threads[i].is_user = 1;
     {
         u32 f;
@@ -684,6 +700,10 @@ u32 sched_reap_dead(u32 pid) {
             threads[i].state = TCB_FREE;
             threads[i].pid = 0;
             threads[i].ppid = 0;
+            threads[i].pgid = 0;
+            threads[i].sid = 0;
+            threads[i].stop_notify = 0;
+            threads[i].cont_notify = 0;
             threads[i].is_user = 0;
             threads[i].pending_sigs = 0;
             threads[i].sig_ignore = 0;
@@ -823,11 +843,15 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             if (sig == 0) {
                 continue;               /* existence probe */
             }
-            /* SIGCONT: resume stopped tasks even when ignored. */
+            /* SIGCONT: resume stopped tasks even when ignored; notify waiters. */
             if (sig == SIGCONT_N) {
                 if (threads[i].state == TCB_STOPPED) {
                     threads[i].state = TCB_RUNNABLE;
                     threads[i].wait_chan = 0;
+                    threads[i].cont_notify = 1;
+                    if (threads[i].ppid != 0) {
+                        sched_wakeup(sched_wait4_chan(threads[i].ppid));
+                    }
                 }
                 threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N));
             }
@@ -889,6 +913,161 @@ u32 sched_stopped_exists(u32 ppid, u32 want_pid) {
 
 u32 sched_pid_exists(u32 pid) {
     return sched_signal_send(pid, 0);
+}
+
+u32 sched_current_pgid(void) {
+    return threads[current].pgid;
+}
+
+u32 sched_current_sid(void) {
+    return threads[current].sid;
+}
+
+u32 sched_get_pgid(u32 pid) {
+    u32 i;
+    u32 want = pid;
+    if (want == 0) {
+        want = threads[current].pid;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].pid == want && threads[i].state != TCB_FREE
+            && threads[i].state != TCB_DEAD) {
+            return threads[i].pgid;
+        }
+    }
+    return 0;
+}
+
+u32 sched_get_sid(u32 pid) {
+    u32 i;
+    u32 want = pid;
+    if (want == 0) {
+        want = threads[current].pid;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].pid == want && threads[i].state != TCB_FREE
+            && threads[i].state != TCB_DEAD) {
+            return threads[i].sid;
+        }
+    }
+    return 0;
+}
+
+/* Broadcast a signal to every live member of process group pgid.
+ * Returns the number of matching processes (0 => no such pgrp). */
+u32 sched_signal_pgrp(u32 pgid, u32 sig) {
+    u32 i;
+    u32 n = 0;
+    if (pgid == 0 || sig > 31) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].pgid == pgid && threads[i].pid != 0
+            && threads[i].state != TCB_FREE && threads[i].state != TCB_DEAD) {
+            if (sched_signal_send(threads[i].pid, sig)) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+/* setpgid(pid, pgid): pid/pgid 0 mean "current".
+ * Caller may only move itself or a direct child in the same session.
+ * New pgid must be caller's pid (create group) or an existing group in the
+ * same session. Returns 0 on success, 1 on error. */
+u32 sched_setpgid(u32 pid, u32 pgid) {
+    u32 i;
+    u32 target;
+    u32 new_pg;
+    u32 caller = threads[current].pid;
+    u32 caller_sid = threads[current].sid;
+    u32 slot = (u32)-1;
+    u32 found_group = 0;
+
+    if (caller == 0) {
+        return 1;
+    }
+    target = (pid == 0) ? caller : pid;
+    new_pg = (pgid == 0) ? target : pgid;
+
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].pid == target && threads[i].state != TCB_FREE
+            && threads[i].state != TCB_DEAD) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == (u32)-1) {
+        return 1;
+    }
+    /* Only self or direct child. */
+    if (threads[slot].pid != caller && threads[slot].ppid != caller) {
+        return 1;
+    }
+    /* Session leaders cannot leave their pgrp (POSIX). */
+    if (threads[slot].sid == threads[slot].pid && new_pg != threads[slot].pid) {
+        return 1;
+    }
+    if (threads[slot].sid != caller_sid) {
+        return 1;
+    }
+    if (new_pg != threads[slot].pid) {
+        for (i = 0; i < MAX_THREADS; i++) {
+            if (threads[i].pgid == new_pg && threads[i].sid == caller_sid
+                && threads[i].state != TCB_FREE && threads[i].state != TCB_DEAD) {
+                found_group = 1;
+                break;
+            }
+        }
+        if (!found_group) {
+            return 1;
+        }
+    }
+    threads[slot].pgid = new_pg;
+    return 0;
+}
+
+/* setsid(): become session + process-group leader if not already a leader. */
+u32 sched_setsid(void) {
+    u32 pid = threads[current].pid;
+    if (pid == 0) {
+        return 0;
+    }
+    /* POSIX: fail if already a process-group leader. */
+    if (threads[current].pgid == pid) {
+        return 0;
+    }
+    threads[current].sid = pid;
+    threads[current].pgid = pid;
+    return pid;
+}
+
+/* Consume one continued-child notification for wait4(WCONTINUED). */
+u32 sched_take_continued(u32 ppid, u32 want_pid, u32 *out_pid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (!threads[i].cont_notify) continue;
+        if (threads[i].ppid != ppid) continue;
+        if (want_pid != (u32)(-1) && threads[i].pid != want_pid) continue;
+        if (threads[i].state == TCB_FREE || threads[i].state == TCB_DEAD) continue;
+        threads[i].cont_notify = 0;
+        if (out_pid) *out_pid = threads[i].pid;
+        return 1;
+    }
+    return 0;
+}
+
+u32 sched_continued_exists(u32 ppid, u32 want_pid) {
+    u32 i;
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (!threads[i].cont_notify) continue;
+        if (threads[i].ppid != ppid) continue;
+        if (want_pid != (u32)(-1) && threads[i].pid != want_pid) continue;
+        if (threads[i].state == TCB_FREE || threads[i].state == TCB_DEAD) continue;
+        return 1;
+    }
+    return 0;
 }
 
 /* Minimal user signal frame pushed onto the interrupted stack:

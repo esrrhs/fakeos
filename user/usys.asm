@@ -37,6 +37,13 @@ global u_recvfrom
 global u_listen
 global u_accept
 global u_kill
+global u_setpgid
+global u_getpgid
+global u_setsid
+global u_getsid
+global u_shutdown
+global u_getsockname
+global u_getpeername
 global u_tty_setfg
 global u_rt_sigaction
 global u_rt_sigreturn
@@ -164,7 +171,28 @@ USYSC1 u_accept, 43
 ; long u_kill(long pid, long sig)
 USYSC1 u_kill, 62
 
-; long u_tty_setfg(long pid)
+; long u_setpgid(long pid, long pgid)
+USYSC1 u_setpgid, 109
+
+; long u_getpgid(long pid)
+USYSC1 u_getpgid, 121
+
+; long u_setsid(void)
+USYSC1 u_setsid, 112
+
+; long u_getsid(long pid)
+USYSC1 u_getsid, 124
+
+; long u_shutdown(long fd, long how)
+USYSC1 u_shutdown, 48
+
+; long u_getsockname(long fd, void *addr, unsigned int *alen)
+USYSC1 u_getsockname, 51
+
+; long u_getpeername(long fd, void *addr, unsigned int *alen)
+USYSC1 u_getpeername, 52
+
+; long u_tty_setfg(long pgid)
 USYSC1 u_tty_setfg, 501
 
 ; long u_rt_sigaction(sig, act, old, setsize) -- 4th arg RCX to R10

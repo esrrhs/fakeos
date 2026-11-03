@@ -64,7 +64,14 @@ extern void proc_reparent_exits(u32 old_ppid, u32 new_ppid);
 extern u64 sys_wait4(u64 pid, u64 status, u64 options, u64 ruspace);
 extern u64 sys_kill(u64 pid, u64 sig);
 extern u64 sys_tty_setfg(u64 pid);
+extern u64 sys_setpgid(u64 pid, u64 pgid);
+extern u64 sys_setsid(void);
+extern u64 sys_getpgid(u64 pid);
+extern u64 sys_getsid(u64 pid);
 extern u64 sys_rt_sigaction(u64 sig, u64 act, u64 old, u64 setsize);
+extern u64 sys_shutdown(u64 fd, u64 how);
+extern u64 sys_getsockname(u64 fd, u64 uaddr, u64 ualen);
+extern u64 sys_getpeername(u64 fd, u64 uaddr, u64 ualen);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
@@ -131,6 +138,13 @@ enum {
     SC_LISTEN = 50,
     SC_ACCEPT = 43,
     SC_KILL = 62,
+    SC_SETPGID = 109,
+    SC_GETPGID = 121,
+    SC_SETSID = 112,
+    SC_GETSID = 124,
+    SC_SHUTDOWN = 48,
+    SC_GETSOCKNAME = 51,
+    SC_GETPEERNAME = 52,
     SC_PING = 500,
     SC_TTY_SETFG = 501,
     SC_RT_SIGACTION = 13,
@@ -319,6 +333,27 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_KILL) {
         return sys_kill(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_SETPGID) {
+        return sys_setpgid(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_GETPGID) {
+        return sys_getpgid(f->rdi);
+    }
+    if (f->rax == SC_SETSID) {
+        return sys_setsid();
+    }
+    if (f->rax == SC_GETSID) {
+        return sys_getsid(f->rdi);
+    }
+    if (f->rax == SC_SHUTDOWN) {
+        return sys_shutdown(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_GETSOCKNAME) {
+        return sys_getsockname(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_GETPEERNAME) {
+        return sys_getpeername(f->rdi, f->rsi, f->rdx);
     }
     if (f->rax == SC_TTY_SETFG) {
         return sys_tty_setfg(f->rdi);

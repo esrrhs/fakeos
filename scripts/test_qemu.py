@@ -304,6 +304,8 @@ def main():
         "[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB",
         "[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin",
         "[EXT2] journal-lite ordered markers online (not a full journal)",
+        # AHCI probe log (QEMU may or may not expose 01.06)
+        re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
         "Multiboot Physical Memory Map",
         "Buddy Physical Page Allocator Online",
         "4-Level Page Table Toolchain Online",
@@ -362,7 +364,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z, history/!!/readline, PATH/quotes, kill; persist under /home",
+        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/pgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -380,7 +382,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: Ext2 journal-lite + SIGTSTP/Ctrl-Z jobs + fsync online!",
+        "[SUCCESS] fakeos: pgrp/setsid + demand-zero + sockets/AHCI notes online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

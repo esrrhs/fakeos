@@ -11,8 +11,9 @@ typedef types.uint64_t u64;
  * PCI configuration space via legacy ports 0xCF8 / 0xCFC (type-1).
  *
  * Enough to enumerate bus 0 and locate a VirtIO-blk function by vendor /
- * device id, then read BARs and enable I/O + bus-master in the command
- * register. No bridges, MSI or capabilities walk yet.
+ * device id (or AHCI by class 01.06), then read BARs and enable I/O +
+ * bus-master in the command register. No bridges, MSI or full capabilities
+ * walk yet — see docs/blk-modern-path.md.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -169,6 +170,40 @@ u32 pci_find_vendor_subsystem(u16 vendor, u16 subsystem,
             }
             sub = pci_read16(0, slot, func, PCI_SUBSYSTEM + 2);
             if (sub == subsystem) {
+                *obus = 0;
+                *oslot = slot;
+                *ofunc = func;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Match PCI base-class / subclass (from CLASS_REV dword). */
+u32 pci_find_class(u8 base_class, u8 subclass, u8 *obus, u8 *oslot, u8 *ofunc) {
+    u8 slot;
+    u8 func;
+    for (slot = 0; slot < 32; slot++) {
+        u16 ven = pci_read16(0, slot, 0, PCI_VENDOR_ID);
+        u8 header;
+        u8 max_func;
+        if (ven == 0xFFFF) {
+            continue;
+        }
+        header = pci_read8(0, slot, 0, PCI_HEADER_TYPE);
+        max_func = ((header & 0x80) != 0) ? 8 : 1;
+        for (func = 0; func < max_func; func++) {
+            u32 crev;
+            u8 cls;
+            u8 sub;
+            if (pci_read16(0, slot, func, PCI_VENDOR_ID) == 0xFFFF) {
+                continue;
+            }
+            crev = pci_read32(0, slot, func, PCI_CLASS_REV);
+            cls = (u8)((crev >> 24) & 0xFF);
+            sub = (u8)((crev >> 16) & 0xFF);
+            if (cls == base_class && sub == subclass) {
                 *obus = 0;
                 *oslot = slot;
                 *ofunc = func;

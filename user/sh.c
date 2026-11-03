@@ -22,7 +22,9 @@ extern long u_getcwd(char *buf, unsigned long len);
 extern long u_getpid(void);
 extern long u_sync(void);
 extern long u_kill(long pid, long sig);
-extern long u_tty_setfg(long pid);
+extern long u_setpgid(long pid, long pgid);
+extern long u_getpgid(long pid);
+extern long u_tty_setfg(long pgid);
 
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
@@ -47,12 +49,14 @@ enum {
     MAX_JOBS = 4,
     WNOHANG = 1,
     WUNTRACED = 2,
+    WCONTINUED = 8,
     SIGCONT_N = 18,
     SIGTSTP_N = 20
 };
 
 struct job {
-    long pid;
+    long pid;       /* leader / wait target */
+    long pgid;      /* process group (pipeline unit) */
     int active;
     int stopped;
     char name[64];
@@ -148,6 +152,16 @@ static int status_exit(long st) {
     return (int)((st >> 8) & 0xff);
 }
 
+/* Put child into a new process group (leader=pgid). Both parent and child
+ * call this to close the fork race. */
+static void job_set_pgrp(long child, long pgid) {
+    if (child == 0) {
+        u_setpgid(0, pgid == 0 ? 0 : pgid);
+    } else {
+        u_setpgid(child, pgid);
+    }
+}
+
 static int job_note_stopped(long pid, const char *fallback_name) {
     int ji = job_find_pid(pid);
     int k;
@@ -155,6 +169,7 @@ static int job_note_stopped(long pid, const char *fallback_name) {
         ji = job_alloc();
         if (ji < 0) return -1;
         jobs[ji].pid = pid;
+        jobs[ji].pgid = pid;
         jobs[ji].active = 1;
         jobs[ji].name[0] = 0;
         if (fallback_name) {
@@ -392,7 +407,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
-        puts("signals: Ctrl-C SIGINT, Ctrl-Z SIGTSTP stop; fg/bg/jobs; kill; history/readline");
+        puts("signals: Ctrl-C/Z to fg pgrp; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -425,11 +440,12 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         pid = jobs[ji].pid;
         if (jobs[ji].stopped) {
-            u_kill(pid, SIGCONT_N);
+            long pg = jobs[ji].pgid != 0 ? jobs[ji].pgid : pid;
+            u_kill(-pg, SIGCONT_N);
             jobs[ji].stopped = 0;
         }
-        u_tty_setfg(pid);
-        reaped = u_wait4(pid, &status, WUNTRACED, 0);
+        u_tty_setfg(jobs[ji].pgid != 0 ? jobs[ji].pgid : pid);
+        reaped = u_wait4(pid, &status, WUNTRACED | WCONTINUED, 0);
         u_tty_setfg(0);
         if (reaped == pid && status_stopped(status)) {
             jobs[ji].stopped = 1;
@@ -456,7 +472,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             return 1;
         }
         if (jobs[ji].stopped) {
-            u_kill(jobs[ji].pid, SIGCONT_N);
+            long pg = jobs[ji].pgid != 0 ? jobs[ji].pgid : jobs[ji].pid;
+            u_kill(-pg, SIGCONT_N);
             jobs[ji].stopped = 0;
         }
         printf("[%d]+ %s &\n", ji + 1, jobs[ji].name);
@@ -630,6 +647,7 @@ static long run_pipeline(char **tokens, long rc_in) {
             int saved_out;
             child = u_fork();
             if (child == 0) {
+                job_set_pgrp(0, 0); /* new pgrp = self */
                 if (push_redirects(in_path, out_path, append, &saved_in,
                                    &saved_out) < 0) {
                     u_exit(1);
@@ -640,8 +658,9 @@ static long run_pipeline(char **tokens, long rc_in) {
                 }
                 u_exit(127);
             }
+            job_set_pgrp(child, child);
             u_tty_setfg(child);
-            reaped = u_wait4(child, &status, WUNTRACED, 0);
+            reaped = u_wait4(child, &status, WUNTRACED | WCONTINUED, 0);
             u_tty_setfg(0);
             if (reaped == child && status_stopped(status)) {
                 int ji = job_note_stopped(child, stages[0][0]);
@@ -670,50 +689,58 @@ static long run_pipeline(char **tokens, long rc_in) {
         npipes++;
     }
 
-    for (si = 0; si < nstage; si++) {
-        int in_fd = -1;
-        int out_fd = -1;
-        long child;
-        if (si > 0) {
-            in_fd = pipes[si - 1][0];
-        }
-        if (si < nstage - 1) {
-            out_fd = pipes[si][1];
-        }
-        child = u_fork();
-        if (child < 0) {
-            puts("sh: fork failed");
-            rc = 1;
-            break;
-        }
-        if (child == 0) {
-            child_run_stage(stages[si], in_fd, out_fd, rc_in);
-        }
-        pids[si] = child;
-    }
-
-    /* Parent closes all pipe ends so writers can see EOF. */
-    for (si = 0; si < npipes; si++) {
-        u_close(pipes[si][0]);
-        u_close(pipes[si][1]);
-    }
-
-    /* Reap every stage; overall status is the last one's. */
-    if (nstage > 0) {
-        u_tty_setfg(pids[nstage - 1]);
-    }
-    for (si = 0; si < nstage; si++) {
-        long reaped = u_wait4(pids[si], &status, WUNTRACED, 0);
-        if (reaped == pids[si] && status_stopped(status)) {
-            int ji = job_note_stopped(pids[si], stages[si][0]);
-            if (ji >= 0) {
-                printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+    {
+        long pipe_pgid = 0;
+        for (si = 0; si < nstage; si++) {
+            int in_fd = -1;
+            int out_fd = -1;
+            long child;
+            if (si > 0) {
+                in_fd = pipes[si - 1][0];
             }
-            rc = 148;
-        } else if (reaped == pids[si]) {
-            rc = status_exit(status);
-        } else {
-            rc = -1;
+            if (si < nstage - 1) {
+                out_fd = pipes[si][1];
+            }
+            child = u_fork();
+            if (child < 0) {
+                puts("sh: fork failed");
+                rc = 1;
+                break;
+            }
+            if (child == 0) {
+                job_set_pgrp(0, pipe_pgid == 0 ? 0 : pipe_pgid);
+                child_run_stage(stages[si], in_fd, out_fd, rc_in);
+            }
+            if (pipe_pgid == 0) {
+                pipe_pgid = child;
+            }
+            job_set_pgrp(child, pipe_pgid);
+            pids[si] = child;
+        }
+
+        for (si = 0; si < npipes; si++) {
+            u_close(pipes[si][0]);
+            u_close(pipes[si][1]);
+        }
+
+        if (pipe_pgid != 0) {
+            u_tty_setfg(pipe_pgid);
+        }
+        for (si = 0; si < nstage; si++) {
+            long reaped = u_wait4(pids[si], &status, WUNTRACED | WCONTINUED, 0);
+            if (reaped == pids[si] && status_stopped(status)) {
+                int ji = job_note_stopped(pipe_pgid, stages[0][0]);
+                if (ji >= 0) {
+                    jobs[ji].pgid = pipe_pgid;
+                    jobs[ji].pid = pipe_pgid;
+                    printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+                }
+                rc = 148;
+            } else if (reaped == pids[si]) {
+                rc = status_exit(status);
+            } else {
+                rc = -1;
+            }
         }
     }
     u_tty_setfg(0);
@@ -782,6 +809,7 @@ static long run_list(char **tokens, long rc_in) {
                 u_exit(st);
             }
             jobs[ji].pid = child;
+            jobs[ji].pgid = child;
             jobs[ji].active = 1;
             jobs[ji].stopped = 0;
             job_set_name(ji, stage);
@@ -828,7 +856,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z, history/!!/readline, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/pgrp, history/!!/readline, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

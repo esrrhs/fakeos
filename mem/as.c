@@ -24,10 +24,11 @@ extern void tlb_flush(void);
  * lower-half slots (0..255) are private per-process page tables.
  *
  * Anonymous VMAs reserve a range with permissions but map nothing; the first
- * touch raises #PF and as_handle_fault() demand-allocates a zeroed page.
- * as_cow_clone() shallow-copies an address space, marking every shared leaf
- * read-only and bumping a per-frame refcount; the first write after that
- * triggers a private copy.
+ * touch raises #PF and as_handle_fault() demand-pages it. Read faults share a
+ * global zero frame (mapped RO); the first write allocates a private page
+ * (or COWs off the shared zero). as_cow_clone() shallow-copies an address
+ * space, marking every shared leaf read-only and bumping a per-frame
+ * refcount; the first write after that triggers a private copy.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -79,6 +80,12 @@ struct address_space {
 /* Per-frame share count for COW. 1 = single owner (plain writable page),
  * >=2 = mapped read-only into that many address spaces / PTEs. */
 static u16 frame_refs[MAX_FRAMES_AS];
+
+/* Shared demand-zero page: read faults map this RO frame; write faults
+ * always allocate a private copy (never lift W on the shared zero). */
+static u64 zero_frame;
+static u32 zero_faults;
+static u32 private_faults;
 
 /* The address space currently installed in CR3; 0 while the kernel runs on
  * its bootstrap root. */
@@ -243,6 +250,19 @@ static u64 leaf_perms(struct vma *vma) {
  * ------------------------------------------------------------------------- */
 extern void kprintf(const char *fmt, ...);
 
+static u32 ensure_zero_frame(void) {
+    if (zero_frame != 0) {
+        return 1;
+    }
+    zero_frame = alloc_zero_frame();
+    if (zero_frame == 0) {
+        return 0;
+    }
+    /* Pin so unmap never frees the shared zero page. */
+    frame_refs[(u32)(zero_frame / PAGE_SIZE)] = 1;
+    return 1;
+}
+
 int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
     u64 page_va = vaddr & ~0xFFFULL;
     struct vma *vma = find_vma(as, page_va);
@@ -262,14 +282,33 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
         if ((err & 0x2) && !(vma->prot & PROT_WRITE)) {
             return 0;                 /* Write to a read-only VMA */
         }
-        u64 frame = alloc_zero_frame();
-        if (frame == 0) {
+        if (err & 0x2) {
+            /* Write fault: private zero page. */
+            u64 frame = alloc_zero_frame();
+            if (frame == 0) {
+                return 0;
+            }
+            frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
+            pt[i] = frame | leaf_perms(vma);
+            private_faults++;
+            invlpg_page(page_va);
+            return 1;
+        }
+        /* Read fault: map shared zero RO (even for RW VMAs). */
+        if (!ensure_zero_frame()) {
             return 0;
         }
-        frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
-        pt[i] = frame | leaf_perms(vma);
-        invlpg_page(page_va);
-        return 1;
+        {
+            u64 e = PTE_P | PTE_U;   /* never PTE_W on shared zero */
+            if (!(vma->prot & PROT_EXEC)) {
+                e |= ((u64)1 << 63);
+            }
+            frame_refs[(u32)(zero_frame / PAGE_SIZE)]++;
+            pt[i] = zero_frame | e;
+            zero_faults++;
+            invlpg_page(page_va);
+            return 1;
+        }
     }
 
     /* Present page: the only resolvable protection fault is a write to a
@@ -279,28 +318,34 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
         if (!(vma->prot & PROT_WRITE)) {
             return 0;
         }
-        u64 old = entry_phys(pte);
-        u32 pfn = (u32)(old / PAGE_SIZE);
-        if (frame_refs[pfn] <= 1) {
-            /* Last owner: just lift write protection. */
-            frame_refs[pfn] = 1;
-            pt[i] = pte | PTE_W;
+        u64 old_phys = entry_phys(pte);
+        u32 pfn = (u32)(old_phys / PAGE_SIZE);
+        /* Shared zero must always COW; never promote it writable. */
+        if (old_phys == zero_frame || frame_refs[pfn] > 1) {
+            u64 fresh = alloc_zero_frame();
+            u32 k;
+            volatile u8 *src;
+            volatile u8 *dst;
+            if (fresh == 0) {
+                return 0;
+            }
+            src = (volatile u8 *)(HHDM_BASE + old_phys);
+            dst = (volatile u8 *)(HHDM_BASE + fresh);
+            for (k = 0; k < 4096; k++) {
+                dst[k] = src[k];
+            }
+            frame_refs[(u32)(fresh / PAGE_SIZE)] = 1;
+            if (frame_refs[pfn] > 0) {
+                frame_refs[pfn]--;
+            }
+            pt[i] = fresh | leaf_perms(vma);
+            private_faults++;
             invlpg_page(page_va);
             return 1;
         }
-        u64 fresh = alloc_zero_frame();
-        if (fresh == 0) {
-            return 0;
-        }
-        volatile u8 *src = (volatile u8 *)(HHDM_BASE + old);
-        volatile u8 *dst = (volatile u8 *)(HHDM_BASE + fresh);
-        u32 k;
-        for (k = 0; k < 4096; k++) {
-            dst[k] = src[k];
-        }
-        frame_refs[(u32)(fresh / PAGE_SIZE)] = 1;
-        frame_refs[pfn]--;
-        pt[i] = fresh | leaf_perms(vma);
+        /* Last private owner: just lift write protection. */
+        frame_refs[pfn] = 1;
+        pt[i] = pte | PTE_W;
         invlpg_page(page_va);
         return 1;
     }
@@ -555,7 +600,7 @@ void as_selftest(void) {
 
     kprintf("\n[VMA] Virtual Memory Areas + Demand Paging + COW Online:\n");
     kprintf("      Per-space PML4, kernel slots shared, private lower half\n");
-    kprintf("      Anonymous VMAs: 4 KiB demand-zero pages, PROT_READ/WRITE\n");
+    kprintf("      Anonymous VMAs: demand-zero (shared RO zero page on read)\n");
     kprintf("      COW: refcounted read-only shared leaves, private copy on write\n");
     kprintf("\n[VMA] Running Address Space Self-Tests...\n");
 
@@ -597,9 +642,20 @@ void as_selftest(void) {
         }
     }
 
-    /* Read-only VMA: read demand works, write fault must be rejected. */
+    /* Read-only VMA: read demand maps shared zero; write fault rejected. */
     u8 rd = va_ptr(RO_A)[10];
     (void)rd;
+    {
+        u64 ro_pte = as_translate(&as_parent, RO_A);
+        if (zero_frame == 0 || (ro_pte & ~0xFFFull) != zero_frame) {
+            kprintf("      [FAIL] RO demand read did not map shared zero page\n");
+            ok = 0;
+        }
+        if ((ro_pte & PTE_W) != 0) {
+            kprintf("      [FAIL] shared zero mapped writable\n");
+            ok = 0;
+        }
+    }
     if (as_dispatch_fault(1, GUARD, 0x2) != 0) {
         kprintf("      [FAIL] write to unmapped guard region accepted\n");
         ok = 0;
@@ -802,7 +858,11 @@ static void unmap_present_pages(struct address_space *as, u64 va, u64 len) {
                     && frame_refs[(u32)(frame / PAGE_SIZE)] > 0) {
                     frame_refs[(u32)(frame / PAGE_SIZE)]--;
                     if (frame_refs[(u32)(frame / PAGE_SIZE)] == 0) {
-                        pmm_free_page(frame);
+                        if (frame != zero_frame) {
+                            pmm_free_page(frame);
+                        } else {
+                            frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
+                        }
                     }
                 }
             }

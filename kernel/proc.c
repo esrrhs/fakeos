@@ -5,6 +5,7 @@ import types;
 
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
+typedef types.int64_t i64;
 
 extern void kprintf(const char *fmt, ...);
 
@@ -23,8 +24,9 @@ extern void kprintf(const char *fmt, ...);
 
 enum {
     MAX_EXIT = 32,
-    WNOHANG    = 1,
-    WUNTRACED  = 2
+    WNOHANG     = 1,
+    WUNTRACED   = 2,
+    WCONTINUED  = 8
 };
 
 struct exit_record {
@@ -58,6 +60,14 @@ extern void sched_check_signals(void);
 extern u32 sched_has_pending_fatal(void);
 extern u32 sched_take_stopped(u32 ppid, u32 want_pid, u32 *out_pid, u32 *out_sig);
 extern u32 sched_stopped_exists(u32 ppid, u32 want_pid);
+extern u32 sched_take_continued(u32 ppid, u32 want_pid, u32 *out_pid);
+extern u32 sched_continued_exists(u32 ppid, u32 want_pid);
+extern u32 sched_current_pgid(void);
+extern u32 sched_signal_pgrp(u32 pgid, u32 sig);
+extern u32 sched_setpgid(u32 pid, u32 pgid);
+extern u32 sched_setsid(void);
+extern u32 sched_get_pgid(u32 pid);
+extern u32 sched_get_sid(u32 pid);
 extern void tty_set_fg(u32 pid);
 extern u32 tty_get_fg(void);
 
@@ -135,7 +145,8 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
          * caller happens to have other children. */
         if (want != (u32)(-1) && !exit_exists(want, parent)
             && !sched_is_live_child(parent, want)
-            && !((options & WUNTRACED) && sched_stopped_exists(parent, want))) {
+            && !((options & WUNTRACED) && sched_stopped_exists(parent, want))
+            && !((options & WCONTINUED) && sched_continued_exists(parent, want))) {
             return (u64)(-1);
         }
         /* Stopped children (Ctrl-Z / SIGTSTP) when WUNTRACED is set. */
@@ -144,6 +155,15 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
             if (status_u != 0 && mem.as_user_range_ok(as, status_u, 8)) {
                 volatile u64 *sp = (volatile u64 *)status_u;
                 *sp = ((u64)got_sig << 8) | 0x7f;
+            }
+            return (u64)got_pid;
+        }
+        /* Continued children when WCONTINUED is set (status 0xffff). */
+        if ((options & WCONTINUED)
+            && sched_take_continued(parent, want, &got_pid)) {
+            if (status_u != 0 && mem.as_user_range_ok(as, status_u, 8)) {
+                volatile u64 *sp = (volatile u64 *)status_u;
+                *sp = 0xffff;
             }
             return (u64)got_pid;
         }
@@ -169,7 +189,8 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
             u64 chan = sched_wait4_chan(parent);
             arch.cpu_cli();
             if (exit_exists(want, parent)
-                || ((options & WUNTRACED) && sched_stopped_exists(parent, want))) {
+                || ((options & WUNTRACED) && sched_stopped_exists(parent, want))
+                || ((options & WCONTINUED) && sched_continued_exists(parent, want))) {
                 arch.cpu_sti();
                 continue;
             }
@@ -195,32 +216,88 @@ enum {
     SC_ERR    = (u64)-1
 };
 
-/* kill(pid, sig): pid>0 exact process; sig==0 existence check.
+/* kill(pid, sig):
+ *   pid > 0  : exact process
+ *   pid == 0 : caller's process group
+ *   pid < 0  : process group -pid
+ * sig==0 is an existence / pgrp membership probe.
  * Returns 0 on success, -1 on failure. */
 u64 sys_kill(u64 pid, u64 sig) {
-    u32 p = (u32)pid;
     u32 s = (u32)sig;
-    if (pid == 0 || pid > 0x7FFFFFFFUL) {
-        /* No pgrp broadcast yet; reject 0 / negative. */
-        return SC_ERR;
-    }
+    u32 self = sched_current_pid();
     if (s > 31) {
         return SC_ERR;
     }
-    if (s == 0) {
-        return sched_pid_exists(p) ? 0 : SC_ERR;
+    if ((i64)pid < 0) {
+        u32 pg = (u32)(-(i64)pid);
+        u32 n;
+        if (pg == 0) {
+            return SC_ERR;
+        }
+        if (s == 0) {
+            return sched_signal_pgrp(pg, 0) ? 0 : SC_ERR;
+        }
+        n = sched_signal_pgrp(pg, s);
+        if (n == 0) {
+            return SC_ERR;
+        }
+        if (sched_current_pgid() == pg) {
+            sched_check_signals();
+        }
+        return 0;
     }
-    if (!sched_signal_send(p, s)) {
-        return SC_ERR;
-    }
-    /* If we signalled ourselves, deliver before returning. */
-    if (p == sched_current_pid()) {
+    if (pid == 0) {
+        u32 pg = sched_current_pgid();
+        u32 n;
+        if (pg == 0) {
+            return SC_ERR;
+        }
+        if (s == 0) {
+            return sched_signal_pgrp(pg, 0) ? 0 : SC_ERR;
+        }
+        n = sched_signal_pgrp(pg, s);
+        if (n == 0) {
+            return SC_ERR;
+        }
         sched_check_signals();
+        return 0;
     }
-    return 0;
+    {
+        u32 p = (u32)pid;
+        if (s == 0) {
+            return sched_pid_exists(p) ? 0 : SC_ERR;
+        }
+        if (!sched_signal_send(p, s)) {
+            return SC_ERR;
+        }
+        if (p == self) {
+            sched_check_signals();
+        }
+        return 0;
+    }
 }
 
-/* Custom: set TTY foreground process for Ctrl-C (SIGINT) delivery. */
+u64 sys_setpgid(u64 pid, u64 pgid) {
+    return sched_setpgid((u32)pid, (u32)pgid) ? SC_ERR : 0;
+}
+
+u64 sys_setsid(void) {
+    u32 r = sched_setsid();
+    return r == 0 ? SC_ERR : (u64)r;
+}
+
+u64 sys_getpgid(u64 pid) {
+    u32 g = sched_get_pgid((u32)pid);
+    return g == 0 ? SC_ERR : (u64)g;
+}
+
+u64 sys_getsid(u64 pid) {
+    u32 s = sched_get_sid((u32)pid);
+    return s == 0 ? SC_ERR : (u64)s;
+}
+
+/* Custom: set TTY foreground process group for Ctrl-C/Z delivery.
+ * Pass a pgid (often equal to the job leader pid). 0 clears. */
 u64 sys_tty_setfg(u64 pid) {
     tty_set_fg((u32)pid);
     return 0;

@@ -179,6 +179,10 @@ flowchart TD
 - [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags 作 ordered-write 恢复标记；脏挂载或 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
 - [x] **SIGTSTP / Ctrl-Z 作业停止**：`TCB_STOPPED` + `wait4(WUNTRACED)`；TTY ISIG 在 UART/PS2 输入路径拦截 Ctrl-C/Z（wait4 阻塞时也可投递）；shell `jobs`/`fg`/`bg` 续跑 `SIGCONT`。
 - [x] **fsync(2)**：nr 74；Ext2 fd 触发卷级 sync（与 journal-lite 标记配对）。
+- [x] **进程组 / 会话**：`setpgid`/`getpgid`/`setsid`/`getsid`；`kill(0/-pgid)` 广播；TTY Ctrl-C/Z 投递到前台 **pgid**；shell 管道共用一组以便整组停止；`wait4(WCONTINUED)`。
+- [x] **Demand paging 抛光**：匿名读缺页共享全局 zero 页（只读映射），写时再私有分配/COW；卸载时钉住 zero 页。
+- [x] **更丰富套接字**：`shutdown`/`getsockname`/`getpeername`（TCP 半关闭；UDP mute）。
+- [x] **AHCI / modern virtio 笔记**：`docs/blk-modern-path.md`；启动时 PCI `01.06` AHCI 探测日志（仍无驱动；默认 legacy virtio-blk/ATA）。
 
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。

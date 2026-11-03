@@ -87,7 +87,11 @@ enum {
     TCPF_SYN = 0x02,
     TCPF_RST = 0x04,
     TCPF_PSH = 0x08,
-    TCPF_ACK = 0x10
+    TCPF_ACK = 0x10,
+
+    SHUT_RD = 0,
+    SHUT_WR = 1,
+    SHUT_RDWR = 2
 };
 
 struct arp_entry {
@@ -134,6 +138,9 @@ struct sock {
     u32 s_count;
     u8  sbuf[TCP_RX_CAP];
     u32 peer_fin;      /* saw FIN; recv returns 0 after drain */
+    u32 shut_rd;       /* shutdown(SHUT_RD): discard further RX */
+    u32 shut_wr;       /* shutdown(SHUT_WR): no more TX / send FIN */
+    u32 reuseaddr;     /* SO_REUSEADDR hint (bind helper) */
     /* Retransmit of last unacked segment (SYN or data). */
     u32 rexmit_due;    /* sched_ticks deadline; 0 = idle */
     u32 rexmit_seq;
@@ -1516,6 +1523,9 @@ u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
     }
     if (sk->type == SOCK_STREAM) {
         u8 tbuf[TCP_MAX_PAYLOAD];
+        if (sk->shut_wr) {
+            return (u64)(-1);
+        }
         if (sk->tcp_state != TCPS_ESTABLISHED && sk->tcp_state != TCPS_CLOSE_WAIT) {
             return (u64)(-1);
         }
@@ -1768,6 +1778,76 @@ u64 sys_accept(u64 fd, u64 uaddr, u64 ualen) {
         }
     }
     return (u64)nfd;
+}
+
+/* shutdown(fd, how): half-close TCP or mute UDP RX/TX. */
+u64 sys_shutdown(u64 fd, u64 how) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    if (!sk) {
+        return (u64)(-1);
+    }
+    if (how > SHUT_RDWR) {
+        return (u64)(-1);
+    }
+    if (how == SHUT_RD || how == SHUT_RDWR) {
+        sk->shut_rd = 1;
+        sk->rx_count = 0;
+        sk->rx_head = 0;
+        sk->rx_tail = 0;
+        sk->s_count = 0;
+        sk->s_head = 0;
+        sk->s_tail = 0;
+        sk->peer_fin = 1;
+    }
+    if (how == SHUT_WR || how == SHUT_RDWR) {
+        sk->shut_wr = 1;
+        if (sk->type == SOCK_STREAM) {
+            if (sk->tcp_state == TCPS_ESTABLISHED) {
+                tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                           sk->snd_nxt, sk->rcv_nxt,
+                           (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
+                sk->snd_nxt++;
+                sk->tcp_state = TCPS_FIN_WAIT;
+            } else if (sk->tcp_state == TCPS_CLOSE_WAIT) {
+                tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                           sk->snd_nxt, sk->rcv_nxt,
+                           (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
+                sk->snd_nxt++;
+                sk->tcp_state = TCPS_LAST_ACK;
+            }
+        }
+    }
+    return 0;
+}
+
+u64 sys_getsockname(u64 fd, u64 uaddr, u64 ualen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    u32 ip;
+    if (!sk || !sk->bound) {
+        return (u64)(-1);
+    }
+    ip = sk->local_ip;
+    if (ip == 0) {
+        ip = local_ip;
+    }
+    if (!write_sockaddr_in(uaddr, ualen, ip, sk->local_port)) {
+        return (u64)(-1);
+    }
+    return 0;
+}
+
+u64 sys_getpeername(u64 fd, u64 uaddr, u64 ualen) {
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    if (!sk || !sk->connected) {
+        return (u64)(-1);
+    }
+    if (!write_sockaddr_in(uaddr, ualen, sk->peer_ip, sk->peer_port)) {
+        return (u64)(-1);
+    }
+    return 0;
 }
 
 void net_udp_selftest(void) {

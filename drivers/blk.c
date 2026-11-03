@@ -18,6 +18,8 @@ extern u64 ata_capacity(void);
 extern u32 ata_read(u64 sector, void *kbuf, u32 count);
 extern u32 ata_write(u64 sector, const void *kbuf, u32 count);
 extern u32 ata_flush(void);
+extern u32 pci_find_class(u8 base_class, u8 subclass, u8 *obus, u8 *oslot, u8 *ofunc);
+extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
 
 enum {
     BLK_NONE = 0,
@@ -29,6 +31,22 @@ static u32 blk_kind;
 
 void blk_init(void) {
     blk_kind = BLK_NONE;
+    /* Probe-only: log AHCI if QEMU exposed one (no driver yet). */
+    {
+        u8 bus = 0;
+        u8 slot = 0;
+        u8 func = 0;
+        if (pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
+            u32 bar = 0;
+            u32 io = 0;
+            pci_bar0(bus, slot, func, &bar, &io);
+            kprintf("[BLK] AHCI PCI 01.06 at %u:%u.%u BAR0=0x%x (%s) — not driven yet (see docs/blk-modern-path.md)\n",
+                    (u64)bus, (u64)slot, (u64)func, (u64)bar,
+                    io ? "I/O" : "MMIO");
+        } else {
+            kprintf("[BLK] no AHCI (PCI 01.06); using legacy virtio-blk/ATA\n");
+        }
+    }
     /* Prefer VirtIO when the legacy queue path is healthy; otherwise ATA. */
     virtio_blk_init();
     if (virtio_blk_present()) {

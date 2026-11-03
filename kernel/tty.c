@@ -44,7 +44,7 @@ extern void cpu_cli(void);
 extern void cpu_sti(void);
 
 static u32 tty_wait_token;
-static u32 tty_fg_pid;          /* foreground process for SIGINT (0=reader) */
+static u32 tty_fg_pgid;         /* foreground process group for ISIG (0=none) */
 static u32 tty_got_intr;        /* Ctrl-C interrupted the current read */
 
 /* Arrow-key history: completed lines recalled with CSI A/B (Up/Down). */
@@ -56,6 +56,7 @@ static int tty_hist_view;       /* -1 = editing new; else index into ring */
 
 extern u32 sched_current_pid(void);
 extern u32 sched_signal_send(u32 pid, u32 sig);
+extern u32 sched_signal_pgrp(u32 pgid, u32 sig);
 extern u32 sched_has_pending_fatal(void);
 extern u32 sched_should_eintr(void);
 extern void sched_check_signals(void);
@@ -66,12 +67,23 @@ enum {
     EINTR_NEG = (u64)-4
 };
 
-void tty_set_fg(u32 pid) {
-    tty_fg_pid = pid;
+void tty_set_fg(u32 pgid) {
+    tty_fg_pgid = pgid;
 }
 
 u32 tty_get_fg(void) {
-    return tty_fg_pid;
+    return tty_fg_pgid;
+}
+
+static void tty_signal_fg(u32 sig) {
+    if (tty_fg_pgid == 0) {
+        return;
+    }
+    /* Prefer pgrp broadcast so pipelines stop/interrupt as a unit. */
+    if (!sched_signal_pgrp(tty_fg_pgid, sig)) {
+        /* Fallback: treat the value as a lone pid (pre-pgrp callers). */
+        sched_signal_send(tty_fg_pgid, sig);
+    }
 }
 
 static void tty_queue_byte(char c) {
@@ -100,9 +112,7 @@ static void tty_ingest_byte(char c) {
         tty_line_len = 0;
         tty_pos = 0;
         tty_got_intr = 1;
-        if (tty_fg_pid != 0) {
-            sched_signal_send(tty_fg_pid, SIGINT_N);
-        }
+        tty_signal_fg(SIGINT_N);
         sched_wakeup((u64)&tty_wait_token);
         return;
     }
@@ -113,9 +123,7 @@ static void tty_ingest_byte(char c) {
         drivers.vga_putc('^');
         drivers.vga_putc('Z');
         drivers.vga_putc('\n');
-        if (tty_fg_pid != 0) {
-            sched_signal_send(tty_fg_pid, SIGTSTP_N);
-        }
+        tty_signal_fg(SIGTSTP_N);
         sched_wakeup((u64)&tty_wait_token);
         return;
     }
@@ -301,9 +309,7 @@ static void tty_recv_line(void) {
             tty_line_len = 0;
             tty_pos = 0;
             tty_got_intr = 1;
-            if (tty_fg_pid != 0) {
-                sched_signal_send(tty_fg_pid, SIGINT_N);
-            }
+            tty_signal_fg(SIGINT_N);
             return;
         }
         if (c == 0x1A) {
@@ -313,9 +319,7 @@ static void tty_recv_line(void) {
             drivers.vga_putc('^');
             drivers.vga_putc('Z');
             drivers.vga_putc('\n');
-            if (tty_fg_pid != 0) {
-                sched_signal_send(tty_fg_pid, SIGTSTP_N);
-            }
+            tty_signal_fg(SIGTSTP_N);
             /* Do not abort the reader's line; parent wait4(WUNTRACED) observes stop. */
             continue;
         }

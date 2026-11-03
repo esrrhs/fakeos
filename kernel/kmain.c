@@ -43,7 +43,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf(" |  _| (_| |   <  __/ (_) \\__ \\  \n");
     kprintf(" |_|  \\__,_|_|\\_\\___|\\___/|___/  \n");
     kprintf("================================================================================\n");
-    kprintf(" Welcome to fakeos! (M6/7: TCP + Ext2 default-root + shell jobs)\n");
+    kprintf(" Welcome to fakeos! (M6/7: TCP + Ext2 + pgrp jobs + richer sockets)\n");
     kprintf(" Fully self-contained 64-bit Higher-Half OS Kernel\n");
     kprintf(" Toolchain: fakecc C99 freestanding compiler + nasm + x86_64-elf-ld\n");
     kprintf("================================================================================\n\n");
@@ -181,7 +181,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: Ext2 journal-lite + SIGTSTP/Ctrl-Z jobs + fsync online!\n");
+    kprintf(" [SUCCESS] fakeos: pgrp/setsid + demand-zero + sockets/AHCI notes online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
