@@ -6,6 +6,7 @@ import types;
 
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
+typedef types.int64_t i64;
 
 /* ---------------------------------------------------------------------------
  * File-oriented system calls: open / close / read / write / lseek.
@@ -43,6 +44,12 @@ extern void sched_cwd_set(const char *kpath);
 
 /* kernel/tty.c (canonical serial input) */
 extern u64 tty_console_read(u64 ubuf, u64 len);
+extern u64 tty_jobctl_write_wait(void);
+extern u32 tty_input_pending(void);
+extern u64 sched_tick_count(void);
+extern void sched_yield(void);
+extern u32 sock_can_read(u32 fh);
+extern u32 sock_can_write(u32 fh);
 
 /* kernel/pipe.c */
 extern u32 pipe_fh_is(u32 fh);
@@ -407,6 +414,11 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
     if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh) && fs.fs_file_is_console(fh)) {
         volatile char *p;
         u64 i;
+        u64 jc;
+        jc = tty_jobctl_write_wait();
+        if (jc != 0) {
+            return jc;
+        }
         if (!mem.as_user_range_ok(as, buf, len)) {
             return (u64)(-1);
         }
@@ -666,3 +678,148 @@ u64 sys_fsync(u64 fd) {
     return 0;
 }
 
+
+
+/* select(2) stub: nfds<=64, one-word fd_set bitmasks, optional timeval.
+ * Ready: console input pending / always-writable console; socket RX/TX. */
+u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
+               u64 timeout_u) {
+    u64 as = sched_current_as_h();
+    u64 rbits = 0;
+    u64 wbits = 0;
+    u64 ebits = 0;
+    u64 out_r = 0;
+    u64 out_w = 0;
+    u64 deadline = 0;
+    u32 block = 0;
+    u32 i;
+    u32 nready;
+
+    if (as == 0 || nfds > 64) {
+        return (u64)(-1);
+    }
+    if (exceptfds_u != 0) {
+        /* exceptfds ignored; clear on return if provided */
+        if (!mem.as_user_range_ok(as, exceptfds_u, 8)) {
+            return (u64)(-1);
+        }
+        ebits = *(volatile u64 *)exceptfds_u;
+    }
+    if (readfds_u != 0) {
+        if (!mem.as_user_range_ok(as, readfds_u, 8)) {
+            return (u64)(-1);
+        }
+        rbits = *(volatile u64 *)readfds_u;
+    }
+    if (writefds_u != 0) {
+        if (!mem.as_user_range_ok(as, writefds_u, 8)) {
+            return (u64)(-1);
+        }
+        wbits = *(volatile u64 *)writefds_u;
+    }
+    if (timeout_u == 0) {
+        block = 1; /* infinite */
+    } else {
+        i64 sec;
+        i64 usec;
+        u64 ms;
+        if (!mem.as_user_range_ok(as, timeout_u, 16)) {
+            return (u64)(-1);
+        }
+        sec = (i64)(*(volatile u64 *)timeout_u);
+        usec = (i64)(*(volatile u64 *)(timeout_u + 8));
+        if (sec < 0 || usec < 0) {
+            return (u64)(-1);
+        }
+        if (sec == 0 && usec == 0) {
+            block = 0;
+            deadline = sched_tick_count();
+        } else {
+            block = 1;
+            /* 100 Hz ticks */
+            ms = (u64)sec * 100u + (u64)usec / 10000u;
+            if (ms == 0) {
+                ms = 1;
+            }
+            deadline = sched_tick_count() + ms;
+        }
+    }
+    (void)ebits;
+
+    for (;;) {
+        out_r = 0;
+        out_w = 0;
+        nready = 0;
+        for (i = 0; i < (u32)nfds; i++) {
+            u64 bit = (u64)1 << i;
+            u32 fh;
+            u32 want_r = (rbits & bit) != 0;
+            u32 want_w = (wbits & bit) != 0;
+            u32 this_ready = 0;
+            if (!want_r && !want_w) {
+                continue;
+            }
+            fh = sched_fd_get(i);
+            if (fh == FD_BAD) {
+                continue;
+            }
+            if (want_r) {
+                u32 ready = 0;
+                if (sock_fh_is(fh)) {
+                    ready = sock_can_read(fh);
+                } else if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh)
+                           && fs.fs_file_is_console(fh)) {
+                    ready = tty_input_pending();
+                } else if (pipe_fh_is(fh)) {
+                    /* Conservative: report readable; pipe_read still blocks. */
+                    ready = 1;
+                }
+                if (ready) {
+                    out_r |= bit;
+                    this_ready = 1;
+                }
+            }
+            if (want_w) {
+                u32 ready = 0;
+                if (sock_fh_is(fh)) {
+                    ready = sock_can_write(fh);
+                } else if (!fs.ext2_fh_is(fh) && !pipe_fh_is(fh)
+                           && fs.fs_file_is_console(fh)) {
+                    ready = 1;
+                } else if (pipe_fh_is(fh)) {
+                    ready = 1;
+                } else {
+                    ready = 1; /* files */
+                }
+                if (ready) {
+                    out_w |= bit;
+                    this_ready = 1;
+                }
+            }
+            if (this_ready) {
+                nready++;
+            }
+        }
+        if (nready > 0) {
+            break;
+        }
+        if (!block) {
+            break;
+        }
+        if (timeout_u != 0 && sched_tick_count() >= deadline) {
+            break;
+        }
+        sched_yield();
+    }
+
+    if (readfds_u != 0) {
+        *(volatile u64 *)readfds_u = out_r;
+    }
+    if (writefds_u != 0) {
+        *(volatile u64 *)writefds_u = out_w;
+    }
+    if (exceptfds_u != 0) {
+        *(volatile u64 *)exceptfds_u = 0;
+    }
+    return (u64)nready;
+}

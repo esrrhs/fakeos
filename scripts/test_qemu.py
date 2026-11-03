@@ -364,7 +364,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/pgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
+        "fakeos shell - builtins, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -382,7 +382,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: pgrp/setsid + demand-zero + sockets/AHCI notes online!",
+        "[SUCCESS] fakeos: tcsetpgrp/TTIN/TTOU + setsockopt/select + AHCI probe online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

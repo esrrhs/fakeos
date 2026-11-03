@@ -183,6 +183,9 @@ flowchart TD
 - [x] **Demand paging 抛光**：匿名读缺页共享全局 zero 页（只读映射），写时再私有分配/COW；卸载时钉住 zero 页。
 - [x] **更丰富套接字**：`shutdown`/`getsockname`/`getpeername`（TCP 半关闭；UDP mute）。
 - [x] **AHCI / modern virtio 笔记**：`docs/blk-modern-path.md`；启动时 PCI `01.06` AHCI 探测日志（仍无驱动；默认 legacy virtio-blk/ATA）。
+- [x] **tcsetpgrp / tcgetpgrp + SIGTTOU/SIGTTIN**：自定义 nr 501/502（`u_tcsetpgrp`/`u_tcgetpgrp`）；后台读/写控制台与 `tcsetpgrp` 投递停止信号；shell 用 `tcsetpgrp` 切前台。
+- [x] **setsockopt / getsockopt + select stub**：`SO_REUSEADDR`/`SO_TYPE`/`SO_ERROR`；`select`（nfds≤64）对 socket/console 就绪轮询。
+- [x] **AHCI/modern virtio 探测加深**：`pci_bar(n)`、AHCI ABAR+CAP/VS 窥视、virtio modern cap 日志（仍无 DMA 驱动）。
 
 
 > **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。

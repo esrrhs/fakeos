@@ -2,6 +2,7 @@ package drivers;
 import types;
 
 typedef types.uint8_t  u8;
+typedef types.uint16_t u16;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
@@ -20,6 +21,11 @@ extern u32 ata_write(u64 sector, const void *kbuf, u32 count);
 extern u32 ata_flush(void);
 extern u32 pci_find_class(u8 base_class, u8 subclass, u8 *obus, u8 *oslot, u8 *ofunc);
 extern u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io);
+extern u32 pci_bar(u8 bus, u8 slot, u8 func, u8 index, u32 *addr, u32 *is_io);
+extern void pci_log_virtio_modern_caps(u8 bus, u8 slot, u8 func);
+extern u32 pci_find_vendor_subsystem(u16 vendor, u16 subsystem,
+                                     u8 *obus, u8 *oslot, u8 *ofunc);
+extern u64 pmm_phys_to_virt(u64 paddr);
 
 enum {
     BLK_NONE = 0,
@@ -31,20 +37,34 @@ static u32 blk_kind;
 
 void blk_init(void) {
     blk_kind = BLK_NONE;
-    /* Probe-only: log AHCI if QEMU exposed one (no driver yet). */
+    /* Probe-only: log AHCI ABAR + modern virtio caps (no DMA driver yet). */
     {
         u8 bus = 0;
         u8 slot = 0;
         u8 func = 0;
         if (pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
-            u32 bar = 0;
-            u32 io = 0;
-            pci_bar0(bus, slot, func, &bar, &io);
-            kprintf("[BLK] AHCI PCI 01.06 at %u:%u.%u BAR0=0x%x (%s) — not driven yet (see docs/blk-modern-path.md)\n",
-                    (u64)bus, (u64)slot, (u64)func, (u64)bar,
-                    io ? "I/O" : "MMIO");
+            u32 bar0 = 0;
+            u32 abar = 0;
+            u32 io0 = 0;
+            u32 io5 = 0;
+            pci_bar(bus, slot, func, 0, &bar0, &io0);
+            pci_bar(bus, slot, func, 5, &abar, &io5);
+            kprintf("[BLK] AHCI PCI 01.06 at %u:%u.%u BAR0=0x%x ABAR=0x%x - not driven yet (see docs/blk-modern-path.md)\n",
+                    (u64)bus, (u64)slot, (u64)func, (u64)bar0, (u64)abar);
+            if (abar != 0 && io5 == 0 && abar < 0x40000000u) {
+                volatile u32 *ghc = (volatile u32 *)pmm_phys_to_virt((u64)abar);
+                u32 cap = ghc[0];
+                u32 vs = ghc[4]; /* CAP=0x00, VS=0x10 -> index 4 */
+                kprintf("[BLK] AHCI CAP=0x%x VS=0x%x (probe only)\n", (u64)cap, (u64)vs);
+            }
         } else {
             kprintf("[BLK] no AHCI (PCI 01.06); using legacy virtio-blk/ATA\n");
+        }
+        bus = 0;
+        slot = 0;
+        func = 0;
+        if (pci_find_vendor_subsystem(0x1AF4, 0x0002, &bus, &slot, &func)) {
+            pci_log_virtio_modern_caps(bus, slot, func);
         }
     }
     /* Prefer VirtIO when the legacy queue path is healthy; otherwise ATA. */

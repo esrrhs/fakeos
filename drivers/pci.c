@@ -99,8 +99,15 @@ void pci_enable_busmaster(u8 bus, u8 slot, u8 func) {
  * 32-bit memory BAR (physical address in *addr). 64-bit memory BARs return
  * the low 32 bits only (enough for QEMU VirtIO BARs under 4 GiB). Returns 0
  * when the BAR is unused. */
-u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io) {
-    u32 bar = pci_read32(bus, slot, func, PCI_BAR0);
+/* Decode BARn (0..5). Sets *is_io / *addr like the old pci_bar0 helper. */
+u32 pci_bar(u8 bus, u8 slot, u8 func, u8 index, u32 *addr, u32 *is_io) {
+    u8 off;
+    u32 bar;
+    if (index > 5) {
+        return 0;
+    }
+    off = (u8)(PCI_BAR0 + index * 4);
+    bar = pci_read32(bus, slot, func, off);
     if (bar == 0 || bar == 0xFFFFFFFF) {
         return 0;
     }
@@ -112,6 +119,39 @@ u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io) {
     *is_io = 0;
     *addr = bar & PCI_BAR_MEM_MASK;
     return 1;
+}
+
+u32 pci_bar0(u8 bus, u8 slot, u8 func, u32 *addr, u32 *is_io) {
+    return pci_bar(bus, slot, func, 0, addr, is_io);
+}
+
+/* Walk PCI caps; log VirtIO modern capability ids (9) when present. */
+void pci_log_virtio_modern_caps(u8 bus, u8 slot, u8 func) {
+    u16 status;
+    u8 ptr;
+    u32 guard;
+    extern void kprintf(const char *fmt, ...);
+    status = pci_read16(bus, slot, func, PCI_STATUS);
+    if ((status & 0x10) == 0) {
+        return; /* capabilities list not present */
+    }
+    ptr = pci_read8(bus, slot, func, PCI_CAP_PTR);
+    guard = 0;
+    while (ptr >= 0x40 && guard < 16) {
+        u8 id = pci_read8(bus, slot, func, ptr);
+        u8 next = pci_read8(bus, slot, func, (u8)(ptr + 1));
+        if (id == 0x09) {
+            /* Vendor-specific: VirtIO modern uses cfg_type at +3 */
+            u8 cfg_type = pci_read8(bus, slot, func, (u8)(ptr + 3));
+            kprintf("[PCI] virtio modern cap at 0x%x cfg_type=%u (not driven; legacy default)\n",
+                    (u64)ptr, (u64)cfg_type);
+        }
+        if (next == 0 || next == ptr) {
+            break;
+        }
+        ptr = next;
+        guard++;
+    }
 }
 
 /* Scan bus 0 for (vendor, device). On hit, fill bus/slot/func and return 1. */

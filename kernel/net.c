@@ -505,11 +505,19 @@ static u16 alloc_ephemeral(void) {
 
 static u32 port_in_use(u16 port, u32 except_slot) {
     u32 i;
+    u32 self_reuse = 0;
+    if (except_slot != 0 && except_slot < MAX_SOCKS) {
+        self_reuse = socks[except_slot].reuseaddr;
+    }
     for (i = 1; i < MAX_SOCKS; i++) {
         if (i == except_slot) {
             continue;
         }
         if (socks[i].used && socks[i].bound && socks[i].local_port == port) {
+            /* Both ends with SO_REUSEADDR may share a port (UDP servers). */
+            if (self_reuse && socks[i].reuseaddr) {
+                continue;
+            }
             return 1;
         }
     }
@@ -1847,6 +1855,118 @@ u64 sys_getpeername(u64 fd, u64 uaddr, u64 ualen) {
     if (!write_sockaddr_in(uaddr, ualen, sk->peer_ip, sk->peer_port)) {
         return (u64)(-1);
     }
+    return 0;
+}
+
+enum {
+    SOL_SOCKET_N   = 1,
+    SO_REUSEADDR_N = 2,
+    SO_TYPE_N      = 3,
+    SO_ERROR_N     = 4,
+    SO_RCVBUF_N    = 8,
+    SO_SNDBUF_N    = 7
+};
+
+u32 sock_can_read(u32 fh) {
+    struct sock *sk = sock_from_fh(fh);
+    if (!sk) {
+        return 0;
+    }
+    if (sk->shut_rd) {
+        return 1; /* EOF readable */
+    }
+    if (sk->type == SOCK_STREAM) {
+        if (sk->s_count > 0 || sk->peer_fin) {
+            return 1;
+        }
+        return 0;
+    }
+    return sk->rx_count > 0;
+}
+
+u32 sock_can_write(u32 fh) {
+    struct sock *sk = sock_from_fh(fh);
+    if (!sk) {
+        return 0;
+    }
+    if (sk->shut_wr) {
+        return 0;
+    }
+    if (sk->type == SOCK_STREAM) {
+        return sk->tcp_state == TCPS_ESTABLISHED
+            || sk->tcp_state == TCPS_CLOSE_WAIT
+            || sk->connected;
+    }
+    return sk->bound || sk->connected;
+}
+
+/* setsockopt(2): SOL_SOCKET / SO_REUSEADDR (+ a few query-friendly no-ops). */
+u64 sys_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) {
+    u64 as = sched_current_as_h();
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    u32 val = 0;
+    if (!sk || as == 0) {
+        return (u64)(-1);
+    }
+    if (level != SOL_SOCKET_N) {
+        return (u64)(-1);
+    }
+    if (optname == SO_REUSEADDR_N) {
+        if (optlen < 4 || optval == 0) {
+            return (u64)(-1);
+        }
+        if (!mem.as_user_range_ok(as, optval, 4)) {
+            return (u64)(-1);
+        }
+        val = *(volatile u32 *)optval;
+        sk->reuseaddr = val ? 1u : 0u;
+        return 0;
+    }
+    /* Accept-and-ignore common libc probes. */
+    if (optname == SO_RCVBUF_N || optname == SO_SNDBUF_N) {
+        return 0;
+    }
+    return (u64)(-1);
+}
+
+u64 sys_getsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen_u) {
+    u64 as = sched_current_as_h();
+    u32 fh = sched_fd_get((u32)fd);
+    struct sock *sk = sock_from_fh(fh);
+    u32 val = 0;
+    u32 len = 4;
+    if (!sk || as == 0 || optval == 0 || optlen_u == 0) {
+        return (u64)(-1);
+    }
+    if (level != SOL_SOCKET_N) {
+        return (u64)(-1);
+    }
+    if (!mem.as_user_range_ok(as, optlen_u, 4)) {
+        return (u64)(-1);
+    }
+    len = *(volatile u32 *)optlen_u;
+    if (len < 4) {
+        return (u64)(-1);
+    }
+    if (!mem.as_user_range_ok(as, optval, 4)) {
+        return (u64)(-1);
+    }
+    if (optname == SO_REUSEADDR_N) {
+        val = sk->reuseaddr;
+    } else if (optname == SO_TYPE_N) {
+        val = sk->type;
+    } else if (optname == SO_ERROR_N) {
+        val = 0;
+    } else if (optname == SO_RCVBUF_N) {
+        val = sk->type == SOCK_STREAM ? TCP_RX_CAP : UDP_MAX_PAYLOAD;
+    } else if (optname == SO_SNDBUF_N) {
+        val = 4096;
+    } else {
+        return (u64)(-1);
+    }
+    *(volatile u32 *)optval = val;
+    *(volatile u32 *)optlen_u = 4;
     return 0;
 }
 

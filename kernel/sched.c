@@ -728,7 +728,7 @@ void sched_reparent_children(u32 old_ppid, u32 new_ppid) {
 /* ---------------------------------------------------------------------------
  * Minimal POSIX-ish signals (default actions only).
  * SIGINT=2 SIGKILL=9 SIGTERM=15 SIGCHLD=17
- * SIGCONT=18 SIGSTOP=19 SIGTSTP=20
+ * SIGCONT=18 SIGSTOP=19 SIGTSTP=20 SIGTTIN=21 SIGTTOU=22
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -738,7 +738,9 @@ enum {
     SIGCHLD_N = 17,
     SIGCONT_N = 18,
     SIGSTOP_N = 19,
-    SIGTSTP_N = 20
+    SIGTSTP_N = 20,
+    SIGTTIN_N = 21,
+    SIGTTOU_N = 22
 };
 
 extern void proc_terminate(u64 code);
@@ -763,6 +765,19 @@ u32 sched_sig_get_flags(u32 sig, u64 *flags_out) {
     }
     if (flags_out) {
         *flags_out = threads[current].sig_flags[sig];
+    }
+    return 0;
+}
+
+u32 sched_sig_ignored(u32 sig) {
+    if (sig == 0 || sig > 31) {
+        return 0;
+    }
+    if (threads[current].sig_handler[sig] == 1) {
+        return 1;
+    }
+    if ((threads[current].sig_ignore & (1u << sig)) != 0) {
+        return 1;
     }
     return 0;
 }
@@ -853,7 +868,8 @@ u32 sched_signal_send(u32 pid, u32 sig) {
                         sched_wakeup(sched_wait4_chan(threads[i].ppid));
                     }
                 }
-                threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N));
+                threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
+                                             | (1u << SIGTTIN_N) | (1u << SIGTTOU_N));
             }
             threads[i].pending_sigs |= (1u << sig);
             /* Wake sleepers so they can observe stop/kill/cont. */
@@ -877,7 +893,8 @@ void sched_stop_self(u32 sig) {
     threads[current].wait_chan = 0;
     threads[current].stop_sig = sig;
     threads[current].stop_notify = 1;
-    threads[current].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N));
+    threads[current].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
+                                       | (1u << SIGTTIN_N) | (1u << SIGTTOU_N));
     if (ppid != 0) {
         sched_wakeup(sched_wait4_chan(ppid));
     }
@@ -1147,8 +1164,8 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
             pend = threads[current].pending_sigs;
             continue;
         }
-        /* SIGTSTP: custom handler if framed; else default stop. */
-        if (sig == SIGTSTP_N) {
+        /* SIGTSTP/TTIN/TTOU: custom handler if framed; else default stop. */
+        if (sig == SIGTSTP_N || sig == SIGTTIN_N || sig == SIGTTOU_N) {
             if (h > 1 && f_rip != 0) {
                 if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
                     return;
@@ -1160,7 +1177,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
                 continue;
             }
             threads[current].pending_sigs &= ~(1u << sig);
-            sched_stop_self(SIGTSTP_N);
+            sched_stop_self(sig);
             pend = threads[current].pending_sigs;
             continue;
         }

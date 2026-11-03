@@ -63,7 +63,8 @@ extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
 extern void proc_reparent_exits(u32 old_ppid, u32 new_ppid);
 extern u64 sys_wait4(u64 pid, u64 status, u64 options, u64 ruspace);
 extern u64 sys_kill(u64 pid, u64 sig);
-extern u64 sys_tty_setfg(u64 pid);
+extern u64 sys_tty_setfg(u64 pgid);
+extern u64 sys_tty_getfg(u64 fd);
 extern u64 sys_setpgid(u64 pid, u64 pgid);
 extern u64 sys_setsid(void);
 extern u64 sys_getpgid(u64 pid);
@@ -72,6 +73,9 @@ extern u64 sys_rt_sigaction(u64 sig, u64 act, u64 old, u64 setsize);
 extern u64 sys_shutdown(u64 fd, u64 how);
 extern u64 sys_getsockname(u64 fd, u64 uaddr, u64 ualen);
 extern u64 sys_getpeername(u64 fd, u64 uaddr, u64 ualen);
+extern u64 sys_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen);
+extern u64 sys_getsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen);
+extern u64 sys_select(u64 nfds, u64 readfds, u64 writefds, u64 exceptfds, u64 timeout);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
@@ -145,8 +149,12 @@ enum {
     SC_SHUTDOWN = 48,
     SC_GETSOCKNAME = 51,
     SC_GETPEERNAME = 52,
+    SC_SETSOCKOPT = 54,
+    SC_GETSOCKOPT = 55,
+    SC_SELECT = 23,
     SC_PING = 500,
-    SC_TTY_SETFG = 501,
+    SC_TTY_SETFG = 501,   /* tcsetpgrp */
+    SC_TTY_GETFG = 502,   /* tcgetpgrp */
     SC_RT_SIGACTION = 13,
     SC_RT_SIGRETURN = 15
 };
@@ -357,6 +365,18 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_TTY_SETFG) {
         return sys_tty_setfg(f->rdi);
+    }
+    if (f->rax == SC_TTY_GETFG) {
+        return sys_tty_getfg(f->rdi);
+    }
+    if (f->rax == SC_SETSOCKOPT) {
+        return sys_setsockopt(f->rdi, f->rsi, f->rdx, f->r10, f->r8);
+    }
+    if (f->rax == SC_GETSOCKOPT) {
+        return sys_getsockopt(f->rdi, f->rsi, f->rdx, f->r10, f->r8);
+    }
+    if (f->rax == SC_SELECT) {
+        return sys_select(f->rdi, f->rsi, f->rdx, f->r10, f->r8);
     }
     if (f->rax == SC_RT_SIGACTION) {
         return sys_rt_sigaction(f->rdi, f->rsi, f->rdx, f->r10);

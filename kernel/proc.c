@@ -70,6 +70,7 @@ extern u32 sched_get_pgid(u32 pid);
 extern u32 sched_get_sid(u32 pid);
 extern void tty_set_fg(u32 pid);
 extern u32 tty_get_fg(void);
+extern u64 tty_jobctl_tcsetpgrp_check(void);
 
 void proc_record_exit(u32 pid, u32 ppid, u64 code) {
     u32 i;
@@ -296,11 +297,29 @@ u64 sys_getsid(u64 pid) {
     return s == 0 ? SC_ERR : (u64)s;
 }
 
-/* Custom: set TTY foreground process group for Ctrl-C/Z delivery.
- * Pass a pgid (often equal to the job leader pid). 0 clears. */
-u64 sys_tty_setfg(u64 pid) {
-    tty_set_fg((u32)pid);
+/* tcsetpgrp-ish (custom nr 501): set TTY foreground process group.
+ * Background callers get SIGTTOU (basics). pgid 0 clears. Non-zero pgid must
+ * refer to a live process group. Also exposed as u_tcsetpgrp. */
+u64 sys_tty_setfg(u64 pgid) {
+    u64 jc;
+    jc = tty_jobctl_tcsetpgrp_check();
+    if (jc != 0) {
+        return jc;
+    }
+    if (pgid != 0) {
+        /* Accept if any live task has this pgid (leader or member). */
+        if (sched_signal_pgrp((u32)pgid, 0) == 0) {
+            return (u64)(-1);
+        }
+    }
+    tty_set_fg((u32)pgid);
     return 0;
+}
+
+/* tcgetpgrp-ish (custom nr 502): return foreground pgid (0 if none). */
+u64 sys_tty_getfg(u64 fd) {
+    (void)fd; /* single console; fd reserved for future per-tty */
+    return (u64)tty_get_fg();
 }
 
 /* Linux nr 13: rt_sigaction(sig, act, oldact, sigsetsize).

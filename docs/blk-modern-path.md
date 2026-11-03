@@ -26,12 +26,13 @@ layer (journal-lite markers, multi-bg, triple-indirect).
   cfg), 64-bit features, and often MSI-X. QEMU's `disable-modern=on` exists
   precisely so guests can stay on the transitional/legacy path.
 
-## Suggested implementation order (future)
+## Suggested implementation order
 
-1. **PCI probe notes in-tree**: log AHCI (`class 01.06`) and modern virtio
-   caps when present; no queue programming yet.
-2. **AHCI read path**: single port, one command slot, 512-byte DMA identity +
-   READ DMA EXT; keep ATA PIO as fallback.
+1. **PCI probe notes in-tree** *(done)*: log AHCI (`class 01.06`) with BAR0/ABAR
+   and CAP/VS peek via HHDM when ABAR is low; walk vendor caps and log VirtIO
+   modern `cfg_type` when present. Still no queue/DMA programming.
+2. **AHCI read path** *(next)*: single port, one command slot, 512-byte DMA
+   identity + READ DMA EXT; keep ATA PIO / legacy virtio as fallback.
 3. **VirtIO modern blk/net**: parse caps, map notify, feature bit negotiation;
    dual-compile or runtime select vs legacy.
 4. **MSI/MSI-X**: after INTx paths are solid.

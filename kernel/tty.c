@@ -55,6 +55,7 @@ static u32 tty_hist_next;
 static int tty_hist_view;       /* -1 = editing new; else index into ring */
 
 extern u32 sched_current_pid(void);
+extern u32 sched_current_pgid(void);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern u32 sched_signal_pgrp(u32 pgid, u32 sig);
 extern u32 sched_has_pending_fatal(void);
@@ -64,8 +65,13 @@ extern void sched_check_signals(void);
 enum {
     SIGINT_N  = 2,
     SIGTSTP_N = 20,
-    EINTR_NEG = (u64)-4
+    SIGTTIN_N = 21,
+    SIGTTOU_N = 22,
+    EINTR_NEG = (u64)-4,
+    EIO_NEG   = (u64)-5
 };
+
+extern u32 sched_sig_ignored(u32 sig);
 
 void tty_set_fg(u32 pgid) {
     tty_fg_pgid = pgid;
@@ -73,6 +79,78 @@ void tty_set_fg(u32 pgid) {
 
 u32 tty_get_fg(void) {
     return tty_fg_pgid;
+}
+
+/* True when a controlling fg pgid is set and the caller is not in it. */
+u32 tty_is_background(void) {
+    u32 pg;
+    if (tty_fg_pgid == 0) {
+        return 0;
+    }
+    pg = sched_current_pgid();
+    if (pg == 0 || pg == tty_fg_pgid) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Job-control gate for console read (SIGTTIN) / write+tcsetpgrp (SIGTTOU).
+ * Returns 0 = proceed, 1 = stopped+resumed (retry), 2 = ignored -> EIO. */
+static u32 tty_jobctl_gate(u32 sig) {
+    u32 pg;
+    if (!tty_is_background()) {
+        return 0;
+    }
+    if (sched_sig_ignored(sig)) {
+        return 2;
+    }
+    pg = sched_current_pgid();
+    sched_signal_pgrp(pg, sig);
+    sched_check_signals();
+    return 1;
+}
+
+/* Block until foreground (or EIO if SIGTTIN ignored). Returns 0 or EIO_NEG. */
+u64 tty_jobctl_read_wait(void) {
+    for (;;) {
+        u32 g = tty_jobctl_gate(SIGTTIN_N);
+        if (g == 0) {
+            return 0;
+        }
+        if (g == 2) {
+            return EIO_NEG;
+        }
+        /* Stopped on SIGTTIN; after SIGCONT re-check membership. */
+    }
+}
+
+u64 tty_jobctl_write_wait(void) {
+    for (;;) {
+        u32 g = tty_jobctl_gate(SIGTTOU_N);
+        if (g == 0) {
+            return 0;
+        }
+        if (g == 2) {
+            return EIO_NEG;
+        }
+    }
+}
+
+/* tcsetpgrp from a background pgrp: SIGTTOU then fail with EINTR.
+ * If SIGTTOU is ignored/blocked, POSIX allows the call to proceed (job-control
+ * shells ignore these signals so they can reclaim the TTY). */
+u64 tty_jobctl_tcsetpgrp_check(void) {
+    u32 pg;
+    if (!tty_is_background()) {
+        return 0;
+    }
+    if (sched_sig_ignored(SIGTTOU_N)) {
+        return 0;
+    }
+    pg = sched_current_pgid();
+    sched_signal_pgrp(pg, SIGTTOU_N);
+    sched_check_signals();
+    return EINTR_NEG;
 }
 
 static void tty_signal_fg(u32 sig) {
@@ -143,6 +221,17 @@ void tty_on_uart_byte(void) {
 /* Called from kbd_irq (interrupts masked). */
 void tty_push_byte(char c) {
     tty_ingest_byte(c);
+}
+
+/* Non-blocking: bytes waiting in the shared ring or a completed line. */
+u32 tty_input_pending(void) {
+    if (tty_in_count > 0) {
+        return 1;
+    }
+    if (tty_line_len > 0 && tty_pos < tty_line_len) {
+        return 1;
+    }
+    return 0;
 }
 
 static int tty_in_pop(void) {
@@ -447,11 +536,16 @@ static void tty_recv_line(void) {
 u64 tty_console_read(u64 ubuf, u64 len) {
     u64 as = sched_current_as_h();
     u64 done = 0;
+    u64 jc;
     if (as == 0 || len == 0) {
         return (u64)(-1);
     }
     if (!mem.as_user_range_ok(as, ubuf, len)) {
         return (u64)(-1);
+    }
+    jc = tty_jobctl_read_wait();
+    if (jc != 0) {
+        return jc;
     }
     tty_got_intr = 0;
     while (done < len) {

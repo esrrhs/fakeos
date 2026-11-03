@@ -45,6 +45,11 @@ global u_shutdown
 global u_getsockname
 global u_getpeername
 global u_tty_setfg
+global u_tcsetpgrp
+global u_tcgetpgrp
+global u_setsockopt
+global u_getsockopt
+global u_select
 global u_rt_sigaction
 global u_rt_sigreturn
 
@@ -192,8 +197,45 @@ USYSC1 u_getsockname, 51
 ; long u_getpeername(long fd, void *addr, unsigned int *alen)
 USYSC1 u_getpeername, 52
 
-; long u_tty_setfg(long pgid)
+; long u_tty_setfg(long pgid) - alias of tcsetpgrp (fg pgid; 0 clears)
 USYSC1 u_tty_setfg, 501
+
+; long u_tcsetpgrp(long fd, long pgid) - fd ignored (single console); pgid in RSI
+; Linux uses ioctl; we keep custom nr 501 with pgid in RDI for tty_setfg
+; and also accept (fd,pgid) via this wrapper that moves RSI->RDI.
+align 16
+u_tcsetpgrp:
+    mov     rdi, rsi
+    mov     eax, 501
+    syscall
+    ret
+
+; long u_tcgetpgrp(long fd) - returns fg pgid (custom nr 502)
+USYSC1 u_tcgetpgrp, 502
+
+; long u_setsockopt(fd,level,optname,optval,optlen) - 4th RCX -> R10
+align 16
+u_setsockopt:
+    mov     r10, rcx
+    mov     eax, 54
+    syscall
+    ret
+
+; long u_getsockopt(fd,level,optname,optval,optlen)
+align 16
+u_getsockopt:
+    mov     r10, rcx
+    mov     eax, 55
+    syscall
+    ret
+
+; long u_select(nfds, readfds, writefds, exceptfds, timeout)
+align 16
+u_select:
+    mov     r10, rcx
+    mov     eax, 23
+    syscall
+    ret
 
 ; long u_rt_sigaction(sig, act, old, setsize) -- 4th arg RCX to R10
 align 16
