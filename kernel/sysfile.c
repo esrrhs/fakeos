@@ -625,3 +625,10 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     }
     return done;
 }
+
+u64 sys_sync(void) {
+    if (fs.ext2_mounted()) {
+        fs.ext2_sync();
+    }
+    return 0;
+}

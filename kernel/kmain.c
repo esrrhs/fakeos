@@ -140,6 +140,8 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     drivers.blk_init();
     if (fs.ext2_mount()) {
         fs.ext2_selftest();
+        /* Persistent workspace on the Ext2 volume. */
+        fs.ext2_mkdir("/mnt/home");
     }
 
     /* Milestone 7 scaffolding: VirtIO-net + ARP/IPv4/ICMP (QEMU user net). */

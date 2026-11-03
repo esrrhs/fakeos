@@ -26,6 +26,8 @@ global u_getdents
 global u_unlink
 global u_rmdir
 global u_pipe
+global u_sync
+global u_ping
 
 section .text
 
@@ -106,6 +108,12 @@ USYSC1 u_rmdir, 84
 
 ; long u_pipe(int *pipefd)
 USYSC1 u_pipe, 22
+
+; long u_sync(void)
+USYSC1 u_sync, 162
+
+; long u_ping(unsigned int ip_host_order)
+USYSC1 u_ping, 500
 
 ; void u_exit(long code) - does not return
 align 16

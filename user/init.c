@@ -19,6 +19,8 @@ extern long u_execve(const char *path, char **argv, char **envp);
 extern void u_exit(long code);
 extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_getdents(long fd, void *buf, unsigned long len);
+extern long u_chdir(const char *path);
+extern long u_mkdir(const char *path);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
@@ -318,6 +320,12 @@ int main(int argc, char **argv) {
     bad_exec_test();
     wrap_len_test();
     orphan_test();
+
+    /* Prefer persistent Ext2 home when the disk is mounted. */
+    u_mkdir("/mnt/home");
+    if (u_chdir("/mnt/home") == 0) {
+        puts("[U] cwd -> /mnt/home (persistent Ext2)");
+    }
 
     /* Replace this image with the interactive shell (same pid/fd/cwd). */
     sh_argv[0] = "/bin/sh";

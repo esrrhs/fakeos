@@ -168,9 +168,16 @@ void kbd_init(void) {
     /* Disable ports while we reconfigure. */
     kbd_write_cmd(0xAD);             /* disable keyboard */
     kbd_write_cmd(0xA7);             /* disable mouse */
-    /* Drain output buffer. */
-    while ((arch.inb(KBD_STAT) & KBD_STAT_OBF) != 0) {
-        (void)arch.inb(KBD_DATA);
+    /* Drain output buffer (bounded - a stuck OBF must not hang boot). */
+    {
+        u32 drain = 0;
+        while ((arch.inb(KBD_STAT) & KBD_STAT_OBF) != 0) {
+            (void)arch.inb(KBD_DATA);
+            drain++;
+            if (drain > 256) {
+                break;
+            }
+        }
     }
 
     /* Read controller config, enable IRQ1 (bit0), disable mouse IRQ (bit1),

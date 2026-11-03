@@ -207,6 +207,8 @@ def main():
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
         "cat /mnt/m6pass.txt",  # persistent Ext2 file written by selftest
         "echo PIPEOK | cat",    # pipe() + shell | via wait queues
+        "ping -c 1 10.0.2.2",  # sys_ping + VirtIO-net ICMP
+        "sync",                # ext2 flush builtin
     ]
     session = ""
     for c in commands:
@@ -308,6 +310,9 @@ def main():
         "[FS] published /bin/hello (",
         "[FS] published /bin/cat (",
         "[FS] published /bin/ls (",
+        "[FS] published /bin/touch (",
+        "[FS] published /bin/mv (",
+        "[FS] published /bin/ping (",
         "[FS] published /etc/motd (",
         # Ring-3 retained + stage-4 user self-tests
         "[U] hello from ring 3, pid=",
@@ -388,6 +393,7 @@ def main():
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
         ("multiple shell prompts", norm.count("fakeos:~$") >= 12),
+        ("userland ping replied", "reply from 10.0.2.2" in out),
     ]
     # kbuild/ldfake also publish the new user programs
     #

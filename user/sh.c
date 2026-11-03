@@ -20,6 +20,7 @@ extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_getpid(void);
+extern long u_sync(void);
 
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
@@ -148,7 +149,8 @@ static void pop_redirects(int saved_in, int saved_out) {
 static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
-           eq(cmd, "help") || eq(cmd, "pid");
+           eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "sync") ||
+           eq(cmd, "clear");
 }
 
 /* Resolve argv[0] into path (may use buf). */
@@ -212,11 +214,19 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         return 0;
     }
+    if (eq(tokens[0], "sync")) {
+        u_sync();
+        return 0;
+    }
+    if (eq(tokens[0], "clear")) {
+        /* ANSI clear for serial; VGA users still see history (no userspace VGA). */
+        u_write(1, "\033[2J\033[H", 11);
+        return 0;
+    }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo [args|$?], cd, mkdir, rmdir, pwd, pid, exit, help");
-        puts("redirects: cmd > file | cmd >> file | cmd < file");
-        puts("pipelines: cmd1 | cmd2 [| cmd3]");
-        puts("programs: /bin/hello /bin/cat /bin/ls (PATH prefix auto)");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, exit, help");
+        puts("redirects: > >> <   pipelines: |");
+        puts("programs: hello cat ls cp rm touch mv ping (auto /bin)");
         return 0;
     }
 
@@ -446,7 +456,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    puts("fakeos shell - builtins: help, echo, cd, pwd, mkdir, rmdir, exit; redirects: > >> <; pipes: |");
+    puts("fakeos shell - help | sync | clear | pipes/redirects; persist under /mnt/home");
 
     for (;;) {
         char *tokens[MAX_TOK];

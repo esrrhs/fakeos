@@ -430,3 +430,14 @@ void net_init(void) {
             (u64)local_mac[0], (u64)local_mac[1], (u64)local_mac[2],
             (u64)local_mac[3], (u64)local_mac[4], (u64)local_mac[5]);
 }
+
+/* Syscall wrapper: host-order IPv4, 0 on reply, -1 on failure. */
+u64 sys_ping(u64 ip) {
+    if (!net_up) {
+        return (u64)(-1);
+    }
+    if (net_icmp_ping((u32)ip, 2000000)) {
+        return 0;
+    }
+    return (u64)(-1);
+}

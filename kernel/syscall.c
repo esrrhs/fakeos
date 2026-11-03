@@ -36,6 +36,8 @@ extern u64 sys_unlink(u64 upath);
 extern u64 sys_rmdir(u64 upath);
 extern u64 sys_dup2(u64 oldfd, u64 newfd);
 extern u64 sys_pipe(u64 upipefd);
+extern u64 sys_sync(void);
+extern u64 sys_ping(u64 ip);
 extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
@@ -103,7 +105,9 @@ enum {
     SC_WAIT4 = 61,
     SC_RMDIR = 84,
     SC_UNLINK = 87,
-    SC_EXIT_GROUP = 231
+    SC_EXIT_GROUP = 231,
+    SC_SYNC = 162,
+    SC_PING = 500
 };
 
 enum {
@@ -196,6 +200,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_PIPE) {
         return sys_pipe(f->rdi);
+    }
+    if (f->rax == SC_SYNC) {
+        return sys_sync();
+    }
+    if (f->rax == SC_PING) {
+        return sys_ping(f->rdi);
     }
     if (f->rax == SC_LSEEK) {
         return sys_lseek(f->rdi, f->rsi, f->rdx);
