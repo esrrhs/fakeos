@@ -252,6 +252,14 @@ reverse, `-n` leading-integer numeric). Focused virtio login smoke covers
 `sort | uniq`, `-c`/`-n`/`-r` bites plus prior interactive greens (smp 1/2).
 
 
+## /bin/yes + /bin/od — landed
+
+Thin coreutils pair. `yes [STRING...]` repeatedly writes a line (default `y`,
+args joined by spaces) until a write fails (pipe close). `od [-A n|o|x|d]
+[-t x1|o1|c] [-N COUNT] [FILE...]` dumps bytes 16-wide (default `-A o -t x1`;
+`-An`/`-tx1` sticky forms accepted). Focused virtio login smoke covers
+`yes | head`, `od -An -tx1 -N`, plus prior interactive greens (smp 1/2).
+
 ## shell mkdir -p + /bin/rm -r — landed
 
 FS polish for daily-driver trees. Shell builtin `mkdir [-p] DIR...` creates
