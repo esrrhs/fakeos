@@ -93,6 +93,8 @@ u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
  *  - MAP_SHARED|MAP_ANONYMOUS: shm-style shared anon (keep W across fork)
  *  - MAP_PRIVATE / MAP_SHARED + regular file: VMA_FILE demand paging
  *    (MAP_SHARED shares frames across fork; dirty pages write back on munmap).
+ *  - MAP_FIXED: anon (ASAN) or file at a caller-chosen page-aligned VA;
+ *    overlaps rejected (no silent unmap).
  * off must be page-aligned for file maps. */
 u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     u64 va;
@@ -140,20 +142,26 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         return va == 0 ? (u64)(-1) : va;
     }
 
-    /* File-backed: true VMA_FILE demand paging. */
+    /* File-backed: true VMA_FILE demand paging (MAP_FIXED allowed). */
     {
         u32 fh;
         u32 ino;
         u32 fs_kind;
         u64 alen;
+        u64 fixed_addr;
         if ((off & 0xFFF) != 0) {
             return (u64)(-1);
         }
         if (flags & MAP_FIXED) {
-            return (u64)(-1); /* keep MAP_FIXED for ASAN anon only */
-        }
-        if (addr != 0) {
-            return (u64)(-1);
+            if (addr == 0 || (addr & 0xFFF) != 0) {
+                return (u64)(-1);
+            }
+            fixed_addr = addr;
+        } else {
+            if (addr != 0) {
+                return (u64)(-1);
+            }
+            fixed_addr = 0;
         }
         if ((s32)(fd & 0xFFFFFFFFULL) < 0 || (fd & 0xFFFFFFFFULL) >= 16) {
             return (u64)(-1);
@@ -182,9 +190,16 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         if (ino == 0) {
             return (u64)(-1);
         }
-        va = mem.as_mmap_file_h(as, alen, (u32)prot, shared, fs_kind, ino, off);
+        va = mem.as_mmap_file_h(as, fixed_addr, alen, (u32)prot, shared,
+                               fs_kind, ino, off);
         return va == 0 ? (u64)(-1) : va;
     }
+}
+
+/* int mprotect(addr, len, prot): change VMA prot on a page-aligned range. */
+u64 sys_mprotect(u64 addr, u64 len, u64 prot) {
+    return mem.as_mprotect_h(sched_current_as_h(), addr, len, (u32)prot)
+           ? 0 : (u64)(-1);
 }
 
 u64 sys_brk(u64 newbrk) {

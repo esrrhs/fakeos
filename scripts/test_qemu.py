@@ -392,6 +392,8 @@ def main():
         "[U][PASS] brk heap malloc",
         "[U][PASS] anonymous mmap",
         "[U][PASS] VMA_FILE demand mmap",
+        "[U][PASS] file MAP_FIXED mmap",
+        "[U][PASS] mprotect RO/RW",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
         "[U][PASS] execve rejects non-ELF file",

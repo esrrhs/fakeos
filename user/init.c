@@ -12,6 +12,8 @@ extern long u_close(long fd);
 extern long u_lseek(long fd, long off, long whence);
 extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
                    long fd, long off);
+extern long u_mprotect(void *addr, unsigned long len, long prot);
+extern long u_munmap(void *addr, unsigned long len);
 extern long u_getpid(void);
 extern long u_yield(void);
 extern long u_fork(void);
@@ -229,6 +231,88 @@ static void mmap_test(void) {
     }
     puts("[U][PASS] VMA_FILE demand mmap");
     u_close(fd);
+
+    /* File MAP_FIXED: place /etc/hosts at a chosen VA outside the auto window. */
+    {
+        unsigned char *fp;
+        const unsigned long fixed = 0x3E000000UL; /* below MMAP_LIMIT, above auto */
+        fd = u_open("/etc/hosts", 0, 0);
+        if (fd < 0) {
+            puts("[U][FAIL] open /etc/hosts for MAP_FIXED");
+            return;
+        }
+        /* PROT_READ|MAP_PRIVATE|MAP_FIXED = 0x12 */
+        fp = (unsigned char *)u_mmap((void *)fixed, 4096, 1, 0x12, fd, 0);
+        if (fp != (unsigned char *)fixed) {
+            puts("[U][FAIL] file MAP_FIXED mmap");
+            u_close(fd);
+            return;
+        }
+        if (fp[0] == 0 && fp[1] == 0 && fp[2] == 0) {
+            puts("[U][FAIL] file MAP_FIXED demand page empty");
+            u_close(fd);
+            return;
+        }
+        /* Overlap must fail (no silent unmap). */
+        if (u_mmap((void *)fixed, 4096, 1, 0x12, fd, 0) != -1) {
+            puts("[U][FAIL] overlapping MAP_FIXED should fail");
+            u_close(fd);
+            return;
+        }
+        u_close(fd);
+        puts("[U][PASS] file MAP_FIXED mmap");
+    }
+
+    /* mprotect: RW anon -> RO (read ok) -> RW again (write ok); child write
+     * while RO is killed by unhandled #PF (exit code 0xff). */
+    {
+        unsigned char *mp;
+        long pid;
+        long st;
+        mp = (unsigned char *)u_mmap(0, 4096, 3, 0x22, -1, 0);
+        if (mp == (unsigned char *)-1 || mp == 0) {
+            puts("[U][FAIL] mprotect anon mmap");
+            return;
+        }
+        mp[0] = 0x42;
+        if (u_mprotect(mp, 4096, 1) != 0) { /* PROT_READ */
+            puts("[U][FAIL] mprotect PROT_READ");
+            return;
+        }
+        if (mp[0] != 0x42) {
+            puts("[U][FAIL] mprotect RO read");
+            return;
+        }
+        pid = u_fork();
+        if (pid < 0) {
+            puts("[U][FAIL] mprotect fork");
+            return;
+        }
+        if (pid == 0) {
+            mp[0] = 0x99; /* must #PF: VMA is RO */
+            u_exit(0);
+        }
+        u_wait4(pid, &st, 0, 0);
+        if (((st >> 8) & 0xff) != 0xff) {
+            puts("[U][FAIL] mprotect RO write not killed");
+            return;
+        }
+        if (mp[0] != 0x42) {
+            puts("[U][FAIL] mprotect parent corrupted");
+            return;
+        }
+        if (u_mprotect(mp, 4096, 3) != 0) { /* PROT_READ|WRITE */
+            puts("[U][FAIL] mprotect restore RW");
+            return;
+        }
+        mp[0] = 0x77;
+        if (mp[0] != 0x77) {
+            puts("[U][FAIL] mprotect RW write");
+            return;
+        }
+        u_munmap(mp, 4096);
+        puts("[U][PASS] mprotect RO/RW");
+    }
 }
 
 /* Fixed dirent layout emitted by the kernel: 48-byte records, name at +19. */

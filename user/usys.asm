@@ -13,6 +13,7 @@ global u_dup2
 global u_lseek
 global u_mmap
 global u_munmap
+global u_mprotect
 global u_brk
 global u_exit
 global u_getpid
@@ -104,6 +105,9 @@ u_mmap:
     mov     eax, 9
     syscall
     ret
+
+; long u_mprotect(void *addr, unsigned long len, long prot) -- Linux nr 10
+USYSC1 u_mprotect, 10
 
 ; long u_munmap(void *addr, unsigned long len) -- Linux nr 11
 USYSC1 u_munmap, 11

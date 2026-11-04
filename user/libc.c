@@ -1085,6 +1085,7 @@ extern long u_clone(unsigned long flags, void *stack, void *fn, void *arg);
 extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
                    long fd, long off);
 extern long u_munmap(void *addr, unsigned long len);
+extern long u_mprotect(void *addr, unsigned long len, long prot);
 extern long u_exit(long code);
 extern long u_gettid(void);
 extern long u_yield(void);

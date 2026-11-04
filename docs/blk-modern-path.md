@@ -65,10 +65,17 @@ never lands. TX now waits with `io_wait` + `sched_yield`; vector-43
 `sched_wakeup` remains a harmless fast path if the IRQ arrives mid-spin.
 Modern VERSION_1 hdr stays 12 bytes.
 
+## mmap POSIX slice — landed
+
+File `MAP_FIXED` builds `VMA_FILE` at a caller VA (overlap rejected, no silent
+unmap). `mprotect(2)` (nr 10) changes VMA prot with munmap-style splits and
+updates present leaf PTEs (COW-shared private pages stay RO until write fault).
+Init smokes: `[U][PASS] file MAP_FIXED mmap` / `mprotect RO/RW`.
+
 ## Suggested next steps
 
-1. mmap-posix gaps (MAP_FIXED for file maps / mprotect / richer POSIX) — prefer
-   when a coherent smokeable slice appears.
+1. Richer mmap POSIX leftovers (MAP_FIXED replace/unmap-overlap, PROT_NONE,
+   partial mprotect stress, hint-addr without FIXED) — when needed.
 2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 3. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
 

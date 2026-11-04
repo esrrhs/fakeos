@@ -63,6 +63,7 @@ extern u64 sys_ftruncate(u64 fd, u64 length);
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
 extern u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
+extern u64 sys_mprotect(u64 addr, u64 len, u64 prot);
 extern u64 sys_nice(u64 inc);
 extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
@@ -130,6 +131,7 @@ enum {
     SC_PIPE  = 22,
     SC_LSEEK = 8,
     SC_MMAP  = 9,
+    SC_MPROTECT = 10,
     SC_MUNMAP = 11,
     SC_BRK   = 12,
     SC_GETCWD = 79,
@@ -396,6 +398,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_MMAP) {
         return sys_mmap(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_MPROTECT) {
+        return sys_mprotect(f->rdi, f->rsi, f->rdx);
     }
     if (f->rax == SC_MUNMAP) {
         return sys_munmap(f->rdi, f->rsi);
