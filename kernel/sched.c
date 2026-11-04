@@ -1291,6 +1291,39 @@ u32 wait_queue_wake_n(struct wait_queue_head *wq, u32 n) {
     return sched_wakeup_n((u64)wq, n);
 }
 
+/* Atomically drop `m` and sleep on `wq`, then re-acquire `m` on wake.
+ * Closes the unlock-then-sleep lost-wakeup window for Mesa waiters that
+ * hold a kmutex around the wait condition (pipe/tty-style). Caller must
+ * hold `m`. Idle-CPU kicks for any mutex waiter woken by the drop run
+ * before this thread deschedules. */
+void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
+    u32 kick_mask = 0;
+    u32 self;
+    if (wq == 0 || m == 0) {
+        return;
+    }
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    self = sched_cur();
+    /* Drop mutex while still holding the run lock. */
+    m->locked = 0;
+    m->owner = 0xFFFFFFFFu;
+    wake_chan_locked((u64)m, 1, &kick_mask);
+    threads[self].wait_chan = (u64)wq;
+    threads[self].state = TCB_SLEEPING;
+    /* Kick mutex waiters before sleeping: schedule_tail drops run_lock. */
+    spin_unlock(&sched_run_lock);
+    kick_idle_cpus(kick_mask);
+    spin_lock(&sched_run_lock);
+    if (threads[self].state == TCB_SLEEPING) {
+        sched_switch_to(pick_next(self));
+    } else {
+        spin_unlock(&sched_run_lock);
+    }
+    arch.cpu_sti();
+    kmutex_lock(m);
+}
+
 /* Called from the Local APIC timer ISR (vector 32) with interrupts off in the
  * interrupt gate. EOI first so the APIC keeps firing after we switch stacks. */
 void sched_tick(void) {

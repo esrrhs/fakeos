@@ -191,7 +191,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: sleeping locks (kmutex/ksem/waitq) + CLEARTID join + Ext2 journal ordered + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: pipe kmutex/waitq + sleeping locks + CLEARTID join + Ext2 journal ordered + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");

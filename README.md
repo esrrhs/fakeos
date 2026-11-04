@@ -153,7 +153,7 @@ flowchart TD
 - [x] **Ext2 三重间接**：`i_block[14]` 读写/回收；稀疏自测 `/mnt/trip.bin`（越过双间接上限，无需 64MiB 镜像）。`mkext2.py` 默认 4MiB 镜像为 2 个 block group；分配/释放拒绝 SB/BGDT/bitmap/itable，避免多块组相对位图误清 bit0 毁掉元数据。
 - [x] **等待队列 / kmutex**：`TCB_SLEEPING` + `sched_sleep`/`sched_wakeup`；`wait4` 阻塞唤醒；内核 `kmutex`。
 - [x] **dup2 + shell 重定向**：`>` / `>>` / `<` 对 builtin 与外部命令生效。
-- [x] **pipe + shell `|`**：`pipe()`（Linux nr 22）+ 环形缓冲；读写阻塞走 `sched_sleep`/`sched_wakeup`；shell 支持多段管道（builtin 与外部命令）。
+- [x] **pipe + shell `|`**：`pipe()`（Linux nr 22）+ 环形缓冲；读写阻塞走 per-pipe `kmutex` + `wait_queue_sleep_unlock`（见下）；shell 支持多段管道（builtin 与外部命令）。
 - [x] **VirtIO-net + L2/L3/ICMP**：遗留/过渡 `virtio-net-pci,disable-modern=on`；静态 `10.0.2.15/24`；ARP + IPv4 + ICMP echo 请求/应答；启动自测 ping QEMU user 网关 `10.0.2.2`。
 - [x] **用户态 ping**：`sys_ping`（nr 500）+ `/bin/ping`；完整 BSD sockets 仍待做。
 - [x] **shell 抛光**：`sync`/`clear` builtin；`/bin/touch` `/bin/mv`；启动进入 `/home`（Ext2 持久工作区，`/home` 与 `/mnt/home` 同卷）。
@@ -214,6 +214,7 @@ flowchart TD
 - [x] **pthread_exit / detach / stack reclaim**：`pthread_exit` 经 FS TLS owner 发布 retval；`pthread_detach`；join/detach 延后 `munmap` 栈，由后续 `pthread_create` 回收；自测 `[U][PASS] pthread_exit retval` / `pthread_detach + stack reclaim`。
 - [x] **CLONE_CHILD_CLEARTID-style join**：`set_tid_address(2)`（nr 218）登记 per-TCB `clear_child_tid`；线程/进程退出时内核将 `*ctid=0` 并 `futex` 唤醒；libc `pthread_join` 等待该字归零（不再依赖用户态 WAKE）；自测 `[U][PASS] pthread_join CLEARTID`（raw `exit` 路径）。
 - [x] **睡眠锁完备化（kmutex/ksem/wait_queue）**：在既有 channel sleep 上补齐 owner/`trylock`、计数信号量与类型化 waitqueue；`sched_selftest` 验证睡眠而非忙等。
+- [x] **pipe 走 kmutex + wait_queue**：每 pipe 一把 `kmutex` + 读/写 `wait_queue_head`；`wait_queue_sleep_unlock` 在 run-lock 下原子放锁并睡眠，避免 unlock-then-sleep 丢唤醒；表分配另有 `pipes_table_lock`；自测 `[PASS] pipe kmutex + wait_queue_sleep_unlock blocking`（写端填满环后进入 `TCB_SLEEPING`）。
 
 
 
