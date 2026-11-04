@@ -1,10 +1,11 @@
 /* fakeos userland - du: summarize file/directory space (thin).
- *   du [-a] [-s] [-h] [FILE...]
+ *   du [-a] [-s] [-h] [-d N|-dN] [FILE...]
  * Apparent size via lstat st_size. Default: 1024-byte units (ceil).
  * -h: human-readable (integer 1024 powers: bare / K / M / G).
  * Default: print each subdirectory total + top-level. -a also prints files.
- * -s: summary only (one line per operand). Default operand: ".".
- * No -d/hardlink dedup. Compact argv for EXEC_MAX_ARGC=8.
+ * -s: summary only (one line per operand; same as -d 0).
+ * -d N: print totals only for depth <= N below the operand (GNU-ish).
+ * Default operand: ".". No hardlink dedup. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -17,6 +18,7 @@ extern int strcmp(const char *a, const char *b);
 extern unsigned long strlen(const char *s);
 extern char *strcpy(char *dst, const char *src);
 extern void printf(const char *fmt, ...);
+extern long strtol_dec(const char *s);
 
 enum {
     O_RDONLY = 0,
@@ -37,6 +39,8 @@ enum {
 static int opt_all;
 static int opt_summarize;
 static int opt_human;
+static int opt_depth; /* -1 = unlimited; 0+ = max depth to emit */
+static int have_depth;
 static int err_rc;
 
 static unsigned int load_u32(const char *p) {
@@ -57,6 +61,15 @@ static unsigned long load_u64(const char *p) {
 
 static int is_dir_mode(unsigned int mode) {
     return (mode & S_IFMT) == S_IFDIR;
+}
+
+static int is_digits(const char *s) {
+    int i;
+    if (s == 0 || s[0] == 0) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
 }
 
 static unsigned long to_kib(unsigned long bytes) {
@@ -115,10 +128,17 @@ static void emit(unsigned long bytes, const char *path) {
     printf("%u\t%s\n", (unsigned int)to_kib(bytes), path);
 }
 
-/* Return total apparent bytes under path; emit per policy. */
-static unsigned long du_path(const char *path, int at_top);
+/* Whether to print this node at depth (0 = operand). */
+static int emit_ok(int depth) {
+    if (opt_summarize) return depth == 0;
+    if (have_depth) return depth <= opt_depth;
+    return 1;
+}
 
-static unsigned long du_dir(const char *path, unsigned long self_bytes, int at_top) {
+/* Return total apparent bytes under path; emit per policy. */
+static unsigned long du_path(const char *path, int depth);
+
+static unsigned long du_dir(const char *path, unsigned long self_bytes, int depth) {
     char dent[DENT_BUF];
     char child[PATH_CAP];
     char names[MAX_NAMES][NAME_LEN];
@@ -164,14 +184,14 @@ static unsigned long du_dir(const char *path, unsigned long self_bytes, int at_t
     for (i = 0; i < nnames; i++) {
         join_path(child, PATH_CAP, path, names[i]);
         if (child[0] == 0) continue;
-        total += du_path(child, 0);
+        total += du_path(child, depth + 1);
     }
 
-    if (!opt_summarize || at_top) emit(total, path);
+    if (emit_ok(depth)) emit(total, path);
     return total;
 }
 
-static unsigned long du_path(const char *path, int at_top) {
+static unsigned long du_path(const char *path, int depth) {
     char st[ST_SIZE_BYTES];
     unsigned int mode;
     unsigned long sz;
@@ -184,10 +204,14 @@ static unsigned long du_path(const char *path, int at_top) {
     mode = load_u32(st + ST_MODE);
     sz = load_u64(st + ST_SIZE);
     if (is_dir_mode(mode)) {
-        return du_dir(path, sz, at_top);
+        return du_dir(path, sz, depth);
     }
-    if (opt_all || at_top) emit(sz, path);
+    if ((opt_all || depth == 0) && emit_ok(depth)) emit(sz, path);
     return sz;
+}
+
+static void usage(void) {
+    u_write(2, "usage: du [-a] [-s] [-h] [-d N] [FILE...]\n", 42);
 }
 
 int main(int argc, char **argv) {
@@ -196,23 +220,76 @@ int main(int argc, char **argv) {
     int nargs = 0;
     int i;
 
+    opt_all = 0;
+    opt_summarize = 0;
+    opt_human = 0;
+    opt_depth = -1;
+    have_depth = 0;
+
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
-        const char *o = argv[ai] + 1;
+        const char *a = argv[ai];
         int j;
-        if (o[0] == '-' && o[1] == 0) break; /* lone "-" operand */
-        for (j = 0; o[j] != 0; j++) {
-            if (o[j] == 'a') {
+        if (a[1] == '-' && a[2] == 0) {
+            ai++;
+            break;
+        }
+        if (strcmp(a, "-") == 0) break;
+        if (strcmp(a, "-d") == 0) {
+            if (ai + 1 >= argc || !is_digits(argv[ai + 1])) {
+                usage();
+                return 1;
+            }
+            opt_depth = (int)strtol_dec(argv[ai + 1]);
+            have_depth = 1;
+            opt_summarize = 0;
+            ai += 2;
+            continue;
+        }
+        if (a[1] == 'd' && a[2] != 0 && is_digits(a + 2)) {
+            opt_depth = (int)strtol_dec(a + 2);
+            have_depth = 1;
+            opt_summarize = 0;
+            ai++;
+            continue;
+        }
+        for (j = 1; a[j] != 0; j++) {
+            if (a[j] == 'a') {
                 opt_all = 1;
-            } else if (o[j] == 's') {
+            } else if (a[j] == 's') {
                 opt_summarize = 1;
-            } else if (o[j] == 'h') {
+                have_depth = 0;
+            } else if (a[j] == 'h') {
                 opt_human = 1;
+            } else if (a[j] == 'd') {
+                /* -d at end of cluster needs next argv */
+                if (a[j + 1] != 0) {
+                    if (!is_digits(a + j + 1)) {
+                        usage();
+                        return 1;
+                    }
+                    opt_depth = (int)strtol_dec(a + j + 1);
+                    have_depth = 1;
+                    opt_summarize = 0;
+                    ai++;
+                    goto next_arg;
+                }
+                if (ai + 1 >= argc || !is_digits(argv[ai + 1])) {
+                    usage();
+                    return 1;
+                }
+                opt_depth = (int)strtol_dec(argv[ai + 1]);
+                have_depth = 1;
+                opt_summarize = 0;
+                ai += 2;
+                goto next_arg;
             } else {
-                u_write(2, "usage: du [-a] [-s] [-h] [FILE...]\n", 35);
+                usage();
                 return 1;
             }
         }
         ai++;
+    next_arg:
+        ;
     }
     for (; ai < argc; ai++) {
         if (nargs >= MAX_ARGS) {
@@ -228,7 +305,7 @@ int main(int argc, char **argv) {
 
     err_rc = 0;
     for (i = 0; i < nargs; i++) {
-        (void)du_path(args[i], 1);
+        (void)du_path(args[i], 0);
     }
     return err_rc;
 }
