@@ -1694,6 +1694,13 @@ Continues after failures; exit non-zero if any PATH fails. No new `/bin`
 dent. Focused virtio login smoke covers multi-arg `realpath` + prior greens
 including date +%F/%T/%R (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## od -w — landed
+
+`/bin/od -w N` / `-wN` sets bytes per output line (1..32; default 16). Keeps
+`-v/-A/-t/-N/-j`. No new `/bin` dent. Focused virtio login smoke covers
+`od -w` + prior greens including realpath multi-PATH (smp 1/2). Ramfs
+`/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1701,6 +1708,6 @@ including date +%F/%T/%R (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `grep -o` / `od -w` / `xargs -0` / other util
-   flags (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `grep -o` / `xargs -0` / other util flags
+   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.

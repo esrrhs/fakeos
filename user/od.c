@@ -1,9 +1,11 @@
 /* fakeos userland - od: thin octal/hex dump (POSIX-ish subset).
  * Forms: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1] [-N COUNT|-NCOUNT]
- *        [-j SKIP|-jSKIP] [FILE...]
- * Default: -A o -t x1, 16 bytes per line. stdin if no FILE.
- * -j skips SKIP input bytes before dumping (seek when possible, else read-discard).
- * Duplicate full-width lines are collapsed to a single "*" (disable with -v).
+ *        [-j SKIP|-jSKIP] [-w BYTES|-wBYTES] [FILE...]
+ * Default: -A o -t x1, 16 bytes per line. -w sets bytes per output line
+ * (1..32). stdin if no FILE. -j skips SKIP input bytes before dumping
+ * (seek when possible, else read-discard). Duplicate full-width lines are
+ * collapsed to a single "*" (disable with -v). Compact argv for
+ * EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -18,7 +20,7 @@ extern void printf(const char *fmt, ...);
 
 enum {
     O_RDONLY = 0,
-    WIDTH = 16,
+    WIDTH_MAX = 32,
     ADDR_NONE = 0,
     ADDR_OCT = 1,
     ADDR_HEX = 2,
@@ -35,9 +37,10 @@ static int type_mode = TYPE_X1;
 static long max_bytes = -1; /* -1 = unlimited */
 static long skip_bytes = 0;
 static int show_all = 0; /* -v: do not collapse duplicate lines */
+static int line_bytes = 16; /* -w: bytes per output line */
 
 static void usage(void) {
-    u_write(2, "usage: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1] [-N COUNT] [-j SKIP] [FILE...]\n", 78);
+    u_write(2, "usage: od [-v] [-A n|o|x|d] [-t TYPE] [-N N] [-j N] [-w N] [FILE...]\n", 68);
 }
 
 static int is_digits(const char *s) {
@@ -190,7 +193,7 @@ static int same_bytes(const unsigned char *a, const unsigned char *b, int n) {
 
 static int apply_skip(long fd) {
     long left = skip_bytes;
-    unsigned char buf[WIDTH];
+    unsigned char buf[WIDTH_MAX];
     long n;
     long off;
     if (left <= 0) return 0;
@@ -198,7 +201,8 @@ static int apply_skip(long fd) {
     if (off >= 0) return 0;
     /* Non-seekable: read and discard. */
     while (left > 0) {
-        long want = WIDTH;
+        long want = line_bytes;
+        if (want < 1) want = 1;
         if (left < want) want = left;
         n = u_read(fd, buf, (unsigned long)want);
         if (n <= 0) return n < 0 ? 1 : 0;
@@ -208,20 +212,24 @@ static int apply_skip(long fd) {
 }
 
 static int od_fd(long fd) {
-    unsigned char buf[WIDTH];
-    unsigned char prev[WIDTH];
+    unsigned char buf[WIDTH_MAX];
+    unsigned char prev[WIDTH_MAX];
     unsigned long off = 0;
     long left = max_bytes;
     long n;
     int i;
     int have_prev = 0;
     int suppressing = 0;
+    int width = line_bytes;
+
+    if (width < 1) width = 1;
+    if (width > WIDTH_MAX) width = WIDTH_MAX;
 
     if (apply_skip(fd) != 0) return 1;
     if (skip_bytes > 0) off = (unsigned long)skip_bytes;
 
     for (;;) {
-        long want = WIDTH;
+        long want = width;
         if (left == 0) break;
         if (left > 0 && left < want) want = left;
         n = u_read(fd, buf, (unsigned long)want);
@@ -229,8 +237,8 @@ static int od_fd(long fd) {
         if (n == 0) break;
 
         /* Duplicate full-width line collapse (GNU od default; -v disables). */
-        if (!show_all && have_prev && n == WIDTH &&
-            same_bytes(buf, prev, WIDTH)) {
+        if (!show_all && have_prev && n == width &&
+            same_bytes(buf, prev, width)) {
             if (!suppressing) {
                 putc1('*');
                 putc1('\n');
@@ -250,8 +258,8 @@ static int od_fd(long fd) {
         }
         putc1('\n');
 
-        if (n == WIDTH) {
-            for (i = 0; i < WIDTH; i++) prev[i] = buf[i];
+        if (n == width) {
+            for (i = 0; i < width; i++) prev[i] = buf[i];
             have_prev = 1;
         } else {
             have_prev = 0;
@@ -379,6 +387,24 @@ int main(int argc, char **argv) {
         } else if (argv[i][0] == '-' && argv[i][1] == 'j' && argv[i][2] != 0 &&
                    is_digits(argv[i] + 2)) {
             skip_bytes = strtol_dec(argv[i] + 2);
+            i++;
+        } else if (strcmp(argv[i], "-w") == 0) {
+            long w;
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            w = strtol_dec(argv[i + 1]);
+            if (w < 1) w = 1;
+            if (w > WIDTH_MAX) w = WIDTH_MAX;
+            line_bytes = (int)w;
+            i += 2;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'w' && argv[i][2] != 0 &&
+                   is_digits(argv[i] + 2)) {
+            long w = strtol_dec(argv[i] + 2);
+            if (w < 1) w = 1;
+            if (w > WIDTH_MAX) w = WIDTH_MAX;
+            line_bytes = (int)w;
             i++;
         } else {
             usage();
