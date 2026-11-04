@@ -412,6 +412,8 @@ def main():
         "[FS] published /bin/tr (",
         "[FS] published /bin/test (",
         "[FS] published /bin/[ (",
+        "[FS] published /bin/uniq (",
+        "[FS] published /bin/sort (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

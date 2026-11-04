@@ -242,6 +242,15 @@ requires a closing `]` (same ELF published as `/bin/test` and `/bin/[`).
 Focused virtio login smoke covers file/string/int forms with `&&`/`||` plus
 prior interactive greens (smp 1/2).
 
+
+## /bin/uniq + /bin/sort — landed
+
+Thin text-pipeline pair. `uniq [-c] [-d] [-u] [FILE...]` collapses consecutive
+duplicate lines (`-c` count prefix, `-d` duplicates only, `-u` unique only).
+`sort [-r] [-n] [FILE...]` loads lines and sorts lexicographically (`-r`
+reverse, `-n` leading-integer numeric). Focused virtio login smoke covers
+`sort | uniq`, `-c`/`-n`/`-r` bites plus prior interactive greens (smp 1/2).
+
 ## hard link(2) + shell ln — landed
 
 Linux nr `link(86)`. Ramfs tracks `inode.nlink` (files/symlinks); Ext2 bumps
