@@ -1077,7 +1077,7 @@ Thin userland polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
 still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
 `df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
 SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; `hash` /
-`read` builtin still deferred.
+`read` builtin were next (landed below).
 
 `printf` gains `%o` (octal; `%x` already). Shell: `export -n NAME` clears the
 export attribute while keeping `$NAME` (env table gains an `exported` flag;
@@ -1087,6 +1087,24 @@ missing). Focused virtio login smoke covers `%o` / export -n keep-value /
 type builtin+PATH / command -v plus prior greens (smp 1/2). Ramfs `/bin`
 dents ~111/128.
 
+
+## shell read + hash — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc.
+
+Shell builtins: `read [-r] [NAME...]` reads one stdin line (ICANON or `<`
+redirect; byte loop to newline). No NAME → `REPLY`. IFS whitespace split;
+last NAME gets the remainder; missing fields → empty; EOF → status 1 (vars
+cleared). `-r` accepted (always raw). New bindings stay unexported.
+`hash` lists `NAME=PATH`; `hash -r` clears; `hash NAME` resolves+remembers
+(error on builtin/missing). `resolve_cmd` consults the table, forgets stale
+hits, and auto-remembers successful PATH opens (cap 16). Focused virtio
+login smoke covers read one/REPLY/fields/`-r`/EOF + hash list/clear/miss/
+builtin/auto + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1094,6 +1112,6 @@ dents ~111/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: shell `hash` / `read` builtin if missing;
-   skip large `getopts` / here-doc. Leave Ext2 duplex / multi-nc / CFS / jbd
-   alone.
+   deferred. Next thin polish: more small `/bin`/shell bites after fresh
+   inventory (skip large `getopts` / here-doc). Leave Ext2 duplex / multi-nc /
+   CFS / jbd alone.

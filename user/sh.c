@@ -1,6 +1,6 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
- * readlink, realpath, env/export[-n]/unset/which/type/command -v, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
@@ -84,6 +84,9 @@ enum {
     MAX_ENV  = 16,
     ENV_NAME = 32,
     ENV_VAL  = 96,
+    MAX_HASH = 16,
+    HASH_NAME = 32,
+    HASH_PATH = 96,
     WNOHANG = 1,
     WUNTRACED = 2,
     WCONTINUED = 8,
@@ -991,6 +994,106 @@ static char **sh_build_envp(void) {
     return sh_envp;
 }
 
+/* Command hash (PATH resolve cache). */
+struct sh_hashent {
+    int used;
+    char name[HASH_NAME];
+    char path[HASH_PATH];
+};
+
+static struct sh_hashent sh_hashes[MAX_HASH];
+
+static void hash_clear(void) {
+    int i;
+    for (i = 0; i < MAX_HASH; i++) {
+        sh_hashes[i].used = 0;
+        sh_hashes[i].name[0] = 0;
+        sh_hashes[i].path[0] = 0;
+    }
+}
+
+static void hash_forget(const char *name) {
+    int i;
+    if (name == 0) return;
+    for (i = 0; i < MAX_HASH; i++) {
+        if (sh_hashes[i].used && eq(sh_hashes[i].name, name)) {
+            sh_hashes[i].used = 0;
+            sh_hashes[i].name[0] = 0;
+            sh_hashes[i].path[0] = 0;
+            return;
+        }
+    }
+}
+
+static const char *hash_lookup(const char *name) {
+    int i;
+    if (name == 0) return 0;
+    for (i = 0; i < MAX_HASH; i++) {
+        if (sh_hashes[i].used && eq(sh_hashes[i].name, name)) {
+            return sh_hashes[i].path;
+        }
+    }
+    return 0;
+}
+
+static int hash_remember(const char *name, const char *path) {
+    int i;
+    int free_slot = -1;
+    int nlen;
+    int plen;
+    if (name == 0 || path == 0 || name[0] == 0 || path[0] == 0) return -1;
+    nlen = 0;
+    while (name[nlen] != 0) nlen++;
+    plen = 0;
+    while (path[plen] != 0) plen++;
+    if (nlen >= HASH_NAME || plen >= HASH_PATH) return -1;
+    for (i = 0; i < MAX_HASH; i++) {
+        if (sh_hashes[i].used && eq(sh_hashes[i].name, name)) {
+            int k;
+            for (k = 0; k < plen; k++) sh_hashes[i].path[k] = path[k];
+            sh_hashes[i].path[plen] = 0;
+            return 0;
+        }
+        if (!sh_hashes[i].used && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) return -1;
+    {
+        int k;
+        for (k = 0; k < nlen; k++) sh_hashes[free_slot].name[k] = name[k];
+        sh_hashes[free_slot].name[nlen] = 0;
+        for (k = 0; k < plen; k++) sh_hashes[free_slot].path[k] = path[k];
+        sh_hashes[free_slot].path[plen] = 0;
+        sh_hashes[free_slot].used = 1;
+    }
+    return 0;
+}
+
+/* Read one line from fd 0 into buf (no trailing newline). Returns length, or -1 on EOF. */
+static int sh_read_line(char *buf, int bufsz) {
+    int n = 0;
+    if (buf == 0 || bufsz < 2) return -1;
+    while (n + 1 < bufsz) {
+        char c;
+        long r = u_read(0, &c, 1);
+        if (r <= 0) {
+            if (n == 0) return -1;
+            break;
+        }
+        if (c == '\n') break;
+        if (c == '\r') continue;
+        buf[n++] = c;
+    }
+    buf[n] = 0;
+    return n;
+}
+
+static int sh_setenv_local(const char *name, const char *val) {
+    int existed = sh_getenv(name) != 0;
+    if (sh_setenv(name, val) != 0) return -1;
+    if (!existed) sh_mark_export(name, 0);
+    return 0;
+}
+
 /* Expand whole-token $? / $NAME (no ${} / mid-string). Writes into out. */
 static int fmt_long_dec(char *out, int outsz, long v) {
     char tmp[24];
@@ -1360,6 +1463,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "unset") ||
            eq(cmd, "which") || eq(cmd, "type") || eq(cmd, "command") ||
+           eq(cmd, "hash") || eq(cmd, "read") ||
            eq(cmd, "chmod") || eq(cmd, "umask")
         || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
         || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue");
@@ -1371,6 +1475,7 @@ static const char *resolve_cmd(char **argv, char *buf) {
     int k;
     const char *path;
     const char *p;
+    const char *hit;
     path = sh_getenv("PATH");
     if (path == 0 || path[0] == 0) {
         path = "/bin:/usr/bin:.";
@@ -1383,6 +1488,18 @@ static const char *resolve_cmd(char **argv, char *buf) {
     }
     if (has_slash) {
         return argv[0];
+    }
+    hit = hash_lookup(argv[0]);
+    if (hit != 0) {
+        long fd = u_open(hit, 0, 0);
+        if (fd >= 0) {
+            int i;
+            u_close(fd);
+            for (i = 0; hit[i] != 0 && i < 95; i++) buf[i] = hit[i];
+            buf[i] = 0;
+            return buf;
+        }
+        hash_forget(argv[0]);
     }
     p = path;
     while (*p != 0) {
@@ -1409,6 +1526,7 @@ static const char *resolve_cmd(char **argv, char *buf) {
         fd = u_open(buf, 0, 0);
         if (fd >= 0) {
             u_close(fd);
+            hash_remember(argv[0], buf);
             return buf;
         }
         if (p[n] == ':') p += n + 1;
@@ -1594,9 +1712,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -1955,6 +2073,197 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 }
             }
             rc = bad ? 1 : (any ? 0 : 1);
+        }
+    } else if (eq(tokens[0], "hash")) {
+        /* hash             -> list remembered NAME=PATH
+         * hash -r          -> clear table
+         * hash NAME...     -> resolve + remember (error if missing) */
+        int ai = 1;
+        int clear = 0;
+        int bad = 0;
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
+            const char *o = tokens[1] + 1;
+            int j;
+            if (!(o[0] == '-' && o[1] == 0)) {
+                for (j = 0; o[j] != 0; j++) {
+                    if (o[j] == 'r') {
+                        clear = 1;
+                    } else {
+                        puts("usage: hash [-r] [NAME...]");
+                        rc = 1;
+                        bad = 1;
+                        break;
+                    }
+                }
+                if (!bad) ai = 2;
+            }
+        }
+        if (bad) {
+            /* usage printed */
+        } else if (clear) {
+            if (tokens[ai] != 0) {
+                puts("usage: hash [-r] [NAME...]");
+                rc = 1;
+            } else {
+                hash_clear();
+                rc = 0;
+            }
+        } else if (tokens[ai] == 0) {
+            int i;
+            for (i = 0; i < MAX_HASH; i++) {
+                if (!sh_hashes[i].used) continue;
+                printf("%s=%s\n", sh_hashes[i].name, sh_hashes[i].path);
+            }
+            rc = 0;
+        } else {
+            rc = 0;
+            for (; tokens[ai] != 0; ai++) {
+                char path[96];
+                const char *target;
+                long fd;
+                char *av[2];
+                if (is_builtin(tokens[ai])) {
+                    printf("sh: hash: %s: shell builtin\n", tokens[ai]);
+                    rc = 1;
+                    continue;
+                }
+                av[0] = tokens[ai];
+                av[1] = 0;
+                /* Drop stale entry so resolve re-walks PATH. */
+                hash_forget(tokens[ai]);
+                target = resolve_cmd(av, path);
+                fd = u_open(target, 0, 0);
+                if (fd >= 0) {
+                    u_close(fd);
+                    if (hash_remember(tokens[ai], target) != 0) {
+                        printf("sh: hash: %s: table full\n", tokens[ai]);
+                        rc = 1;
+                    }
+                } else {
+                    printf("sh: hash: %s: not found\n", tokens[ai]);
+                    rc = 1;
+                }
+            }
+        }
+    } else if (eq(tokens[0], "read")) {
+        /* Thin: read [-r] [NAME...] — one line from stdin; IFS whitespace split;
+         * no NAME -> REPLY; -r accepted (always raw). Exit 1 on EOF. */
+        int ai = 1;
+        int nvars = 0;
+        int i;
+        char *names[8];
+        char line[256];
+        char reply_name[8];
+        int rn;
+        int bad = 0;
+        char *p;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'r') {
+                    /* raw: backslash never special (only mode we implement) */
+                } else {
+                    puts("usage: read [-r] [NAME...]");
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad) break;
+            ai++;
+        }
+        if (bad) {
+            rc = 1;
+        } else {
+            for (; tokens[ai] != 0; ai++) {
+                if (nvars >= 8) {
+                    puts("sh: read: too many names");
+                    bad = 1;
+                    break;
+                }
+                if (!env_name_ok(tokens[ai])) {
+                    printf("sh: read: %s: bad name\n", tokens[ai]);
+                    bad = 1;
+                    break;
+                }
+                names[nvars++] = tokens[ai];
+            }
+            if (bad) {
+                rc = 1;
+            } else {
+                if (nvars == 0) {
+                    reply_name[0] = 'R';
+                    reply_name[1] = 'E';
+                    reply_name[2] = 'P';
+                    reply_name[3] = 'L';
+                    reply_name[4] = 'Y';
+                    reply_name[5] = 0;
+                    names[0] = reply_name;
+                    nvars = 1;
+                }
+                rn = sh_read_line(line, (int)sizeof(line));
+                if (rn < 0) {
+                    for (i = 0; i < nvars; i++) {
+                        sh_setenv_local(names[i], "");
+                    }
+                    rc = 1;
+                } else {
+                    p = line;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (nvars == 1) {
+                        char *end = p;
+                        while (*end != 0) end++;
+                        while (end > p && (end[-1] == ' ' || end[-1] == '\t')) {
+                            end--;
+                        }
+                        *end = 0;
+                        if (sh_setenv_local(names[0], p) != 0) {
+                            printf("sh: read: %s: failed\n", names[0]);
+                            rc = 1;
+                        } else {
+                            rc = 0;
+                        }
+                    } else {
+                        rc = 0;
+                        for (i = 0; i < nvars; i++) {
+                            char field[ENV_VAL];
+                            while (*p == ' ' || *p == '\t') p++;
+                            if (i == nvars - 1) {
+                                char *end = p;
+                                while (*end != 0) end++;
+                                while (end > p && (end[-1] == ' ' || end[-1] == '\t')) {
+                                    end--;
+                                }
+                                *end = 0;
+                                if (sh_setenv_local(names[i], p) != 0) {
+                                    printf("sh: read: %s: failed\n", names[i]);
+                                    rc = 1;
+                                    break;
+                                }
+                            } else if (*p == 0) {
+                                if (sh_setenv_local(names[i], "") != 0) {
+                                    printf("sh: read: %s: failed\n", names[i]);
+                                    rc = 1;
+                                    break;
+                                }
+                            } else {
+                                int fl = 0;
+                                while (*p != 0 && *p != ' ' && *p != '\t'
+                                       && fl + 1 < ENV_VAL) {
+                                    field[fl++] = *p++;
+                                }
+                                field[fl] = 0;
+                                if (sh_setenv_local(names[i], field) != 0) {
+                                    printf("sh: read: %s: failed\n", names[i]);
+                                    rc = 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else if (eq(tokens[0], "umask")) {
         if (tokens[1] == 0) {
@@ -3700,8 +4009,9 @@ int main(int argc, char **argv) {
     }
 
     sh_env_init();
+    hash_clear();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
