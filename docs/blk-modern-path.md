@@ -332,13 +332,21 @@ forces literal (default). Sticky clusters (`-ne`) accepted. Lets
 Focused virtio login smoke covers `/bin/echo -n/-e/-E/-ne/\c`,
 `xargs /bin/echo`, plus prior interactive greens (smp 1/2).
 
+## /bin/sleep — landed
+
+Thin external `sleep SECONDS` (non-negative decimal integer) via `nanosleep(2)`,
+mirroring the shell builtin. Lets `xargs sleep` / script `exec` paths work
+without relying on the builtin. Focused virtio login smoke covers
+`/bin/sleep 0`/`1`, usage/invalid, `xargs /bin/sleep`, plus prior interactive
+greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin external `/bin/sleep` (if missing beyond
-   shell builtin), `truncate`, `dirname` polish, or other POSIX after README
-   scan (higher value than deep jbd). Avoid deep jbd / Ext2-redirect duplex
-   races / CFS nesting unless a clear bite-sized fix.
+4. More daily-driver gaps: thin `/bin/truncate` (Ext2 ftruncate already exists),
+   other POSIX coreutils / kernel bits after README scan (higher value than
+   deep jbd). Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless
+   a clear bite-sized fix.
