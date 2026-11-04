@@ -1,8 +1,11 @@
 /* fakeos userland - test / [: thin POSIX expression evaluator.
  * Exit 0 true, 1 false, 2 usage/error. Invoked as [ requires closing ].
  * Unary: -b -c -d -e -f -h -L -p -S -s -r -w -x -z -n
- * Binary: = != -eq -ne -lt -le -gt -ge
+ * Binary: = != -eq -ne -lt -le -gt -ge -ot -nt
  * Bang: ! EXPR (single). STRING alone is -n STRING.
+ * -ot/-nt compare st_mtime (boot-relative secs); missing-file rules match
+ * common POSIX/bash: A -nt B true if A exists and B does not (or A newer);
+ * A -ot B true if B exists and A does not (or A older). Equal mtime => false.
  */
 package user;
 
@@ -16,6 +19,7 @@ extern void printf(const char *fmt, ...);
 enum {
     ST_MODE = 24,
     ST_SIZE = 48,
+    ST_MTIME = 88,
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFIFO = 0x1000,
@@ -118,6 +122,13 @@ static int file_mode_any(const char *path, unsigned int bits) {
     return (mode & bits) != 0;
 }
 
+static int file_mtime(const char *path, unsigned long *out) {
+    char st[ST_SIZE_BYTES];
+    if (!do_stat(path, 0, st)) return 0;
+    *out = load_u64(st + ST_MTIME);
+    return 1;
+}
+
 /* Evaluate argc/argv expression (already stripped of program name / closing ]).
  * Returns 0/1 for true/false, or -1 on error (caller maps to exit 2). */
 static int eval_expr(int argc, char **argv) {
@@ -189,6 +200,10 @@ static int eval_expr(int argc, char **argv) {
         int t = 0;
         long n1 = 0;
         long n2 = 0;
+        unsigned long m0 = 0;
+        unsigned long m2 = 0;
+        int e0;
+        int e2;
         if (strcmp(a1, "=") == 0) {
             t = (strcmp(a0, a2) == 0);
         } else if (strcmp(a1, "!=") == 0) {
@@ -203,6 +218,18 @@ static int eval_expr(int argc, char **argv) {
             else if (strcmp(a1, "-le") == 0) t = (n1 <= n2);
             else if (strcmp(a1, "-gt") == 0) t = (n1 > n2);
             else t = (n1 >= n2);
+        } else if (strcmp(a1, "-nt") == 0 || strcmp(a1, "-ot") == 0) {
+            e0 = file_mtime(a0, &m0);
+            e2 = file_mtime(a2, &m2);
+            if (strcmp(a1, "-nt") == 0) {
+                if (e0 && !e2) t = 1;
+                else if (e0 && e2) t = (m0 > m2);
+                else t = 0;
+            } else {
+                if (!e0 && e2) t = 1;
+                else if (e0 && e2) t = (m0 < m2);
+                else t = 0;
+            }
         } else {
             return -1;
         }

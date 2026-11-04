@@ -893,16 +893,28 @@ the line (interactive: does not exit even with `-e`). Focused virtio login smoke
 errexit short-circuit / `set +e` survival plus prior greens (smp 1/2). Ramfs
 `/bin` dents ~106/128. Jobs/`fg`/`bg` already present — left alone.
 
+## test -ot/-nt + expr substr/index — landed
+
+Thin userland polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+`test`/`[` gain `-ot`/`-nt` against `st_mtime` (boot-relative secs; missing-file
+rules match common POSIX/bash). `expr` gains `index STRING CHARS` (1-based; 0
+if none) and `substr STRING POS LEN` (1-based POS; empty on invalid POS/LEN).
+Focused virtio login smoke covers mtime order / missing-file / index / substr
+plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128. Jobs/`fg`/`bg`
+already present — left alone.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`set -e/-u` + `find -maxdepth` + …):
-   prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
-   `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only if
-   `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex /
-   multi-nc SMP races and CFS/jbd alone. Other thin polish: job/fg/bg polish
-   if gaps remain, `test`/`expr` more ops (`-ot`/`-nt`, `substr`/`index`),
-   `dd conv=`/`sync=`, `grep -E` thin, `od` gaps — dig carefully; many listed
-   utils already covered.
+3. More daily-driver gaps after inventory (`test -ot/-nt` + `expr substr/index`
+   + `set -e/-u` + …): prefer small coherent chunks; thin `df` **only if**
+   `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive. Candidates:
+   `ps`/`uptime`/`free` only if `/proc` grows; skip `mkfifo` until `mknod`;
+   leave Ext2-redirect duplex / multi-nc SMP races and CFS/jbd alone. Other
+   thin polish: job/fg/bg polish if gaps remain, `dd conv=`/`sync=`, `grep -E`
+   thin, `od` polish gaps — dig carefully; many listed utils already covered.

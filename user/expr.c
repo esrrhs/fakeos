@@ -1,8 +1,10 @@
-/* fakeos userland - expr: integer arithmetic / length (thin POSIX subset).
+/* fakeos userland - expr: integer arithmetic / string (thin POSIX subset).
  * Forms:
  *   expr INTEGER1 +|-|*|/|% INTEGER2
  *   expr INTEGER1 =|!=|<|>|<=|>= INTEGER2
  *   expr length STRING
+ *   expr index STRING CHARS   (1-based; 0 if none)
+ *   expr substr STRING POS LEN  (1-based POS; empty if POS/LEN invalid)
  *   expr ARG   (print ARG; exit 0 if non-empty/non-zero)
  * Exit: 0 if result non-zero/non-empty, 1 if zero/empty, 2 on error.
  * Quote '*' in the shell: expr 3 '*' 4
@@ -15,7 +17,7 @@ extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 
 static void usage(void) {
-    u_write(2, "usage: expr INTEGER OP INTEGER | length STRING | ARG\n", 54);
+    u_write(2, "usage: expr INTEGER OP INTEGER | length|index|substr ...\n", 58);
 }
 
 static int is_digit(char c) {
@@ -121,6 +123,51 @@ int main(int argc, char **argv) {
     /* expr length STRING */
     if (argc == 3 && strcmp(argv[1], "length") == 0) {
         return finish_num((long)strlen(argv[2]));
+    }
+
+    /* expr index STRING CHARS */
+    if (argc == 4 && strcmp(argv[1], "index") == 0) {
+        const char *s = argv[2];
+        const char *chars = argv[3];
+        unsigned long i;
+        unsigned long j;
+        unsigned long n = strlen(s);
+        unsigned long m = strlen(chars);
+        for (i = 0; i < n; i++) {
+            for (j = 0; j < m; j++) {
+                if (s[i] == chars[j]) {
+                    return finish_num((long)(i + 1));
+                }
+            }
+        }
+        return finish_num(0);
+    }
+
+    /* expr substr STRING POS LENGTH */
+    if (argc == 5 && strcmp(argv[1], "substr") == 0) {
+        long pos = 0;
+        long len = 0;
+        const char *s = argv[2];
+        unsigned long n;
+        unsigned long start;
+        unsigned long take;
+        char buf[256];
+        unsigned long k;
+        if (!parse_long(argv[3], &pos) || !parse_long(argv[4], &len)) {
+            usage();
+            return 2;
+        }
+        n = strlen(s);
+        if (pos < 1 || len < 1 || (unsigned long)pos > n) {
+            return finish_str("");
+        }
+        start = (unsigned long)(pos - 1);
+        take = (unsigned long)len;
+        if (start + take > n) take = n - start;
+        if (take >= sizeof(buf)) take = sizeof(buf) - 1;
+        for (k = 0; k < take; k++) buf[k] = s[start + k];
+        buf[take] = 0;
+        return finish_str(buf);
     }
 
     /* expr ARG */
