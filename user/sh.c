@@ -2268,7 +2268,7 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "return") || eq(cmd, "local") || eq(cmd, "shift")
         || eq(cmd, ":") || eq(cmd, "true") || eq(cmd, "false")
         || eq(cmd, "eval") || eq(cmd, "source") || eq(cmd, ".")
-        || eq(cmd, "let")
+        || eq(cmd, "let") || eq(cmd, "declare") || eq(cmd, "typeset")
         || eq(cmd, "[[") || eq(cmd, "printf");
 }
 
@@ -2629,6 +2629,8 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "true", "true  (exit 0)" },
     { "false", "false  (exit 1)" },
     { "let", "let NAME=EXPR...  (arith assign; status by last)" },
+    { "declare", "declare [-rxp] [NAME[=VALUE]...]" },
+    { "typeset", "typeset [-rxp] [NAME[=VALUE]...]  (alias of declare)" },
     { "cd", "cd [-L|-P] [DIR|-]" },
     { "pwd", "pwd [-L|-P]" },
     { "pushd", "pushd [DIR]" },
@@ -3260,9 +3262,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; let; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -3791,6 +3793,211 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             if (bad) rc = 2;
             else if (!any) rc = 1;
             else rc = (last != 0) ? 0 : 1;
+        }
+        pop_redirects(saved_in, saved_out);
+        return rc;
+    }
+    if (eq(tokens[0], "declare") || eq(tokens[0], "typeset")) {
+        /* Thin declare/typeset: [-r][-x][-p] [NAME[=VAL]...]
+         * -r readonly, -x export, -p print (attrs in flags). No arrays. */
+        int ai = 1;
+        int want_r = 0;
+        int want_x = 0;
+        int pflag = 0;
+        int bad = 0;
+        int any = 0;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'r') want_r = 1;
+                else if (o[j] == 'x') want_x = 1;
+                else if (o[j] == 'p') pflag = 1;
+                else {
+                    puts("usage: declare [-rxp] [NAME[=VALUE]...]");
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad) break;
+            ai++;
+        }
+        if (bad) {
+            rc = 1;
+        } else if (pflag && tokens[ai] == 0) {
+            int i;
+            for (i = 0; i < MAX_ENV; i++) {
+                const char *flags;
+                if (!sh_envs[i].used) continue;
+                if (want_x && !sh_envs[i].exported) continue;
+                if (want_r && !sh_envs[i].readonly) continue;
+                if (sh_envs[i].exported && sh_envs[i].readonly) flags = "-rx";
+                else if (sh_envs[i].exported) flags = "-x";
+                else if (sh_envs[i].readonly) flags = "-r";
+                else flags = "--";
+                printf("declare %s %s=%s\n", flags, sh_envs[i].name, sh_envs[i].val);
+                any = 1;
+            }
+            (void)any;
+            rc = 0;
+        } else if (pflag) {
+            for (; tokens[ai] != 0; ai++) {
+                const char *name = tokens[ai];
+                const char *val;
+                const char *flags;
+                int i;
+                int k;
+                int found = 0;
+                int exported = 0;
+                int readonly = 0;
+                any = 1;
+                for (k = 0; name[k] != 0; k++) {
+                    if (name[k] == '=') {
+                        puts("usage: declare [-rxp] [NAME[=VALUE]...]");
+                        bad = 1;
+                        break;
+                    }
+                }
+                if (bad) break;
+                for (i = 0; i < MAX_ENV; i++) {
+                    if (sh_envs[i].used && eq(sh_envs[i].name, name)) {
+                        found = 1;
+                        exported = sh_envs[i].exported;
+                        readonly = sh_envs[i].readonly;
+                        val = sh_envs[i].val;
+                        break;
+                    }
+                }
+                if (!found) {
+                    printf("sh: declare: %s: not found\n", name);
+                    bad = 1;
+                    continue;
+                }
+                if (want_x && !exported) {
+                    printf("sh: declare: %s: not found\n", name);
+                    bad = 1;
+                    continue;
+                }
+                if (want_r && !readonly) {
+                    printf("sh: declare: %s: not found\n", name);
+                    bad = 1;
+                    continue;
+                }
+                if (exported && readonly) flags = "-rx";
+                else if (exported) flags = "-x";
+                else if (readonly) flags = "-r";
+                else flags = "--";
+                printf("declare %s %s=%s\n", flags, name, val);
+            }
+            rc = bad ? 1 : 0;
+        } else if (tokens[ai] == 0) {
+            /* bare declare with only flags: list like -p filtered */
+            int i;
+            for (i = 0; i < MAX_ENV; i++) {
+                const char *flags;
+                if (!sh_envs[i].used) continue;
+                if (want_x && !sh_envs[i].exported) continue;
+                if (want_r && !sh_envs[i].readonly) continue;
+                if (!want_x && !want_r) {
+                    /* bare declare with no names and no -p: bash prints all
+                     * functions too — we only list vars when -x/-r given;
+                     * with no flags, treat as -p all. */
+                }
+                if (sh_envs[i].exported && sh_envs[i].readonly) flags = "-rx";
+                else if (sh_envs[i].exported) flags = "-x";
+                else if (sh_envs[i].readonly) flags = "-r";
+                else flags = "--";
+                if (!want_x && !want_r) {
+                    printf("declare %s %s=%s\n", flags, sh_envs[i].name, sh_envs[i].val);
+                } else {
+                    printf("declare %s %s=%s\n", flags, sh_envs[i].name, sh_envs[i].val);
+                }
+            }
+            rc = 0;
+        } else {
+            for (; tokens[ai] != 0; ai++) {
+                char name[ENV_NAME];
+                const char *eqp = 0;
+                int n = 0;
+                int k;
+                any = 1;
+                for (k = 0; tokens[ai][k] != 0; k++) {
+                    if (tokens[ai][k] == '=') {
+                        eqp = tokens[ai] + k;
+                        break;
+                    }
+                }
+                if (eqp == 0) {
+                    int existed;
+                    if (!env_name_ok(tokens[ai])) {
+                        puts("sh: declare: bad name");
+                        bad = 1;
+                        continue;
+                    }
+                    existed = (sh_getenv(tokens[ai]) != 0);
+                    if (!existed) {
+                        sh_ro_override = 1;
+                        if (sh_setenv(tokens[ai], "") != 0) {
+                            sh_ro_override = 0;
+                            printf("sh: declare: %s: failed\n", tokens[ai]);
+                            bad = 1;
+                            continue;
+                        }
+                        sh_ro_override = 0;
+                        /* sh_setenv marks new slots exported; declare without
+                         * -x must stay shell-local (bash declare semantics). */
+                        (void)sh_mark_export(tokens[ai], 0);
+                    }
+                    if (want_x && sh_mark_export(tokens[ai], 1) != 0) {
+                        printf("sh: declare: %s: failed\n", tokens[ai]);
+                        bad = 1;
+                        continue;
+                    }
+                    if (want_r && sh_mark_readonly(tokens[ai], 1) != 0) {
+                        printf("sh: declare: %s: failed\n", tokens[ai]);
+                        bad = 1;
+                        continue;
+                    }
+                } else {
+                    int existed;
+                    n = (int)(eqp - tokens[ai]);
+                    if (n <= 0 || n >= ENV_NAME) {
+                        puts("sh: declare: bad name");
+                        bad = 1;
+                        continue;
+                    }
+                    for (k = 0; k < n; k++) name[k] = tokens[ai][k];
+                    name[n] = 0;
+                    if (!env_name_ok(name)) {
+                        puts("sh: declare: bad name");
+                        bad = 1;
+                        continue;
+                    }
+                    existed = (sh_getenv(name) != 0);
+                    sh_ro_override = 1;
+                    if (sh_setenv(name, eqp + 1) != 0) {
+                        sh_ro_override = 0;
+                        printf("sh: declare: %s: failed\n", name);
+                        bad = 1;
+                        continue;
+                    }
+                    sh_ro_override = 0;
+                    /* New binding defaults exported via sh_setenv; clear unless -x. */
+                    if (!existed) (void)sh_mark_export(name, 0);
+                    if (want_x && sh_mark_export(name, 1) != 0) {
+                        printf("sh: declare: %s: failed\n", name);
+                        bad = 1;
+                        continue;
+                    }
+                    if (want_r && sh_mark_readonly(name, 1) != 0) {
+                        printf("sh: declare: %s: failed\n", name);
+                        bad = 1;
+                        continue;
+                    }
+                }
+            }
+            rc = bad ? 1 : 0;
         }
         pop_redirects(saved_in, saved_out);
         return rc;
@@ -6345,7 +6552,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, let, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, let/declare/typeset, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
