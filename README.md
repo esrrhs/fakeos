@@ -211,6 +211,8 @@ flowchart TD
 - [x] **ls -l mtime + getuid/chown stubs**：`struct stat` 填 `st_uid`/`st_gid`/`st_mtime`（boot-relative 秒，同 `clock_gettime(REALTIME)`）；Ramfs inode 与 Ext2 `i_uid`/`i_gid`/`i_mtime` 在 create/write 打戳；`getuid`/`geteuid`/`getgid`/`getegid` + `chown(2)`；shell `id` / `chown UID[:GID] FILE...`；`ls -l` 显示 `mode uid gid size mtime name`。自测 `[U][PASS] getuid/chown/mtime`；virtio login smoke（smp 1/2）。
 - [x] **TTY Tab completion**：ICANON 行编辑下 Tab 补全光标处单词；相对路径相对 cwd，绝对路径用目录前缀；命令位（行首、无 `/`）另搜 `/bin` + 内建名表；唯一目录命中追加 `/`；无匹配/无进展响 BEL；ECHO 关闭时跳过。virtio login smoke（smp 1/2）。
 - [x] **TTY Double-Tab match listing**：歧义且无公共前缀进展时首次 Tab 响 BEL，再次 Tab 列出候选（目录名尾加 `/`）并回显当前编辑缓冲（内核不知 shell 提示符）。其它编辑清 pending。virtio login smoke（smp 1/2）。
+- [x] **/bin/head + /bin/wc**：`head [-n N]|-N` 默认 10 行；`wc [-lwc]` 计行/词/字节（多文件带 total）；stdin/`-` 可用。virtio login smoke（smp 1/2）。
+- [x] **shell history 持久化**：环形 32 条写入 `/home/.sh_history`（Ext2）；启动 `hist_load`，每条命令后 `hist_save`+`fsync`；`!!`/`history`/CSI 上下跨重启仍可用。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。

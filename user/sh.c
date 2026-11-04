@@ -42,6 +42,7 @@ extern long u_uname(void *buf);
 extern long u_nanosleep(const void *req, void *rem);
 extern long u_clock_gettime(long clockid, void *tp);
 extern long u_sync(void);
+extern long u_fsync(long fd);
 extern long u_kill(long pid, long sig);
 extern long u_setpgid(long pid, long pgid);
 extern long u_getpgid(long pid);
@@ -115,7 +116,33 @@ static char hist[HIST_MAX][256];
 static int hist_len;
 static int hist_next;
 
-static void hist_add(const char *line) {
+static const char *hist_path(void) {
+    /* Persist under Ext2 home so history survives reboot. */
+    return "/home/.sh_history";
+}
+
+static void hist_save(void) {
+    long fd;
+    int i;
+    int start;
+    const char *path = hist_path();
+    fd = u_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) return;
+    start = (hist_len < HIST_MAX) ? 0 : hist_next;
+    for (i = 0; i < hist_len; i++) {
+        int idx = (start + i) % HIST_MAX;
+        int n = 0;
+        while (hist[idx][n] && n < 255) n++;
+        if (n > 0) {
+            u_write(fd, hist[idx], (unsigned long)n);
+            u_write(fd, "\n", 1);
+        }
+    }
+    u_fsync(fd);
+    u_close(fd);
+}
+
+static void hist_add_internal(const char *line, int do_save) {
     int i = 0;
     int n = 0;
     if (line == 0 || line[0] == 0) return;
@@ -133,6 +160,45 @@ static void hist_add(const char *line) {
     hist[hist_next][n] = 0;
     hist_next = (hist_next + 1) % HIST_MAX;
     if (hist_len < HIST_MAX) hist_len++;
+    if (do_save) hist_save();
+}
+
+static void hist_add(const char *line) {
+    hist_add_internal(line, 1);
+}
+
+static void hist_load(void) {
+    char buf[4096];
+    char line[256];
+    long fd;
+    long n;
+    long off = 0;
+    int li = 0;
+    const char *path = hist_path();
+    fd = u_open(path, O_RDONLY, 0);
+    if (fd < 0) return;
+    while ((n = u_read(fd, buf + off, (unsigned long)(sizeof(buf) - (unsigned long)off))) > 0) {
+        long end = off + n;
+        long i = 0;
+        while (i < end) {
+            char c = buf[i++];
+            if (c == '\n' || c == '\r') {
+                if (li > 0) {
+                    line[li] = 0;
+                    hist_add_internal(line, 0);
+                    li = 0;
+                }
+                continue;
+            }
+            if (li < 255) line[li++] = c;
+        }
+        off = 0;
+    }
+    if (li > 0) {
+        line[li] = 0;
+        hist_add_internal(line, 0);
+    }
+    u_close(fd);
 }
 
 static void hist_print(void) {
@@ -892,7 +958,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (default PATH=/bin:/usr/bin:.)");
-        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
+        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -1702,7 +1768,8 @@ int main(int argc, char **argv) {
     }
 
     sh_env_init();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab, env/export/envp, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    hist_load();
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab + /home/.sh_history, env/export/envp, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

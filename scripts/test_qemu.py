@@ -395,6 +395,8 @@ def main():
         "[FS] published /bin/nc (",
         "[FS] published /bin/ed (",
         "[FS] published /bin/login (",
+        "[FS] published /bin/head (",
+        "[FS] published /bin/wc (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",
