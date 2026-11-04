@@ -1,6 +1,7 @@
 /* fakeos userland - nl: number lines (thin POSIX subset).
- * Forms: nl [-b a|t] [-v START] [-w WIDTH] [-s SEP] [FILE...]
- * Default: -b t (non-empty), -v 1, -w 6, -s tab. stdin if no FILE.
+ * Forms: nl [-b a|t] [-v START] [-i INCR] [-w WIDTH] [-s SEP] [FILE...]
+ * Default: -b t (non-empty), -v 1, -i 1, -w 6, -s tab. stdin if no FILE.
+ * Glued -ba/-bt/-vN/-iN/-wN/-sSEP keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -16,11 +17,12 @@ enum { LINE_MAX = 512 };
 
 static int body_all;      /* -b a: number all; else -b t non-empty */
 static long start_num = 1;
+static long incr = 1;     /* -i: number increment */
 static int width = 6;
 static const char *sep = "\t";
 
 static void usage(void) {
-    u_write(2, "usage: nl [-b a|t] [-v N] [-w N] [-s SEP] [FILE...]\n", 52);
+    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-w N] [-s SEP] [FILE...]\n", 59);
 }
 
 static int is_digits(const char *s) {
@@ -58,7 +60,7 @@ static void emit_line(const char *line, int len, long *num) {
     int empty = (len == 0);
     if (body_all || !empty) {
         emit_num(*num);
-        (*num)++;
+        (*num) += incr;
     } else {
         /* blank body lines: spaces matching number column + sep omitted
          * (POSIX leaves leading whitespace empty for unnumbered). */
@@ -125,6 +127,15 @@ int main(int argc, char **argv) {
             i += 2;
         } else if (a[1] == 'v' && a[2] != 0 && is_digits(a + 2)) {
             start_num = strtol_dec(a + 2);
+            i++;
+        } else if (strcmp(a, "-i") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
+            incr = strtol_dec(argv[i + 1]);
+            if (incr < 1) incr = 1;
+            i += 2;
+        } else if (a[1] == 'i' && a[2] != 0 && is_digits(a + 2)) {
+            incr = strtol_dec(a + 2);
+            if (incr < 1) incr = 1;
             i++;
         } else if (strcmp(a, "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
