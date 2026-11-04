@@ -1582,6 +1582,14 @@ ls -1/-F (smp 1/2). Ramfs `/bin` dents ~114/128.
 Focused virtio login smoke covers `sha1sum -c` + prior greens including
 md5/sha256 -c (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## find -iname — landed
+
+`/bin/find -iname GLOB` is case-insensitive `-name` (fold A–Z in thin
+`*`/`?` glob on basename). Last of `-name`/`-iname` wins. Keeps
+`-type`/`-print`/`-maxdepth`/`-mindepth`. No new `/bin` dent. Focused
+virtio login smoke covers `-iname` + prior greens including sha1sum -c
+(smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a

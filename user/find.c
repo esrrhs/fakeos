@@ -1,9 +1,10 @@
 /* fakeos userland - find: walk trees and print matching paths (thin).
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
- * Primaries (AND): -name GLOB (basename *,? only), -type f|d, -print,
- *   -maxdepth N, -mindepth N (start points are depth 0; GNU-ish).
- * Uses lstat(2). No -o/parens/actions beyond print. Depth-first.
+ * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
+ * folds A-Z), -type f|d, -print, -maxdepth N, -mindepth N (start points
+ * are depth 0; GNU-ish). Uses lstat(2). No -o/parens/actions beyond print.
+ * Depth-first. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -36,6 +37,7 @@ enum {
 };
 
 static int want_name;
+static int name_fold; /* 1 = -iname */
 static char name_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int do_print = 1;
@@ -70,8 +72,13 @@ static const char *base_of(const char *path) {
     return last;
 }
 
-/* Thin glob: only '*' and '?' meta; match whole string. */
-static int glob_match(const char *pat, const char *s) {
+static char fold_ch(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+/* Thin glob: only '*' and '?' meta; match whole string. fold=1 for -iname. */
+static int glob_match(const char *pat, const char *s, int fold) {
     for (;;) {
         if (pat[0] == 0) return s[0] == 0;
         if (pat[0] == '*') {
@@ -79,7 +86,7 @@ static int glob_match(const char *pat, const char *s) {
             while (pat[0] == '*') pat++;
             if (pat[0] == 0) return 1;
             while (*s) {
-                if (glob_match(pat, s)) return 1;
+                if (glob_match(pat, s, fold)) return 1;
                 s++;
             }
             return 0;
@@ -90,7 +97,12 @@ static int glob_match(const char *pat, const char *s) {
             s++;
             continue;
         }
-        if (s[0] == 0 || pat[0] != s[0]) return 0;
+        if (s[0] == 0) return 0;
+        if (fold) {
+            if (fold_ch(pat[0]) != fold_ch(s[0])) return 0;
+        } else if (pat[0] != s[0]) {
+            return 0;
+        }
         pat++;
         s++;
     }
@@ -99,7 +111,7 @@ static int glob_match(const char *pat, const char *s) {
 static int match_preds(const char *path, unsigned int mode) {
     if (want_type == 1 && !is_reg_mode(mode)) return 0;
     if (want_type == 2 && !is_dir_mode(mode)) return 0;
-    if (want_name && !glob_match(name_pat, base_of(path))) return 0;
+    if (want_name && !glob_match(name_pat, base_of(path), name_fold)) return 0;
     return 1;
 }
 
@@ -133,6 +145,7 @@ static void join_path(char *out, unsigned long cap, const char *dir,
 
 static int is_primary(const char *a) {
     if (strcmp(a, "-name") == 0) return 1;
+    if (strcmp(a, "-iname") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
     if (strcmp(a, "-maxdepth") == 0) return 1;
@@ -239,12 +252,14 @@ int main(int argc, char **argv) {
     }
 
     while (ai < argc) {
-        if (strcmp(argv[ai], "-name") == 0) {
+        if (strcmp(argv[ai], "-name") == 0 || strcmp(argv[ai], "-iname") == 0) {
+            int iname = (argv[ai][1] == 'i');
             if (ai + 1 >= argc) {
                 u_write(2, "find: -name needs GLOB\n", 23);
                 return 1;
             }
             want_name = 1;
+            name_fold = iname;
             if (strlen(argv[ai + 1]) >= GLOB_CAP) {
                 u_write(2, "find: -name GLOB too long\n", 26);
                 return 1;
@@ -284,7 +299,8 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]\n", 84);
+        u_write(2, "usage: find [PATH...] [-name|-iname GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]
+", 91);
         return 1;
     }
 
