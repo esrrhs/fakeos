@@ -559,7 +559,7 @@ login smoke covers `/bin/chown` uid:gid / uid-only, `/bin/chgrp`, Ramfs+Ext2
 
 ## /bin/tac + /bin/nproc + /bin/timeout — landed
 
-Thin POSIX/GNU subset. `tac [FILE...]` prints lines in reverse (RAM-buffered
+Thin POSIX/GNU subset. `tac [-z] [FILE...]` prints lines (or NUL records with `-z`) in reverse (RAM-buffered
 like sort). `nproc [-a|--all]` counts `processor` lines in boot-published
 `/proc/cpuinfo` (filled from `smp_cpu_count()`; online==all, no affinity).
 `timeout [-s SIG] SECONDS COMMAND [ARG...]` forks+execs, polls with 50ms
@@ -1953,6 +1953,13 @@ pairs with `xargs -0` / `head -z` / `paste -z`). Default remains newline
 records. No new `/bin` dent. Focused virtio login smoke covers `rev -z` +
 prior greens including column -x (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## tac -z — landed
+
+`/bin/tac -z` uses NUL-terminated records for input and output (GNU-ish;
+pairs with `rev -z` / `head -z` / `paste -z`). Default remains newline
+records. No new `/bin` dent. Focused virtio login smoke covers `tac -z` +
+prior greens including rev -z (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1961,5 +1968,5 @@ prior greens including column -x (smp 1/2). Ramfs `/bin` dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `tac -z` / `cut -z` / `nl` polish; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   `cut -z` / `nl` polish; `cp -p` waits on utimensat; `set --` deferred;
+   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

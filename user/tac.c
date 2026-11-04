@@ -1,7 +1,9 @@
 /* fakeos userland - tac: concatenate and print files in reverse (thin).
- * Forms: tac [FILE...]
- * stdin if no FILE. Loads lines into RAM (like sort); prints last line first.
- * Lines longer than LINE_MAX-1 are truncated. Compact argv.
+ * Forms: tac [-z] [FILE...]
+ * stdin if no FILE. Loads records into RAM (like sort); prints last first.
+ * Default records end at newline; -z uses NUL-terminated records
+ * (input+output; GNU-ish). Records longer than LINE_MAX-1 are truncated.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -19,6 +21,8 @@ enum {
     LINE_MAX = 512,
     MAX_LINES = 4096
 };
+
+static int opt_z; /* NUL records */
 
 static char *lines[MAX_LINES];
 static int nlines;
@@ -52,10 +56,12 @@ static int add_line(const char *s) {
 
 static void emit_rev(void) {
     int i;
+    char nul = 0;
     for (i = nlines - 1; i >= 0; i--) {
         unsigned long n = strlen(lines[i]);
         if (n > 0) u_write(1, lines[i], n);
-        u_write(1, "\n", 1);
+        if (opt_z) u_write(1, &nul, 1);
+        else u_write(1, "\n", 1);
     }
 }
 
@@ -71,7 +77,7 @@ static int tac_fd(long fd) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            if (opt_z ? (c == 0) : (c == '\n')) {
                 line[li] = 0;
                 if (add_line(line) != 0) {
                     rc = 1;
@@ -101,7 +107,20 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
 
-    if (i < argc && strcmp(argv[i], "--") == 0) i++;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-") == 0) break;
+        if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
+            i++;
+            continue;
+        }
+        u_write(2, "usage: tac [-z] [FILE...]\n", 26);
+        return 1;
+    }
 
     if (i >= argc) {
         return tac_fd(0);

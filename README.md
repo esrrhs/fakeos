@@ -251,7 +251,7 @@ flowchart TD
 - [x] **/bin/cal**：外部 `cal MONTH YEAR` / `cal YEAR`（周日起始；无 RTC 故不支持无参当前月）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/install**：外部 `install [-d] [-t DIR] [-m MODE] SRC DST|DIR...`（`-d` 同 mkdir -p；`-t` GNU 目标目录；默认 mode 0755；多源入目录）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/chown + /bin/chgrp**：外部 `chown [UID][:GID] FILE...`（`:GID` 或缺 GID 时对应字段 (u32)-1）、`chgrp GID FILE...`；与 shell `chown` / `chown(2)` 对齐；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
-- [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout [-s SIG|--signal=SIG] SECONDS CMD...`（fork+nanosleep 轮询+信号，默认 SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [-z] [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout [-s SIG|--signal=SIG] SECONDS CMD...`（fork+nanosleep 轮询+信号，默认 SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir [-p] DIR...`（空目录；`-p` 清空父分量；shell-mirror 同步）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
 - [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
@@ -383,6 +383,7 @@ flowchart TD
 - [x] **column fill/-c**：无 `-t` 时按空白词列优先填充；`-c WIDTH`/`-cWIDTH` 输出宽度（默认 80）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **column -x**：fillrows 行优先填充（`-x`/`-xcN`/`-cxN`；可与 `-c` 组合）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **rev -z**：NUL 记录（输入+输出；可与 head/tail/paste -z 配对）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **tac -z**：NUL 记录逆序（输入+输出；可与 rev/head/paste -z 配对）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
