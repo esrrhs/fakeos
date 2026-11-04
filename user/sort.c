@@ -1,8 +1,9 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-rnufb] [-k N|-kN] [FILE...]
+ * Forms: sort [-rnufbz] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
  * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
  * string compares / tie-breaks; -b ignore leading blanks on the sort key;
+ * -z NUL-terminated records (input+output; pairs with xargs -0);
  * -k N sort by blank-separated field N (1-based; missing field sorts as
  * empty / 0). Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
  */
@@ -30,12 +31,13 @@ static int opt_n;
 static int opt_u;
 static int opt_f;
 static int opt_b; /* ignore leading blanks on key */
+static int opt_z; /* NUL-terminated records */
 static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnufb] [-k N] [FILE...]\n", 38);
+    u_write(2, "usage: sort [-rnufbz] [-k N] [FILE...]\n", 39);
 }
 
 static int is_digits(const char *s) {
@@ -260,7 +262,8 @@ static int read_fd(long fd) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            int delim = opt_z ? (c == 0) : (c == '\n');
+            if (delim) {
                 line[li] = 0;
                 if (add_line(line) != 0) return 1;
                 li = 0;
@@ -281,7 +284,12 @@ static void emit_all(void) {
     for (i = 0; i < nlines; i++) {
         if (opt_u && i > 0 && key_cmp(lines[i - 1], lines[i]) == 0) continue;
         u_write(1, lines[i], strlen(lines[i]));
-        u_write(1, "\n", 1);
+        if (opt_z) {
+            char z = 0;
+            u_write(1, &z, 1);
+        } else {
+            u_write(1, "\n", 1);
+        }
     }
 }
 
@@ -300,6 +308,7 @@ int main(int argc, char **argv) {
     opt_u = 0;
     opt_f = 0;
     opt_b = 0;
+    opt_z = 0;
     opt_k = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
@@ -331,6 +340,7 @@ int main(int argc, char **argv) {
             else if (o == 'u') opt_u = 1;
             else if (o == 'f') opt_f = 1;
             else if (o == 'b') opt_b = 1;
+            else if (o == 'z') opt_z = 1;
             else {
                 usage();
                 return 1;

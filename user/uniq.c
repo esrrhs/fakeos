@@ -1,8 +1,9 @@
 /* fakeos userland - uniq: collapse consecutive duplicate lines (thin POSIX).
- * Forms: uniq [-cdui] [-f N] [-s N] [FILE...]
+ * Forms: uniq [-cduiz] [-f N] [-s N] [FILE...]
  * -c count prefix; -d only duplicated; -u only unique; -i fold case when
- * comparing; -f N skip N fields; -s N skip N chars (after fields) when
- * comparing. Output still emits the full original line. stdin if no FILE.
+ * comparing; -z NUL-terminated records (input+output; pairs with xargs -0);
+ * -f N skip N fields; -s N skip N chars (after fields) when comparing.
+ * Output still emits the full original line. stdin if no FILE.
  * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
@@ -25,9 +26,10 @@ static int opt_u;
 static int opt_i;
 static int opt_f; /* skip N fields (0 = none) */
 static int opt_s; /* skip N chars after fields (0 = none) */
+static int opt_z; /* NUL-terminated records */
 
 static void usage(void) {
-    u_write(2, "usage: uniq [-cdui] [-f N] [-s N] [FILE...]\n", 47);
+    u_write(2, "usage: uniq [-cduiz] [-f N] [-s N] [FILE...]\n", 45);
 }
 
 static int is_digits(const char *s) {
@@ -109,7 +111,12 @@ static void emit(const char *line, int count) {
     if (opt_u && count != 1) return;
     if (opt_c) emit_count(count);
     u_write(1, line, strlen(line));
-    u_write(1, "\n", 1);
+    if (opt_z) {
+        char z = 0;
+        u_write(1, &z, 1);
+    } else {
+        u_write(1, "\n", 1);
+    }
 }
 
 static int uniq_fd(long fd) {
@@ -126,7 +133,8 @@ static int uniq_fd(long fd) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            int delim = opt_z ? (c == 0) : (c == '\n');
+            if (delim) {
                 cur[li] = 0;
                 if (!have_prev) {
                     strcpy(prev, cur);
@@ -188,6 +196,7 @@ int main(int argc, char **argv) {
     opt_i = 0;
     opt_f = 0;
     opt_s = 0;
+    opt_z = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         int j;
@@ -230,6 +239,7 @@ int main(int argc, char **argv) {
             else if (o == 'd') opt_d = 1;
             else if (o == 'u') opt_u = 1;
             else if (o == 'i') opt_i = 1;
+            else if (o == 'z') opt_z = 1;
             else if (o == 'f') {
                 if (!take_num(argc, argv, &i, j, &opt_f)) {
                     usage();

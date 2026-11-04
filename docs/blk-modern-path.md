@@ -1717,6 +1717,13 @@ Keeps `-n`/`-r`/`-I`. No new `/bin` dent. Focused virtio login smoke covers
 `xargs -0` + prior greens including grep -o (smp 1/2). Ramfs `/bin` dents
 ~114/128.
 
+## sort -z + uniq -z — landed
+
+`/bin/sort -z` and `/bin/uniq -z` use NUL-terminated records for input and
+output (GNU-ish; pairs with `xargs -0`). Keeps existing sort/uniq flags.
+No new `/bin` dent. Focused virtio login smoke covers `sort -z` / `uniq -z`
++ prior greens including xargs -0 (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1724,6 +1731,6 @@ Keeps `-n`/`-r`/`-I`. No new `/bin` dent. Focused virtio login smoke covers
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin`
+   deferred. Next thin polish: `cut -b` / other util flags on existing `/bin`
    (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
    Ext2 duplex / multi-nc / CFS / jbd alone.
