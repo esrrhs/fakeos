@@ -110,10 +110,11 @@ syscall_epilogue:
 
 ; ------------------------------------------------------------------------------
 ; First entry into ring 3 for a freshly created user thread. On resume the
-; scheduler switch frame delivers R12 = user entry RIP, RBX = user RSP.
+; scheduler switch frame delivers R12 = user RIP, RBX = user RSP, R13 = arg.
 ; ------------------------------------------------------------------------------
 align 16
 user_iret_trampoline:
+    mov     rdi, r13            ; start-routine argument (0 for process entry)
     push    0x1B                ; SS  = user data (0x18) | RPL3
     push    rbx                 ; RSP = user stack
     push    0x202               ; RFLAGS: IF=1, reserved bit 1 set

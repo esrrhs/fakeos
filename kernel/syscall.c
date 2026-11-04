@@ -17,6 +17,10 @@ extern u32 sched_current_pid(void);
 extern u64 sched_current_as_h(void);
 extern u32 sched_alloc_pid(void);
 extern u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid);
+extern u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid);
+extern u32 sched_is_secondary_thread(void);
+extern u32 sched_current_tid(void);
+extern void sched_replace_as(u64 new_as_h);
 extern void sched_yield(void);
 extern u32 sched_fd_close_all(void);
 extern u32 sched_current_ppid(void);
@@ -130,6 +134,7 @@ enum {
     SC_GETPID = 39,
     SC_CHMOD = 90,
     SC_GETTID = 186,
+    SC_CLONE = 56,
     SC_FORK  = 57,
     SC_EXECVE = 59,
     SC_EXIT  = 60,
@@ -189,6 +194,42 @@ void syscall_init(void) {
     msr_write(MSR_EFER, msr_read(MSR_EFER) | 1);    /* EFER.SCE: enable SYSCALL */
 }
 
+enum {
+    CLONE_VM      = 0x00000100,
+    CLONE_FS      = 0x00000200,
+    CLONE_FILES   = 0x00000400,
+    CLONE_SIGHAND = 0x00000800,
+    CLONE_THREAD  = 0x00010000,
+    CLONE_THREAD_REQ = CLONE_VM | CLONE_THREAD
+};
+
+/* clone(2) basics: CLONE_VM|CLONE_THREAD starts fn(arg) on user_stack in a
+ * new tid sharing the caller's address space. Parent returns the child tid.
+ * Fakeos ABI: clone(flags, stack, fn, arg) — not the Linux tls/tidptr shape. */
+static u64 sys_clone(u64 flags, u64 stack, u64 fn, u64 arg) {
+    u32 child_tid;
+    u32 slot;
+    u64 as_h;
+    if ((flags & (u64)CLONE_THREAD_REQ) != (u64)CLONE_THREAD_REQ) {
+        return (u64)(-1);               /* only same-AS threads for now */
+    }
+    if (stack == 0 || fn == 0) {
+        return (u64)(-1);
+    }
+    as_h = sched_current_as_h();
+    if (as_h == 0) {
+        return (u64)(-1);
+    }
+    child_tid = sched_alloc_pid();      /* tid namespace shares pid allocator */
+    mem.as_retain_h(as_h);
+    slot = sched_clone_thread(fn, stack, arg, child_tid);
+    if (slot == 0xFFFFFFFF) {
+        mem.as_release_h(as_h);
+        return (u64)(-1);
+    }
+    return (u64)child_tid;
+}
+
 static u64 sys_fork(struct syscall_frame *f) {
     u64 parent_as = sched_current_as_h();
     if (parent_as == 0) {
@@ -207,11 +248,29 @@ static u64 sys_fork(struct syscall_frame *f) {
     return child_pid;                   /* parent sees the child pid */
 }
 
-/* Terminate the current user process (exit syscall or fatal fault path).
- * Tears down the address space and never returns. */
+/* Terminate the current user thread/process. Secondary CLONE_THREAD exits
+ * only drop one AS ref and free the TCB; the last (or sole) thread of a pid
+ * performs full process teardown and wait4 notification. */
 void proc_terminate(u64 code) {
     u32 pid = sched_current_pid();
     u32 ppid = sched_current_ppid();
+    u64 as_h;
+
+    /* Non-leader CLONE_THREAD exit: drop one AS ref, free TCB, no wait4. */
+    if (sched_is_secondary_thread()) {
+        kprintf("[UPROC] tid %u of pid %u exited (code %u)\n",
+                (u64)sched_current_tid(), (u64)pid, code);
+        sched_fd_close_all();
+        as_h = sched_current_as_h();
+        mem.as_activate_h(0);
+        if (as_h != 0) {
+            mem.as_release_h(as_h);
+        }
+        sched_replace_as(0);
+        kthread_exit();
+        for (;;) {
+        }
+    }
     kprintf("[UPROC] pid %u exited (code %u)\n", (u64)pid, code);
     uproc_note_exit(pid, code);
 
@@ -235,10 +294,10 @@ void proc_terminate(u64 code) {
     /* Close all open files, then leave the doomed address space before its
      * page tables are freed. The DEAD TCB slot stays until wait4 reaps it. */
     sched_fd_close_all();
-    u64 as_h = sched_current_as_h();
+    as_h = sched_current_as_h();
     mem.as_activate_h(0);
     if (as_h != 0) {
-        mem.as_destroy_h(as_h);
+        mem.as_release_h(as_h);
     }
     kthread_exit();                     /* frees the kernel stack, switches away */
     for (;;) {                          /* unreachable */
@@ -348,6 +407,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_GETPID) {
         return (u64)sched_current_pid();
+    }
+    if (f->rax == SC_CLONE) {
+        return sys_clone(f->rdi, f->rsi, f->rdx, f->r10);
     }
     if (f->rax == SC_FORK) {
         return sys_fork(f);

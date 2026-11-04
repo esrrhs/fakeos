@@ -24,6 +24,7 @@ enum {
 
 extern u64 sched_current_as_h(void);
 extern u32 sched_current_pid(void);
+extern u32 sched_current_tid(void);
 extern u32 sched_fd_get(u32 idx);
 extern u32 pipe_fh_is(u32 fh);
 extern u32 sock_fh_is(u32 fh);
@@ -204,7 +205,7 @@ u64 sys_chmod(u64 path, u64 mode) {
 }
 
 u64 sys_gettid(void) {
-    return (u64)sched_current_pid();
+    return (u64)sched_current_tid();
 }
 
 enum {

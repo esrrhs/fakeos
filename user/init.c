@@ -36,6 +36,10 @@ extern int pthread_mutex_init(pthread_mutex_t *m, void *attr);
 extern int pthread_mutex_lock(pthread_mutex_t *m);
 extern int pthread_mutex_unlock(pthread_mutex_t *m);
 extern int pthread_mutex_trylock(pthread_mutex_t *m);
+extern long u_gettid(void);
+typedef unsigned long pthread_t;
+extern int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *),
+                          void *arg);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
@@ -555,6 +559,81 @@ static void futex_test(void) {
     puts("[U][PASS] futex WAIT/WAKE");
 }
 
+
+static volatile int g_thr_counter;
+static volatile int g_thr_done;
+static volatile int g_thr_child_tid;
+static pthread_mutex_t g_thr_mu;
+
+static void *thr_worker(void *arg) {
+    int n;
+    int i;
+    n = (int)(long)arg;
+    g_thr_child_tid = (int)u_gettid();
+    for (i = 0; i < n; i++) {
+        pthread_mutex_lock(&g_thr_mu);
+        g_thr_counter = g_thr_counter + 1;
+        pthread_mutex_unlock(&g_thr_mu);
+    }
+    g_thr_done = 1;
+    return 0;
+}
+
+static void pthread_create_test(void) {
+    pthread_t th;
+    long parent_tid;
+    long parent_pid;
+    int i;
+    int n = 1500;
+    volatile unsigned long spin;
+
+    parent_pid = u_getpid();
+    parent_tid = u_gettid();
+    if (parent_tid != parent_pid) {
+        puts("[U][FAIL] leader tid != pid");
+        return;
+    }
+    if (pthread_mutex_init(&g_thr_mu, 0) != 0) {
+        puts("[U][FAIL] thr mutex init");
+        return;
+    }
+    g_thr_counter = 0;
+    g_thr_done = 0;
+    g_thr_child_tid = 0;
+
+    if (pthread_create(&th, 0, thr_worker, (void *)(long)n) != 0) {
+        puts("[U][FAIL] pthread_create");
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        pthread_mutex_lock(&g_thr_mu);
+        g_thr_counter = g_thr_counter + 1;
+        pthread_mutex_unlock(&g_thr_mu);
+    }
+    for (spin = 0; spin < 20000000UL && g_thr_done == 0; spin++) {
+        if ((spin & 0xFFFFUL) == 0) {
+            u_yield();
+        }
+    }
+    if (g_thr_done != 1) {
+        puts("[U][FAIL] pthread child not done");
+        return;
+    }
+    if (g_thr_child_tid == 0 || g_thr_child_tid == (int)parent_tid) {
+        printf("[U][FAIL] child tid=%d parent=%d\n", g_thr_child_tid, (int)parent_tid);
+        return;
+    }
+    if (g_thr_counter != n + n) {
+        printf("[U][FAIL] thr counter=%d want %d\n", g_thr_counter, n + n);
+        return;
+    }
+    /* Give the child a moment to finish exit/teardown. */
+    for (i = 0; i < 8; i++) {
+        u_yield();
+    }
+    puts("[U][PASS] pthread_create clone same-AS");
+}
+
 int main(int argc, char **argv) {
     char *sh_argv[2];
     long pid = u_getpid();
@@ -579,6 +658,7 @@ int main(int argc, char **argv) {
     shm_test();
     futex_test();
     mutex_test();
+    pthread_create_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

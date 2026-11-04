@@ -71,6 +71,7 @@ struct tcb {
     u32 state;
     u32 id;
     u32 pid;           /* User process id (0 for kernel threads)          */
+    u32 tid;           /* Thread id (equals pid for single-threaded)      */
     u32 ppid;          /* Parent process id (0 = kernel / no parent)      */
     u32 is_user;       /* Runs at ring 3 between syscalls/interrupts      */
     u32 pending_sigs;  /* Bitmask: bit N set => signal N pending          */
@@ -213,6 +214,7 @@ void sched_init(void) {
         threads[i].as_h = 0;
         threads[i].wait_chan = 0;
         threads[i].pid = 0;
+        threads[i].tid = 0;
         threads[i].ppid = 0;
         threads[i].is_user = 0;
         threads[i].pending_sigs = 0;
@@ -354,6 +356,7 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].as_h = 0;
     threads[i].wait_chan = 0;
     threads[i].pid = 0;
+    threads[i].tid = 0;
     threads[i].ppid = 0;
     threads[i].is_user = 0;
     threads[i].pending_sigs = 0;
@@ -398,6 +401,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].as_h = as_h;
     threads[i].wait_chan = 0;
     threads[i].pid = pid;
+    threads[i].tid = pid;              /* leader: tid == pid */
     threads[i].ppid = 0;
     threads[i].pgid = pid;             /* new session/pgrp for pid 1 etc. */
     threads[i].sid = pid;
@@ -469,6 +473,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].as_h = child_as_h;
     threads[i].wait_chan = 0;
     threads[i].pid = child_pid;
+    threads[i].tid = child_pid;        /* new process leader */
     threads[i].ppid = threads[current].pid;
     threads[i].pgid = threads[current].pgid;
     threads[i].sid = threads[current].sid;
@@ -507,6 +512,85 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
             threads[i].sig_flags[s] = threads[current].sig_flags[s];
             threads[i].sig_restorer[s] = threads[current].sig_restorer[s];
         }
+    }
+    threads[i].state = TCB_RUNNABLE;
+    return i;
+}
+
+/* clone(CLONE_VM|CLONE_THREAD): new user thread sharing the caller's address
+ * space. Lands in user_iret_trampoline with R12=fn, RBX=user_stack, R13=arg
+ * (loaded into RDI before IRET). Same pid/pgid/sid; fresh tid. FD table is
+ * copied with retain (CLONE_FILES-lite: shared open-file descriptions). */
+u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
+    u32 i = alloc_slot();
+    u32 f;
+    u32 s;
+    if (i == 0xFFFFFFFF) {
+        return 0xFFFFFFFF;
+    }
+    if (threads[current].as_h == 0 || threads[current].is_user == 0) {
+        return 0xFFFFFFFF;
+    }
+    if (fn == 0 || user_stack == 0) {
+        return 0xFFFFFFFF;
+    }
+
+    u64 stack_phys = pmm_alloc_pages(STACK_ORDER);
+    if (stack_phys == 0) {
+        return 0xFFFFFFFF;
+    }
+    u64 top = 0xFFFF800000000000ULL + stack_phys + STACK_BYTES;
+
+    /* switch_context frame: r12=fn, rbx=stack, r13=arg -> user_iret. */
+    u64 *frame = (u64 *)(top - 56);
+    frame[0] = 0;                                   /* r15 */
+    frame[1] = 0;                                   /* r14 */
+    frame[2] = arg;                                 /* r13 = start arg */
+    frame[3] = fn;                                  /* r12 = start RIP */
+    frame[4] = user_stack;                          /* rbx = user RSP */
+    frame[5] = 0;                                   /* rbp */
+    frame[6] = (u64)(&user_iret_trampoline);        /* return address */
+
+    threads[i].rsp = top - 56;
+    threads[i].stack_phys = stack_phys;
+    threads[i].kstack_top = top;
+    threads[i].entry = fn;
+    threads[i].arg = arg;
+    threads[i].as_h = threads[current].as_h;
+    threads[i].wait_chan = 0;
+    threads[i].pid = threads[current].pid;
+    threads[i].tid = child_tid;
+    threads[i].ppid = threads[current].ppid;
+    threads[i].pgid = threads[current].pgid;
+    threads[i].sid = threads[current].sid;
+    threads[i].stop_sig = 0;
+    threads[i].stop_notify = 0;
+    threads[i].cont_notify = 0;
+    threads[i].is_user = 1;
+    for (f = 0; f < FD_MAX; f++) {
+        u32 fh = threads[current].fd[f];
+        threads[i].fd[f] = fh;
+        if (fh != FD_EMPTY) {
+            if (ext2_fh_is(fh)) {
+                ext2_file_retain(fh);
+            } else if (pipe_fh_is(fh)) {
+                pipe_retain(fh);
+            } else if (sock_fh_is(fh)) {
+                sock_retain(fh);
+            } else {
+                fs_file_retain(fh);
+            }
+        }
+    }
+    cwd_copy_from(&threads[i], threads[current].cwd);
+    cfs_set_nice_fields(&threads[i], threads[current].nice);
+    threads[i].vruntime = cfs_min_vruntime;
+    threads[i].pending_sigs = 0;
+    threads[i].sig_ignore = threads[current].sig_ignore;
+    for (s = 0; s < 32; s++) {
+        threads[i].sig_handler[s] = threads[current].sig_handler[s];
+        threads[i].sig_flags[s] = threads[current].sig_flags[s];
+        threads[i].sig_restorer[s] = threads[current].sig_restorer[s];
     }
     threads[i].state = TCB_RUNNABLE;
     return i;
@@ -666,7 +750,20 @@ void kthread_exit(void) {
     arch.cpu_cli();
 
     u32 self = current;
-    threads[self].state = TCB_DEAD;
+    u32 free_slot = 0;
+    /* Secondary CLONE_THREAD exits are not wait4-able: free the TCB now so
+     * the shared pid stays owned by the still-live group leader. */
+    if (threads[self].is_user != 0 && threads[self].pid != 0
+        && threads[self].tid != threads[self].pid) {
+        free_slot = 1;
+    }
+    threads[self].state = free_slot ? TCB_FREE : TCB_DEAD;
+    if (free_slot) {
+        threads[self].pid = 0;
+        threads[self].tid = 0;
+        threads[self].ppid = 0;
+        threads[self].is_user = 0;
+    }
     u64 sp = threads[self].stack_phys;
     threads[self].stack_phys = 0;
     threads[self].rsp = 0;
@@ -762,6 +859,35 @@ u32 sched_alloc_pid(void) {
 
 u32 sched_current_pid(void) {
     return threads[current].pid;
+}
+
+u32 sched_current_tid(void) {
+    return threads[current].tid;
+}
+
+/* Live user threads that share `pid` (CLONE_THREAD group). */
+u32 sched_count_live_pid(u32 pid) {
+    u32 i;
+    u32 n = 0;
+    if (pid == 0) {
+        return 0;
+    }
+    for (i = 1; i < MAX_THREADS; i++) {
+        if (threads[i].pid == pid
+            && threads[i].state != TCB_FREE
+            && threads[i].state != TCB_DEAD) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* True when this TCB is a non-leader thread (tid != pid). */
+u32 sched_is_secondary_thread(void) {
+    if (threads[current].pid == 0) {
+        return 0;
+    }
+    return threads[current].tid != threads[current].pid ? 1 : 0;
 }
 
 u64 sched_current_as_h(void) {
@@ -879,6 +1005,7 @@ u32 sched_reap_dead(u32 pid) {
         if (threads[i].pid == pid && threads[i].state == TCB_DEAD) {
             threads[i].state = TCB_FREE;
             threads[i].pid = 0;
+            threads[i].tid = 0;
             threads[i].ppid = 0;
             threads[i].pgid = 0;
             threads[i].sid = 0;

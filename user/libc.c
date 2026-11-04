@@ -1077,3 +1077,67 @@ int pthread_mutex_unlock(pthread_mutex_t *m) {
     }
     return 0;
 }
+
+
+/* ---- pthread_create via clone(CLONE_VM|CLONE_THREAD) ---------------------- */
+extern long u_clone(unsigned long flags, void *stack, void *fn, void *arg);
+extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
+                   long fd, long off);
+extern long u_exit(long code);
+extern long u_gettid(void);
+extern long u_yield(void);
+
+enum {
+    PTHREAD_CLONE_FLAGS = 0x00010F00, /* CLONE_VM|FS|FILES|SIGHAND|THREAD */
+    PTHREAD_STACK_SIZE  = 65536,
+    MAP_SHARED_ANON     = 0x21,
+    MAP_PRIVATE_ANON    = 0x22,
+    PROT_RW             = 3
+};
+
+typedef unsigned long pthread_t;
+
+struct pthread_start {
+    void *(*fn)(void *);
+    void *arg;
+};
+
+static void pthread_boot(void *p) {
+    struct pthread_start *s;
+    void *(*fn)(void *);
+    void *arg;
+    s = (struct pthread_start *)p;
+    fn = s->fn;
+    arg = s->arg;
+    fn(arg);
+    u_exit(0);
+}
+
+int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *),
+                   void *arg) {
+    unsigned char *stack;
+    unsigned char *sp;
+    struct pthread_start *s;
+    long tid;
+    (void)attr;
+    if (thread == 0 || start_routine == 0) {
+        return -1;
+    }
+    stack = (unsigned char *)u_mmap(0, PTHREAD_STACK_SIZE, PROT_RW,
+                                    MAP_PRIVATE_ANON, -1, 0);
+    if (stack == (unsigned char *)-1 || stack == 0) {
+        return -1;
+    }
+    /* Place start record at the low end; grow stack down from the high end. */
+    s = (struct pthread_start *)stack;
+    s->fn = start_routine;
+    s->arg = arg;
+    sp = stack + PTHREAD_STACK_SIZE;
+    sp = (unsigned char *)((unsigned long)sp & ~0xFUL);
+    tid = u_clone((unsigned long)PTHREAD_CLONE_FLAGS, sp, pthread_boot, s);
+    if (tid < 0) {
+        return -1;
+    }
+    *thread = (pthread_t)tid;
+    return 0;
+}

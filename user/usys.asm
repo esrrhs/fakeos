@@ -58,6 +58,7 @@ global u_rt_sigreturn
 global u_ftruncate
 global u_futex
 global u_gettid
+global u_clone
 
 section .text
 
@@ -280,6 +281,15 @@ USYSC1 u_ftruncate, 77
 
 ; long u_gettid(void)
 USYSC1 u_gettid, 186
+
+; long u_clone(unsigned long flags, void *stack, void *fn, void *arg)
+; 4th C arg is RCX; SYSCALL clobbers RCX with return RIP → move to R10.
+align 16
+u_clone:
+    mov     r10, rcx
+    mov     eax, 56
+    syscall
+    ret
 
 ; long u_futex(uaddr, op, val, timeout, uaddr2, val3) -- 4th C arg RCX -> R10
 align 16

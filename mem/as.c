@@ -88,6 +88,7 @@ struct address_space {
     u64 brk_base;              /* 0 until the first brk reserves the heap VMA */
     u64 brk_cur;
     u64 mmap_next;             /* next free hint in the anonymous mmap zone  */
+    u32 refs;                  /* CLONE_VM sharers; destroy at last release   */
 };
 
 /* Per-frame share count for COW. 1 = single owner (plain writable page),
@@ -183,6 +184,7 @@ void as_init(struct address_space *as) {
     as->brk_base = 0;
     as->brk_cur = 0;
     as->mmap_next = 0;
+    as->refs = 1;
     for (i = 0; i < MAX_VMA; i++) {
         as->vmas[i].kind = VMA_FREE;
         as->vmas[i].start = 0;
@@ -876,9 +878,9 @@ extern void kfree(void *ptr);
 
 /* Allocate and initialize a fresh address space. Returns 0 on OOM. */
 u64 as_create(void) {
-    /* pml4 + vmas[MAX_VMA] (48B each) + nvma/pad + brk_base/cur + mmap_next */
+    /* pml4 + vmas[MAX_VMA] (48B each) + nvma/pad + brk_base/cur + mmap_next + refs */
     struct address_space *as = (struct address_space *)kmalloc(
-        8 + MAX_VMA * 48 + 8 + 8 + 8 + 8);
+        8 + MAX_VMA * 48 + 8 + 8 + 8 + 8 + 8);
     if (as == 0) {
         return 0;
     }
@@ -1243,6 +1245,32 @@ void as_destroy_h(u64 handle) {
     struct address_space *as = as_of(handle);
     as_destroy(as);
     kfree(as);
+}
+
+/* CLONE_VM: bump share count so exit of one thread does not free the AS. */
+void as_retain_h(u64 handle) {
+    struct address_space *as;
+    if (handle == 0) {
+        return;
+    }
+    as = as_of(handle);
+    if (as->refs < 0xFFFFFFFFu) {
+        as->refs++;
+    }
+}
+
+/* Drop one CLONE_VM reference; destroy when the last sharer exits. */
+void as_release_h(u64 handle) {
+    struct address_space *as;
+    if (handle == 0) {
+        return;
+    }
+    as = as_of(handle);
+    if (as->refs > 1) {
+        as->refs--;
+        return;
+    }
+    as_destroy_h(handle);
 }
 
 /* True when [va, va+len) is fully covered by one VMA of the space (used by
