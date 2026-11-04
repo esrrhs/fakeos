@@ -758,15 +758,28 @@ mtime name`). Focused virtio login smoke covers default hide, `-a`/`-A`/`-ld`/
 `-la`/nlink/multi-PATH, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents
 106/128.
 
+## /bin/readlink -n/-f + /bin/which -a — landed
+
+Thin path/shell-mirror polish (no new `/bin` dent; no kernel work). Inventory:
+still no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/readlink` gains `-n`
+(omit trailing newline) and `-f` (physical resolve via the same readlink-walk
+algorithm as `/bin/realpath`; works for non-symlinks too). Glued short options
+(`-nf`/`-fn`) accepted. `/bin/which -a` prints every PATH match (default still
+first only). Shell builtins remain thin (single-operand `readlink` /
+first-match `which`). Focused virtio login smoke covers `readlink`/`-n`/`-f`/
+`-nf`, `which`/`-a`, Ext2 symlink, prior greens (smp 1/2). Ramfs `/bin` dents
+106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`ls -a/-A/-d` + nlink + `env -i/-u`
-   + `cat -n`/`-b` + `tail -q`/`-v` + …): prefer small coherent chunks; thin
+3. More daily-driver gaps after inventory (`readlink -n/-f` + `which -a` +
+   `ls -a/-A/-d` + nlink + `env -i/-u` + …): prefer small coherent chunks; thin
    `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
-   Candidates: skip `yes --version` fluff; `/bin/mkfifo` only if `mknod`
-   exists. uniq/sort `-c/-d/-u`/`-r/-n` and `ln -s` already present. Avoid deep
-   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized
-   fix.
+   Candidates: `grep -c`, `tr -c`, `seq -w`, `du -h`, `xargs -I`, `sort -k`,
+   `stat -c`, `date +FORMAT` (boot-relative only), `timeout --signal`, skip
+   `yes --version` fluff; `/bin/mkfifo` only if `mknod` exists. Avoid deep jbd /
+   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.

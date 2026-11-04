@@ -1,9 +1,10 @@
 /* fakeos userland - which: locate command in PATH (thin; shell-mirror).
- * Forms: which CMD...
+ * Forms: which [-a] CMD...
  * Searches PATH from /proc/self/environ (default /bin:/usr/bin:.). Prints
- * the first matching path per CMD. Does not know shell builtins (use the
- * shell builtin which for that). Exit 0 iff every CMD resolves.
- * External form for xargs/scripts that exec which without the shell builtin.
+ * the first matching path per CMD; -a prints every match along PATH.
+ * Does not know shell builtins (use the shell builtin which for that).
+ * Exit 0 iff every CMD resolves at least once. External form for
+ * xargs/scripts that exec which without the shell builtin.
  */
 package user;
 
@@ -80,15 +81,39 @@ static int path_exists(const char *p) {
     return 1;
 }
 
-static int lookup_one(const char *cmd, char *out) {
+/* Fill out with candidate path for PATH component [p, p+n). */
+static void build_candidate(const char *p, int n, const char *cmd, char *out) {
+    int i;
+    if (n == 0 || (n == 1 && p[0] == '.')) {
+        out[0] = '.';
+        out[1] = '/';
+        for (i = 0; cmd[i] && i < BUF_CAP - 3; i++) out[2 + i] = cmd[i];
+        out[2 + i] = 0;
+    } else {
+        for (i = 0; i < n && i < 80; i++) out[i] = p[i];
+        out[n] = '/';
+        out[n + 1] = 0;
+        for (i = 0; cmd[i] && n + 1 + i < BUF_CAP - 1; i++) {
+            out[n + 1 + i] = cmd[i];
+        }
+        out[n + 1 + i] = 0;
+    }
+}
+
+/* Print matches for cmd. Returns number printed (0 = not found). */
+static int lookup_print(const char *cmd, int all) {
     const char *p;
     int n;
     int i;
+    int count = 0;
+    char out[BUF_CAP];
+
     if (cmd == 0 || cmd[0] == 0) return 0;
     if (has_slash(cmd)) {
         if (!path_exists(cmd)) return 0;
         for (i = 0; cmd[i] && i < BUF_CAP - 1; i++) out[i] = cmd[i];
         out[i] = 0;
+        printf("%s\n", out);
         return 1;
     }
     load_path();
@@ -96,40 +121,49 @@ static int lookup_one(const char *cmd, char *out) {
     while (*p != 0) {
         n = 0;
         while (p[n] != 0 && p[n] != ':') n++;
-        if (n == 0 || (n == 1 && p[0] == '.')) {
-            out[0] = '.';
-            out[1] = '/';
-            for (i = 0; cmd[i] && i < BUF_CAP - 3; i++) out[2 + i] = cmd[i];
-            out[2 + i] = 0;
-        } else {
-            for (i = 0; i < n && i < 80; i++) out[i] = p[i];
-            out[n] = '/';
-            out[n + 1] = 0;
-            for (i = 0; cmd[i] && n + 1 + i < BUF_CAP - 1; i++) {
-                out[n + 1 + i] = cmd[i];
-            }
-            out[n + 1 + i] = 0;
+        build_candidate(p, n, cmd, out);
+        if (path_exists(out)) {
+            printf("%s\n", out);
+            count++;
+            if (!all) return count;
         }
-        if (path_exists(out)) return 1;
         if (p[n] == ':') p += n + 1;
         else break;
     }
-    return 0;
+    return count;
+}
+
+static void usage(void) {
+    u_write(2, "usage: which [-a] CMD...\n", 25);
 }
 
 int main(int argc, char **argv) {
-    int i;
+    int i = 1;
     int rc = 0;
-    char found[BUF_CAP];
+    int all = 0;
 
-    if (argc < 2) {
-        u_write(2, "usage: which CMD...\n", 20);
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        int j;
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        for (j = 1; argv[i][j]; j++) {
+            if (argv[i][j] == 'a') all = 1;
+            else {
+                usage();
+                return 1;
+            }
+        }
+        i++;
+    }
+
+    if (i >= argc) {
+        usage();
         return 1;
     }
-    for (i = 1; i < argc; i++) {
-        if (lookup_one(argv[i], found)) {
-            printf("%s\n", found);
-        } else {
+    for (; i < argc; i++) {
+        if (lookup_print(argv[i], all) == 0) {
             printf("%s: not found\n", argv[i]);
             rc = 1;
         }
