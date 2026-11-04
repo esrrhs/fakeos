@@ -1,9 +1,10 @@
 /* fakeos userland - join: relational join on sorted text files (thin POSIX).
- * Forms: join [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
+ * Forms: join [-a N|-aN] [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
  * Default join field 1 on both; default field sep is blank runs; with -t the
  * delimiter is a single char (empty fields allowed). Output sep is space, or
- * the -t char when set. "-" is stdin (at most one). Files must be sorted on
- * the join field.
+ * the -t char when set. -a N also prints unpairable lines from file N (1 or 2).
+ * "-" is stdin (at most one). Files must be sorted on the join field.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -21,9 +22,11 @@ static int field1 = 1;
 static int field2 = 1;
 static int have_t;
 static char tchar;
+static int opt_a1;
+static int opt_a2;
 
 static void usage(void) {
-    u_write(2, "usage: join [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 45);
+    u_write(2, "usage: join [-a N] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 53);
 }
 
 static int is_digits(const char *s) {
@@ -101,29 +104,36 @@ static void emit_sep(void) {
     else u_write(1, " ", 1);
 }
 
-static void emit_join(char **f1, int n1, int j1, char **f2, int n2, int j2) {
+static void emit_join(char **fa, int na, int ja, char **fb, int nb, int jb) {
     int i;
     int first = 1;
 
     /* join field */
-    emit_str(get_field(f1, n1, j1));
+    emit_str(get_field(fa, na, ja));
     first = 0;
 
-    /* remaining fields from file1 (skip join field) */
-    for (i = 1; i <= n1; i++) {
-        if (i == j1) continue;
+    /* remaining fields from file A (skip join field) */
+    for (i = 1; i <= na; i++) {
+        if (i == ja) continue;
         if (!first) emit_sep();
-        emit_str(get_field(f1, n1, i));
+        emit_str(get_field(fa, na, i));
         first = 0;
     }
-    /* remaining fields from file2 */
-    for (i = 1; i <= n2; i++) {
-        if (i == j2) continue;
+    /* remaining fields from file B */
+    for (i = 1; i <= nb; i++) {
+        if (i == jb) continue;
         if (!first) emit_sep();
-        emit_str(get_field(f2, n2, i));
+        emit_str(get_field(fb, nb, i));
         first = 0;
     }
     u_write(1, "\n", 1);
+}
+
+/* Unpairable line: join field + remaining fields from that file only. */
+static void emit_unpaired(char **f, int n, int j) {
+    char *empty[1];
+    empty[0] = "";
+    emit_join(f, n, j, empty, 0, 1);
 }
 
 static int open_in(const char *path, long *fd_out) {
@@ -155,6 +165,13 @@ static int load_line(long fd, char *buf, char **fields, int *nf, int *have) {
     return 0;
 }
 
+static int parse_a_fileno(const char *s) {
+    if (s == 0 || !is_digits(s)) return 0;
+    if (s[0] == '1' && s[1] == 0) return 1;
+    if (s[0] == '2' && s[1] == 0) return 2;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int i = 1;
     long fd1;
@@ -183,6 +200,20 @@ int main(int argc, char **argv) {
         } else if (a[1] == 't' && a[2] != 0) {
             have_t = 1;
             tchar = a[2];
+            i++;
+        } else if (strcmp(a, "-a") == 0) {
+            int which;
+            if (i + 1 >= argc) { usage(); return 1; }
+            which = parse_a_fileno(argv[i + 1]);
+            if (which == 0) { usage(); return 1; }
+            if (which == 1) opt_a1 = 1;
+            else opt_a2 = 1;
+            i += 2;
+        } else if (a[1] == 'a' && a[2] != 0) {
+            int which = parse_a_fileno(a + 2);
+            if (which == 0) { usage(); return 1; }
+            if (which == 1) opt_a1 = 1;
+            else opt_a2 = 1;
             i++;
         } else if (strcmp(a, "-1") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
@@ -230,8 +261,10 @@ int main(int argc, char **argv) {
         const char *k2 = get_field(f2, n2, field2);
         int cmp = strcmp(k1, k2);
         if (cmp < 0) {
+            if (opt_a1) emit_unpaired(f1, n1, field1);
             if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
         } else if (cmp > 0) {
+            if (opt_a2) emit_unpaired(f2, n2, field2);
             if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
         } else {
             /* Match: for thin subset emit one pair then advance both.
@@ -240,6 +273,16 @@ int main(int argc, char **argv) {
             if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
             if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
         }
+    }
+
+    /* Drain unpairable leftovers. */
+    while (have1) {
+        if (opt_a1) emit_unpaired(f1, n1, field1);
+        if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
+    }
+    while (have2) {
+        if (opt_a2) emit_unpaired(f2, n2, field2);
+        if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
     }
 
     if (fd1 != 0) u_close(fd1);
