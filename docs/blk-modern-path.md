@@ -1111,7 +1111,7 @@ Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
 still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
 `df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
 SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; shell
-functions / alias / `[[ ]]` still deferred.
+functions / alias / `[[ ]]` were still deferred then.
 
 Directory stack cap 8 (`dirstack[0]` = cwd): `pushd DIR` pushes then cds;
 bare `pushd` swaps top two; `popd` drops cwd and cds to next; `dirs` prints
@@ -1120,6 +1120,22 @@ space-separated stack. `cd -` uses unexported `OLDPWD` (set on successful
 builtins. Focused virtio login smoke covers pushd/popd/dirs/swap/`cd -` +
 prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 
+## shell alias/unalias — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; shell
+functions / `[[ ]]` still deferred.
+
+Alias table cap 16 (`ALIAS_NAME`/`ALIAS_VAL` 32/96): `alias` lists
+`NAME='VAL'`; `alias NAME=VAL` sets (quote the whole `NAME=multi word` arg
+when VAL has spaces); `alias NAME` prints one; `unalias NAME...` /
+`unalias -a`. One-shot first-word expand per pipeline stage (no recursion).
+`type` / `which` / `command -v` report aliases. Tab completion lists the new
+builtins. Focused virtio login smoke covers set/list/expand/unalias/`-a` /
+type + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1127,6 +1143,6 @@ prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: shell `alias`/`unalias`, thin functions/local,
-   `hexdump`/`xxd`/`file`, or other small `/bin`/shell bites (skip large
-   `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: thin shell functions/local, `hexdump`/`xxd`/
+   `file`, or other small `/bin`/shell bites (skip large `getopts` / here-doc).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.

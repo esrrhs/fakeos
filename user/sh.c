@@ -1,12 +1,13 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
- * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
  * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
  * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators).
- * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL). */
+ * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL).
+ * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage). */
 package user;
 
 typedef unsigned long u64;
@@ -90,6 +91,9 @@ enum {
     HASH_PATH = 96,
     MAX_DIRS = 8,
     DIR_PATH = 96,
+    MAX_ALIAS = 16,
+    ALIAS_NAME = 32,
+    ALIAS_VAL = 96,
     WNOHANG = 1,
     WUNTRACED = 2,
     WCONTINUED = 8,
@@ -1071,6 +1075,124 @@ static int hash_remember(const char *name, const char *path) {
     return 0;
 }
 
+/* Aliases (bash-ish thin): first-word one-shot expand per pipeline stage. */
+struct sh_alias {
+    int used;
+    char name[ALIAS_NAME];
+    char val[ALIAS_VAL];
+};
+
+static struct sh_alias sh_aliases[MAX_ALIAS];
+
+static void alias_clear(void) {
+    int i;
+    for (i = 0; i < MAX_ALIAS; i++) {
+        sh_aliases[i].used = 0;
+        sh_aliases[i].name[0] = 0;
+        sh_aliases[i].val[0] = 0;
+    }
+}
+
+static const char *alias_lookup(const char *name) {
+    int i;
+    if (name == 0 || name[0] == 0) return 0;
+    for (i = 0; i < MAX_ALIAS; i++) {
+        if (sh_aliases[i].used && eq(sh_aliases[i].name, name)) {
+            return sh_aliases[i].val;
+        }
+    }
+    return 0;
+}
+
+static int alias_set(const char *name, const char *val) {
+    int i;
+    int free_slot = -1;
+    int nlen;
+    int vlen;
+    if (name == 0 || name[0] == 0 || val == 0) return -1;
+    nlen = 0;
+    while (name[nlen] != 0) nlen++;
+    vlen = 0;
+    while (val[vlen] != 0) vlen++;
+    if (nlen >= ALIAS_NAME || vlen >= ALIAS_VAL) return -1;
+    for (i = 0; i < MAX_ALIAS; i++) {
+        if (sh_aliases[i].used && eq(sh_aliases[i].name, name)) {
+            int k;
+            for (k = 0; k < vlen; k++) sh_aliases[i].val[k] = val[k];
+            sh_aliases[i].val[vlen] = 0;
+            return 0;
+        }
+        if (!sh_aliases[i].used && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) return -1;
+    {
+        int k;
+        for (k = 0; k < nlen; k++) sh_aliases[free_slot].name[k] = name[k];
+        sh_aliases[free_slot].name[nlen] = 0;
+        for (k = 0; k < vlen; k++) sh_aliases[free_slot].val[k] = val[k];
+        sh_aliases[free_slot].val[vlen] = 0;
+        sh_aliases[free_slot].used = 1;
+    }
+    return 0;
+}
+
+static int alias_unset(const char *name) {
+    int i;
+    if (name == 0 || name[0] == 0) return -1;
+    for (i = 0; i < MAX_ALIAS; i++) {
+        if (sh_aliases[i].used && eq(sh_aliases[i].name, name)) {
+            sh_aliases[i].used = 0;
+            sh_aliases[i].name[0] = 0;
+            sh_aliases[i].val[0] = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Replace argv[0] with whitespace-split alias value + remaining args (once). */
+static void alias_expand_argv(char **argv) {
+    static char valcopy[ALIAS_VAL];
+    static char bufs[MAX_TOK][ALIAS_VAL];
+    static char *newav[MAX_TOK];
+    const char *val;
+    char *save;
+    char *t;
+    int n = 0;
+    int i;
+    int rest;
+    if (argv == 0 || argv[0] == 0) return;
+    val = alias_lookup(argv[0]);
+    if (val == 0) return;
+    for (i = 0; val[i] != 0 && i + 1 < ALIAS_VAL; i++) valcopy[i] = val[i];
+    valcopy[i] = 0;
+    save = valcopy;
+    while (n < MAX_TOK - 1) {
+        while (*save == ' ' || *save == '\t') save++;
+        if (*save == 0) break;
+        t = save;
+        while (*save != 0 && *save != ' ' && *save != '\t') save++;
+        if (*save != 0) {
+            *save = 0;
+            save++;
+        }
+        {
+            int k;
+            for (k = 0; t[k] != 0 && k + 1 < ALIAS_VAL; k++) bufs[n][k] = t[k];
+            bufs[n][k] = 0;
+            newav[n] = bufs[n];
+            n++;
+        }
+    }
+    if (n == 0) return;
+    rest = 1;
+    while (argv[rest] != 0 && n < MAX_TOK - 1) {
+        newav[n++] = argv[rest++];
+    }
+    newav[n] = 0;
+    for (i = 0; i <= n; i++) argv[i] = newav[i];
+}
+
 static int sh_setenv_local(const char *name, const char *val);
 
 /* Directory stack (bash-ish thin): dirstack[0] is cwd; pushd/popd/dirs; cd - uses OLDPWD. */
@@ -1540,7 +1662,8 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "chmod") || eq(cmd, "umask")
         || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
         || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue")
-        || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs");
+        || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs")
+        || eq(cmd, "alias") || eq(cmd, "unalias");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -1763,6 +1886,93 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         dirs_print();
         return 0;
     }
+    if (eq(tokens[0], "alias")) {
+        /* alias             -> list NAME='VAL'
+         * alias NAME        -> print one
+         * alias NAME=VAL... -> set (VAL may contain spaces when whole arg quoted) */
+        int ai = 1;
+        if (tokens[1] == 0) {
+            int i;
+            for (i = 0; i < MAX_ALIAS; i++) {
+                if (!sh_aliases[i].used) continue;
+                printf("%s='%s'\n", sh_aliases[i].name, sh_aliases[i].val);
+            }
+            return 0;
+        }
+        for (; tokens[ai] != 0; ai++) {
+            char name[ALIAS_NAME];
+            const char *eqp = 0;
+            int n = 0;
+            int k;
+            for (k = 0; tokens[ai][k] != 0; k++) {
+                if (tokens[ai][k] == '=') {
+                    eqp = tokens[ai] + k;
+                    break;
+                }
+            }
+            if (eqp == 0) {
+                const char *v = alias_lookup(tokens[ai]);
+                if (v == 0) {
+                    printf("sh: alias: %s: not found\n", tokens[ai]);
+                    return 1;
+                }
+                printf("%s='%s'\n", tokens[ai], v);
+                continue;
+            }
+            n = (int)(eqp - tokens[ai]);
+            if (n <= 0 || n >= ALIAS_NAME) {
+                puts("sh: alias: bad name");
+                return 1;
+            }
+            for (k = 0; k < n; k++) name[k] = tokens[ai][k];
+            name[n] = 0;
+            if (alias_set(name, eqp + 1) != 0) {
+                printf("sh: alias: %s: failed\n", name);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "unalias")) {
+        /* unalias NAME... | unalias -a */
+        int ai = 1;
+        int clear = 0;
+        int bad = 0;
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
+            const char *o = tokens[1] + 1;
+            int j;
+            if (!(o[0] == '-' && o[1] == 0)) {
+                for (j = 0; o[j] != 0; j++) {
+                    if (o[j] == 'a') {
+                        clear = 1;
+                    } else {
+                        puts("usage: unalias [-a] [NAME...]");
+                        return 1;
+                    }
+                }
+                ai = 2;
+            }
+        }
+        if (clear) {
+            if (tokens[ai] != 0) {
+                puts("usage: unalias [-a] [NAME...]");
+                return 1;
+            }
+            alias_clear();
+            return 0;
+        }
+        if (tokens[ai] == 0) {
+            puts("usage: unalias [-a] [NAME...]");
+            return 1;
+        }
+        for (; tokens[ai] != 0; ai++) {
+            if (alias_unset(tokens[ai]) != 0) {
+                printf("sh: unalias: %s: not found\n", tokens[ai]);
+                bad = 1;
+            }
+        }
+        return bad ? 1 : 0;
+    }
     if (eq(tokens[0], "mkdir")) {
         int parents = 0;
         int have_mode = 0;
@@ -1906,9 +2116,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2162,6 +2372,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         if (tokens[1] == 0) {
             puts("sh: which: missing command");
             rc = 1;
+        } else if (alias_lookup(tokens[1]) != 0) {
+            printf("%s: shell alias\n", tokens[1]);
+            rc = 0;
         } else if (is_builtin(tokens[1])) {
             printf("%s: shell builtin\n", tokens[1]);
             rc = 0;
@@ -2181,7 +2394,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "type")) {
-        /* type NAME... — describe builtin or PATH resolution */
+        /* type NAME... — describe alias, builtin, or PATH resolution */
         int ai;
         int any = 0;
         int bad = 0;
@@ -2193,8 +2406,12 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 char path[96];
                 const char *target;
                 long fd;
+                const char *aval;
                 any = 1;
-                if (is_builtin(tokens[ai])) {
+                aval = alias_lookup(tokens[ai]);
+                if (aval != 0) {
+                    printf("%s is aliased to `%s'\n", tokens[ai], aval);
+                } else if (is_builtin(tokens[ai])) {
                     printf("%s is a shell builtin\n", tokens[ai]);
                 } else {
                     char *av[2];
@@ -2250,19 +2467,24 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 const char *target;
                 long fd;
                 any = 1;
-                if (is_builtin(tokens[ai])) {
-                    puts(tokens[ai]);
-                } else {
-                    char *av[2];
-                    av[0] = tokens[ai];
-                    av[1] = 0;
-                    target = resolve_cmd(av, path);
-                    fd = u_open(target, 0, 0);
-                    if (fd >= 0) {
-                        u_close(fd);
-                        puts(target);
+                {
+                    const char *aval = alias_lookup(tokens[ai]);
+                    if (aval != 0) {
+                        printf("alias %s='%s'\n", tokens[ai], aval);
+                    } else if (is_builtin(tokens[ai])) {
+                        puts(tokens[ai]);
                     } else {
-                        bad = 1;
+                        char *av[2];
+                        av[0] = tokens[ai];
+                        av[1] = 0;
+                        target = resolve_cmd(av, path);
+                        fd = u_open(target, 0, 0);
+                        if (fd >= 0) {
+                            u_close(fd);
+                            puts(target);
+                        } else {
+                            bad = 1;
+                        }
                     }
                 }
             }
@@ -3066,6 +3288,10 @@ static void child_run_stage(char **argv, int stdin_fd, int stdout_fd,
         }
     }
 
+    alias_expand_argv(argv);
+    if (argv[0] == 0) {
+        u_exit(0);
+    }
     if (is_builtin(argv[0])) {
         /* cd/exit in a pipeline child only affect the child. */
         long st = run_builtin(argv, rc_in, in_path, out_path, append);
@@ -3132,6 +3358,10 @@ static long run_pipeline(char **tokens, long rc_in) {
         char *out_path;
         int append;
         extract_redirects(stages[0], &in_path, &out_path, &append);
+        if (stages[0][0] == 0) {
+            return 0;
+        }
+        alias_expand_argv(stages[0]);
         if (stages[0][0] == 0) {
             return 0;
         }
@@ -4204,9 +4434,10 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hash_clear();
+    alias_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/envp, set -e/-u, $((arith)), cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/envp, set -e/-u, $((arith)), cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
