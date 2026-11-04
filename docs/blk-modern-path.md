@@ -2023,6 +2023,14 @@ words (4 digits each). Keeps `-t x1|o1|c|u1|d1|a` and `-A`/`-N`/`-j`/`-w`/`-v`.
 No new `/bin` dent. Focused virtio login smoke covers `-tx2` + prior greens
 including grep -z (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## od -t o2/u2/d2 — landed
+
+`/bin/od -t o2|u2|d2` (glued `-to2`/`-tu2`/`-td2` and `-v` forms) dumps
+little-endian 16-bit words as 6-digit octal, width-5 unsigned decimal, or
+width-6 signed decimal. Keeps `-t x2` and prior types. No new `/bin` dent.
+Focused virtio login smoke covers `-to2`/`-tu2`/`-td2` + prior greens
+including `-tx2` (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2031,5 +2039,5 @@ including grep -z (smp 1/2). Ramfs `/bin` dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `od -t o2/u2` / `timeout -k`; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   `timeout -k`; `cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
