@@ -1590,6 +1590,13 @@ md5/sha256 -c (smp 1/2). Ramfs `/bin` dents ~114/128.
 virtio login smoke covers `-iname` + prior greens including sha1sum -c
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## join -v — landed
+
+`/bin/join -v N` / `-vN` (N=1|2): emit unpairable lines from file N and
+suppress pairable (joined) lines. Implies `-a N`. Keeps `-a`/`-t`/`-1`/`-2`.
+No new `/bin` dent. Focused virtio login smoke covers `join -v1`/`-v2` +
+prior greens including find -iname (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1597,7 +1604,8 @@ virtio login smoke covers `-iname` + prior greens including sha1sum -c
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags / thin `/bin` with dent
-   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
-   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `diff -b`/`uniq -f|-s`/cksum polish / other
+   util flags / thin `/bin` with dent room (`set --` still deferred; skip
+   large `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

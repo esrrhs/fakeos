@@ -1,10 +1,11 @@
 /* fakeos userland - join: relational join on sorted text files (thin POSIX).
- * Forms: join [-a N|-aN] [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
+ * Forms: join [-a N|-aN] [-v N|-vN] [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N]
+ *        FILE1 FILE2
  * Default join field 1 on both; default field sep is blank runs; with -t the
  * delimiter is a single char (empty fields allowed). Output sep is space, or
  * the -t char when set. -a N also prints unpairable lines from file N (1 or 2).
- * "-" is stdin (at most one). Files must be sorted on the join field.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * -v N like -a N but suppress pairable (joined) lines. "-" is stdin (at most
+ * one). Files must be sorted on the join field. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -24,9 +25,11 @@ static int have_t;
 static char tchar;
 static int opt_a1;
 static int opt_a2;
+static int opt_v1;
+static int opt_v2;
 
 static void usage(void) {
-    u_write(2, "usage: join [-a N] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 53);
+    u_write(2, "usage: join [-a N] [-v N] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 59);
 }
 
 static int is_digits(const char *s) {
@@ -215,6 +218,20 @@ int main(int argc, char **argv) {
             if (which == 1) opt_a1 = 1;
             else opt_a2 = 1;
             i++;
+        } else if (strcmp(a, "-v") == 0) {
+            int which;
+            if (i + 1 >= argc) { usage(); return 1; }
+            which = parse_a_fileno(argv[i + 1]);
+            if (which == 0) { usage(); return 1; }
+            if (which == 1) { opt_v1 = 1; opt_a1 = 1; }
+            else { opt_v2 = 1; opt_a2 = 1; }
+            i += 2;
+        } else if (a[1] == 'v' && a[2] != 0) {
+            int which = parse_a_fileno(a + 2);
+            if (which == 0) { usage(); return 1; }
+            if (which == 1) { opt_v1 = 1; opt_a1 = 1; }
+            else { opt_v2 = 1; opt_a2 = 1; }
+            i++;
         } else if (strcmp(a, "-1") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
             field1 = (int)strtol_dec(argv[i + 1]);
@@ -268,8 +285,10 @@ int main(int argc, char **argv) {
             if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
         } else {
             /* Match: for thin subset emit one pair then advance both.
-             * (Full POSIX would cartesian-expand equal-key runs.) */
-            emit_join(f1, n1, field1, f2, n2, field2);
+             * (Full POSIX would cartesian-expand equal-key runs.)
+             * -v suppresses pairable output. */
+            if (!opt_v1 && !opt_v2)
+                emit_join(f1, n1, field1, f2, n2, field2);
             if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
             if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
         }
