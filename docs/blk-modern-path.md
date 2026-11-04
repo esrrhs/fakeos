@@ -1884,6 +1884,15 @@ also accepts glued `-az`/`-za`). Pairs with `find -print0` / `xargs -0`. No
 new `/bin` dent. Focused virtio login smoke covers `-z` + prior greens
 including find -print0 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## pathchk -P — landed
+
+`/bin/pathchk -P` rejects empty components (`a//b`, trailing `/`) and
+components that begin with `-`. Alone it skips default length checks
+(POSIX); with `-p` both portable limits/charset and `-P` checks apply.
+Glued `-pP`/`-Pp` ok. No new `/bin` dent. Focused virtio login smoke
+covers `pathchk -P` + prior greens including basename -z (smp 1/2). Ramfs
+`/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1891,6 +1900,6 @@ including find -print0 (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `pathchk -P` / expr capture / other util
-   flags on existing `/bin` (`cp -p` waits on utimensat; `set --` deferred;
-   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: expr `\( \)` capture / other util flags on
+   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
