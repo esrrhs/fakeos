@@ -331,6 +331,7 @@ flowchart TD
 - [x] **grep -w/-x**：整词匹配 / 整行匹配（可与现有 `-ivncqFElL` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **sort -f + uniq -i**：大小写折叠排序 / 去重（可与现有 `-rnu`/`-cdu` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **ls -1/-F**：`-1` 每行一名（默认已如此；遇 `-l` 忽略）；`-F` 短列表分类后缀 `*/=@|`。保留 `-l/-a/-A/-d`。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **md5sum/sha256sum -c**：按 GNU 校验和行核验（`DIGEST  FILE` / `DIGEST *FILE`；打印 `OK`/`FAILED`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

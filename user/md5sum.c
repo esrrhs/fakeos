@@ -1,6 +1,8 @@
 /* fakeos userland - md5sum: MD5 digest (thin, RFC 1321).
- * Forms: md5sum [FILE...]
- * Prints "DIGEST  FILE" (two spaces; "-" for stdin/-). Real MD5, not a stub.
+ * Forms: md5sum [FILE...] | md5sum -c [FILE...]
+ * Prints "DIGEST  FILE" (two spaces; "-" for stdin/-). -c verifies GNU
+ * checksum lines (DIGEST  FILE or DIGEST *FILE). Real MD5, not a stub.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -12,6 +14,8 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern int strcmp(const char *a, const char *b);
+
+enum { LINE_MAX = 512 };
 
 static u32 rol(u32 x, int n) {
     return (x << n) | (x >> (32 - n));
@@ -187,10 +191,166 @@ static int md5_fd(long fd, unsigned char dig[16]) {
     return 0;
 }
 
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_hex(const char *s, unsigned char *out, int nbytes) {
+    int i;
+    for (i = 0; i < nbytes; i++) {
+        int hi = hex_val(s[i * 2]);
+        int lo = hex_val(s[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 1;
+}
+
+static int dig_eq(const unsigned char *a, const unsigned char *b, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static void emit_str(const char *s) {
+    long i = 0;
+    while (s[i] != 0) i++;
+    if (i > 0) u_write(1, s, (unsigned long)i);
+}
+
+/* Verify one GNU "DIGEST  FILE" / "DIGEST *FILE" line. Returns 0 ok, 1 fail. */
+static int check_line(const char *line) {
+    unsigned char expect[16];
+    unsigned char got[16];
+    const char *name;
+    long fd;
+    int i;
+    /* MD5 hex is 32 chars */
+    for (i = 0; i < 32; i++) {
+        if (hex_val(line[i]) < 0) {
+            u_write(2, "md5sum: bad checksum line\n", 26);
+            return 1;
+        }
+    }
+    if (!parse_hex(line, expect, 16)) {
+        u_write(2, "md5sum: bad checksum line\n", 26);
+        return 1;
+    }
+    if (line[32] != ' ' || (line[33] != ' ' && line[33] != '*')) {
+        u_write(2, "md5sum: bad checksum line\n", 26);
+        return 1;
+    }
+    name = line + 34;
+    if (name[0] == 0) {
+        u_write(2, "md5sum: bad checksum line\n", 26);
+        return 1;
+    }
+    if (strcmp(name, "-") == 0) {
+        if (md5_fd(0, got) != 0) {
+            emit_str(name);
+            u_write(1, ": FAILED\n", 9);
+            return 1;
+        }
+    } else {
+        fd = u_open(name, 0, 0);
+        if (fd < 0) {
+            emit_str(name);
+            u_write(1, ": FAILED open\n", 14);
+            return 1;
+        }
+        if (md5_fd(fd, got) != 0) {
+            u_close(fd);
+            emit_str(name);
+            u_write(1, ": FAILED\n", 9);
+            return 1;
+        }
+        u_close(fd);
+    }
+    emit_str(name);
+    if (dig_eq(expect, got, 16)) {
+        u_write(1, ": OK\n", 5);
+        return 0;
+    }
+    u_write(1, ": FAILED\n", 9);
+    return 1;
+}
+
+static int check_fd(long fd) {
+    char buf[512];
+    char line[LINE_MAX];
+    long n;
+    int li = 0;
+    int i;
+    int rc = 0;
+    while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
+        for (i = 0; i < (int)n; i++) {
+            char c = buf[i];
+            if (c == '\n') {
+                line[li] = 0;
+                if (li > 0) {
+                    if (check_line(line) != 0) rc = 1;
+                }
+                li = 0;
+                continue;
+            }
+            if (li < LINE_MAX - 1) line[li++] = c;
+        }
+    }
+    if (li > 0) {
+        line[li] = 0;
+        if (check_line(line) != 0) rc = 1;
+    }
+    return n < 0 ? 1 : rc;
+}
+
 int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
+    int check = 0;
     unsigned char dig[16];
+
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-c") == 0) {
+            check = 1;
+            i++;
+            continue;
+        }
+        /* glued -c only for thin */
+        if (argv[i][1] == 'c' && argv[i][2] == 0) {
+            check = 1;
+            i++;
+            continue;
+        }
+        u_write(2, "usage: md5sum [-c] [FILE...]\n", 29);
+        return 1;
+    }
+
+    if (check) {
+        if (i >= argc) return check_fd(0);
+        for (; i < argc; i++) {
+            long fd;
+            if (strcmp(argv[i], "-") == 0) {
+                if (check_fd(0) != 0) rc = 1;
+                continue;
+            }
+            fd = u_open(argv[i], 0, 0);
+            if (fd < 0) {
+                u_write(2, "md5sum: open failed\n", 20);
+                rc = 1;
+                continue;
+            }
+            if (check_fd(fd) != 0) rc = 1;
+            u_close(fd);
+        }
+        return rc;
+    }
 
     if (i >= argc) {
         if (md5_fd(0, dig) != 0) return 1;
