@@ -478,6 +478,7 @@ def main():
         "[FS] published /bin/nohup (",
         "[FS] published /bin/find (",
         "[FS] published /bin/du (",
+        "[FS] published /bin/shuf (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",

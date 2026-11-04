@@ -642,14 +642,25 @@ prints each subdirectory total; `-a` includes files; `-s` summary only.
 Focused virtio login smoke covers find name/type, du -s/-a, Ext2 walk, prior
 interactive greens (smp 1/2). Ramfs `/bin` dents 100/128.
 
+## /bin/shuf + head/tail -c — landed
+
+Thin POSIX polish. `/bin/shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]` loads
+lines (or an inclusive decimal range / `-e` argv lines), Fisher-Yates shuffles
+with a clock_gettime+getpid xorshift seed, then prints (`-n` caps output).
+`head`/`tail` gain `-c N`/`-cN` byte modes alongside existing `-n`/`-N` line
+modes; `tail -c` prefers `fstat`+`lseek` on seekable files and falls back to a
+byte ring for stdin. No kernel work. Focused virtio login smoke covers shuf
+range/file/ `-n`/`-e`, head/tail `-c`, prior greens (smp 1/2). Ramfs `/bin`
+dents 101/128.
+
 ## Suggested next steps
+
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`find`/`du` + `mv` recursive +
-   `cp -r` + cp/mv dir targets + rmdir -p + logname/nohup + tsort/pathchk +
-   … already present): prefer small coherent chunks such as `shuf`,
-   `head`/`tail` polish (`-c`), thin `df` (needs `statfs`), or other missing
-   thin POSIX. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
-   unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`shuf` + head/tail `-c` + `find`/`du`
+   + `mv` recursive + `cp -r` + … already present): prefer small coherent
+   chunks such as thin `df` (needs `statfs` if the syscall already exists),
+   or other missing thin POSIX. Avoid deep jbd / Ext2-redirect duplex races /
+   CFS nesting unless a clear bite-sized fix.

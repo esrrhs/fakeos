@@ -1,4 +1,8 @@
-/* fakeos userland - head: print the first N lines of files (default 10). */
+/* fakeos userland - head: print the first N lines or bytes of files.
+ *   head [-n N|-N] [-c N|-cN] [FILE...]
+ * Default: first 10 lines. -c selects byte mode (mutually exclusive with -n
+ * in practice: last of -n/-c wins). stdin if no FILE; "-" is stdin.
+ */
 package user;
 
 typedef unsigned long u64;
@@ -11,7 +15,7 @@ extern int strcmp(const char *a, const char *b);
 extern long strtol_dec(const char *s);
 extern void printf(const char *fmt, ...);
 
-static int head_fd(long fd, long limit) {
+static int head_lines(long fd, long limit) {
     char buf[512];
     long n;
     long left = limit;
@@ -30,6 +34,23 @@ static int head_fd(long fd, long limit) {
     return n < 0 ? 1 : 0;
 }
 
+static int head_bytes(long fd, long limit) {
+    char buf[512];
+    long n;
+    long left = limit;
+    long chunk;
+
+    if (left < 0) left = 0;
+    while (left > 0) {
+        chunk = left < (long)sizeof(buf) ? left : (long)sizeof(buf);
+        n = u_read(fd, buf, (unsigned long)chunk);
+        if (n <= 0) return n < 0 ? 1 : 0;
+        if (u_write(1, buf, (unsigned long)n) < 0) return 1;
+        left -= n;
+    }
+    return 0;
+}
+
 static int is_digits(const char *s) {
     int i;
     if (s == 0 || s[0] == 0) return 0;
@@ -39,31 +60,69 @@ static int is_digits(const char *s) {
     return 1;
 }
 
+static void usage(void) {
+    u_write(2, "usage: head [-n N|-N] [-c N|-cN] [FILE...]\n", 44);
+}
+
 int main(int argc, char **argv) {
     long limit = 10;
+    int byte_mode = 0;
     int i = 1;
     int rc = 0;
     int files = 0;
 
-    if (i < argc && strcmp(argv[i], "-n") == 0) {
-        if (i + 1 >= argc || !is_digits(argv[i + 1])) {
-            u_write(2, "usage: head [-n N] [FILE...]\n", 29);
-            return 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
         }
-        limit = strtol_dec(argv[i + 1]);
-        i += 2;
-    } else if (i < argc && argv[i][0] == '-' && is_digits(argv[i] + 1)) {
-        limit = strtol_dec(argv[i] + 1);
-        i++;
+        if (strcmp(argv[i], "-n") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            limit = strtol_dec(argv[i + 1]);
+            byte_mode = 0;
+            i += 2;
+            continue;
+        }
+        if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            limit = strtol_dec(argv[i + 1]);
+            byte_mode = 1;
+            i += 2;
+            continue;
+        }
+        if (argv[i][0] == '-' && argv[i][1] == 'c' && is_digits(argv[i] + 2)) {
+            limit = strtol_dec(argv[i] + 2);
+            byte_mode = 1;
+            i++;
+            continue;
+        }
+        if (argv[i][0] == '-' && is_digits(argv[i] + 1)) {
+            limit = strtol_dec(argv[i] + 1);
+            byte_mode = 0;
+            i++;
+            continue;
+        }
+        /* lone "-" is a file operand */
+        break;
     }
 
     if (i >= argc) {
-        return head_fd(0, limit);
+        return byte_mode ? head_bytes(0, limit) : head_lines(0, limit);
     }
     for (; i < argc; i++) {
         long fd;
         if (strcmp(argv[i], "-") == 0) {
-            if (head_fd(0, limit) != 0) rc = 1;
+            if (byte_mode) {
+                if (head_bytes(0, limit) != 0) rc = 1;
+            } else {
+                if (head_lines(0, limit) != 0) rc = 1;
+            }
             files++;
             continue;
         }
@@ -77,7 +136,11 @@ int main(int argc, char **argv) {
             if (files > 0) u_write(1, "\n", 1);
             printf("==> %s <==\n", argv[i]);
         }
-        if (head_fd(fd, limit) != 0) rc = 1;
+        if (byte_mode) {
+            if (head_bytes(fd, limit) != 0) rc = 1;
+        } else {
+            if (head_lines(fd, limit) != 0) rc = 1;
+        }
         u_close(fd);
         files++;
     }

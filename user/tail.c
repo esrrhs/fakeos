@@ -1,4 +1,8 @@
-/* fakeos userland - tail: print the last N lines of files (default 10). */
+/* fakeos userland - tail: print the last N lines or bytes of files.
+ *   tail [-n N|-N] [-c N|-cN] [FILE...]
+ * Default: last 10 lines (ring). -c byte mode: seekable files use
+ * lseek+fstat; non-seekable/stdin use a byte ring (capped).
+ */
 package user;
 
 typedef unsigned long u64;
@@ -7,16 +11,30 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern long u_lseek(long fd, long off, long whence);
+extern long u_fstat(long fd, void *statbuf);
 extern int strcmp(const char *a, const char *b);
 extern long strtol_dec(const char *s);
 extern void printf(const char *fmt, ...);
 
-enum { LINE_MAX = 512, RING_MAX = 256 };
+enum {
+    LINE_MAX = 512,
+    RING_MAX = 256,
+    BYTE_RING_MAX = 8192,
+    SEEK_SET = 0,
+    SEEK_END = 2,
+    ST_SIZE = 48
+};
 
 static char ring[RING_MAX][LINE_MAX];
 static int ring_len;
 static int ring_next;
 static int ring_cap;
+
+static char byte_ring[BYTE_RING_MAX];
+static unsigned long byte_len;
+static unsigned long byte_next;
+static unsigned long byte_cap;
 
 static void ring_reset(int cap) {
     ring_len = 0;
@@ -48,7 +66,7 @@ static void ring_flush(void) {
     }
 }
 
-static int tail_fd(long fd, long limit) {
+static int tail_lines(long fd, long limit) {
     char buf[512];
     char line[LINE_MAX];
     long n;
@@ -57,7 +75,6 @@ static int tail_fd(long fd, long limit) {
 
     ring_reset((int)limit);
     if (limit <= 0) {
-        /* Drain stdin/file but print nothing. */
         while ((n = u_read(fd, buf, sizeof(buf))) > 0) { }
         return n < 0 ? 1 : 0;
     }
@@ -82,6 +99,93 @@ static int tail_fd(long fd, long limit) {
     return n < 0 ? 1 : 0;
 }
 
+static unsigned long load_u64(const char *p) {
+    unsigned long v = 0;
+    unsigned long i;
+    for (i = 0; i < 8; i++) {
+        v |= ((unsigned long)(unsigned char)p[i]) << (8 * i);
+    }
+    return v;
+}
+
+static void byte_ring_reset(unsigned long cap) {
+    byte_len = 0;
+    byte_next = 0;
+    byte_cap = cap;
+    if (byte_cap > BYTE_RING_MAX) byte_cap = BYTE_RING_MAX;
+}
+
+static void byte_ring_push(char c) {
+    if (byte_cap == 0) return;
+    byte_ring[byte_next] = c;
+    byte_next = (byte_next + 1) % byte_cap;
+    if (byte_len < byte_cap) byte_len++;
+}
+
+static void byte_ring_flush(void) {
+    unsigned long i;
+    unsigned long start = (byte_len < byte_cap) ? 0 : byte_next;
+    for (i = 0; i < byte_len; i++) {
+        unsigned long idx = (start + i) % byte_cap;
+        u_write(1, &byte_ring[idx], 1);
+    }
+}
+
+static int tail_bytes_stream(long fd, long limit) {
+    char buf[512];
+    long n;
+    int i;
+    unsigned long cap;
+
+    if (limit <= 0) {
+        while ((n = u_read(fd, buf, sizeof(buf))) > 0) { }
+        return n < 0 ? 1 : 0;
+    }
+    cap = (unsigned long)limit;
+    if (cap > BYTE_RING_MAX) cap = BYTE_RING_MAX;
+    byte_ring_reset(cap);
+    while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
+        for (i = 0; i < (int)n; i++) byte_ring_push(buf[i]);
+    }
+    byte_ring_flush();
+    return n < 0 ? 1 : 0;
+}
+
+static int tail_bytes(long fd, long limit) {
+    char st[160];
+    long sz;
+    long off;
+    char buf[512];
+    long n;
+    long left;
+
+    if (limit <= 0) {
+        while ((n = u_read(fd, buf, sizeof(buf))) > 0) { }
+        return n < 0 ? 1 : 0;
+    }
+
+    /* Prefer seekable path via fstat size + lseek. */
+    if (u_fstat(fd, st) == 0) {
+        sz = (long)load_u64(st + ST_SIZE);
+        if (sz >= 0) {
+            off = (sz > limit) ? (sz - limit) : 0;
+            if (u_lseek(fd, off, SEEK_SET) == off) {
+                left = (sz > limit) ? limit : sz;
+                while (left > 0) {
+                    long chunk = left < (long)sizeof(buf) ? left : (long)sizeof(buf);
+                    n = u_read(fd, buf, (unsigned long)chunk);
+                    if (n <= 0) return n < 0 ? 1 : 0;
+                    if (u_write(1, buf, (unsigned long)n) < 0) return 1;
+                    left -= n;
+                }
+                return 0;
+            }
+        }
+    }
+    /* Fallback: stream ring (stdin / non-seekable). */
+    return tail_bytes_stream(fd, limit);
+}
+
 static int is_digits(const char *s) {
     int i;
     if (s == 0 || s[0] == 0) return 0;
@@ -91,26 +195,59 @@ static int is_digits(const char *s) {
     return 1;
 }
 
+static void usage(void) {
+    u_write(2, "usage: tail [-n N|-N] [-c N|-cN] [FILE...]\n", 44);
+}
+
 int main(int argc, char **argv) {
     long limit = 10;
+    int byte_mode = 0;
     int i = 1;
     int rc = 0;
     int files = 0;
 
-    if (i < argc && strcmp(argv[i], "-n") == 0) {
-        if (i + 1 >= argc || !is_digits(argv[i + 1])) {
-            u_write(2, "usage: tail [-n N] [FILE...]\n", 29);
-            return 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
         }
-        limit = strtol_dec(argv[i + 1]);
-        i += 2;
-    } else if (i < argc && argv[i][0] == '-' && is_digits(argv[i] + 1)) {
-        limit = strtol_dec(argv[i] + 1);
-        i++;
+        if (strcmp(argv[i], "-n") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            limit = strtol_dec(argv[i + 1]);
+            byte_mode = 0;
+            i += 2;
+            continue;
+        }
+        if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            limit = strtol_dec(argv[i + 1]);
+            byte_mode = 1;
+            i += 2;
+            continue;
+        }
+        if (argv[i][0] == '-' && argv[i][1] == 'c' && is_digits(argv[i] + 2)) {
+            limit = strtol_dec(argv[i] + 2);
+            byte_mode = 1;
+            i++;
+            continue;
+        }
+        if (argv[i][0] == '-' && is_digits(argv[i] + 1)) {
+            limit = strtol_dec(argv[i] + 1);
+            byte_mode = 0;
+            i++;
+            continue;
+        }
+        break;
     }
 
     if (i >= argc) {
-        return tail_fd(0, limit);
+        return byte_mode ? tail_bytes(0, limit) : tail_lines(0, limit);
     }
     for (; i < argc; i++) {
         long fd;
@@ -119,7 +256,11 @@ int main(int argc, char **argv) {
                 if (files > 0) u_write(1, "\n", 1);
                 printf("==> standard input <==\n");
             }
-            if (tail_fd(0, limit) != 0) rc = 1;
+            if (byte_mode) {
+                if (tail_bytes(0, limit) != 0) rc = 1;
+            } else {
+                if (tail_lines(0, limit) != 0) rc = 1;
+            }
             files++;
             continue;
         }
@@ -133,7 +274,11 @@ int main(int argc, char **argv) {
             if (files > 0) u_write(1, "\n", 1);
             printf("==> %s <==\n", argv[i]);
         }
-        if (tail_fd(fd, limit) != 0) rc = 1;
+        if (byte_mode) {
+            if (tail_bytes(fd, limit) != 0) rc = 1;
+        } else {
+            if (tail_lines(fd, limit) != 0) rc = 1;
+        }
         u_close(fd);
         files++;
     }
