@@ -1,7 +1,8 @@
 /* fakeos userland - test / [: thin POSIX expression evaluator.
  * Exit 0 true, 1 false, 2 usage/error. Invoked as [ requires closing ].
  * Unary: -b -c -d -e -f -h -L -p -S -s -r -w -x -z -n
- * Binary: = != -eq -ne -lt -le -gt -ge -ot -nt
+ * Binary: = != < > -eq -ne -lt -le -gt -ge -ot -nt
+ *   < > are byte-order lexicographic (strcmp), like bash test.
  * Bang: ! EXPR (single). STRING alone is -n STRING.
  * -ot/-nt compare st_mtime (boot-relative secs); missing-file rules match
  * common POSIX/bash: A -nt B true if A exists and B does not (or A newer);
@@ -208,6 +209,10 @@ static int eval_expr(int argc, char **argv) {
             t = (strcmp(a0, a2) == 0);
         } else if (strcmp(a1, "!=") == 0) {
             t = (strcmp(a0, a2) != 0);
+        } else if (strcmp(a1, "<") == 0) {
+            t = (strcmp(a0, a2) < 0);
+        } else if (strcmp(a1, ">") == 0) {
+            t = (strcmp(a0, a2) > 0);
         } else if (strcmp(a1, "-eq") == 0 || strcmp(a1, "-ne") == 0 ||
                    strcmp(a1, "-lt") == 0 || strcmp(a1, "-le") == 0 ||
                    strcmp(a1, "-gt") == 0 || strcmp(a1, "-ge") == 0) {

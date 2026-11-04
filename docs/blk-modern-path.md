@@ -236,11 +236,12 @@ SET2` translates and `tr -d SET` deletes (`a-z` ranges; `\n`/`\t`/`\r`/`\0`/
 ## /bin/test + /bin/[ — landed
 
 Thin POSIX `test`/`[` (exit 0 true / 1 false / 2 error). Unary file/string
-ops (`-e/-f/-d/-h/-L/-s/-r/-w/-x/-z/-n` plus `-b/-c/-p/-S`), string `=`/`!=`,
-integer `-eq/-ne/-lt/-le/-gt/-ge`, and a single leading `!`. The `[` form
-requires a closing `]` (same ELF published as `/bin/test` and `/bin/[`).
-Focused virtio login smoke covers file/string/int forms with `&&`/`||` plus
-prior interactive greens (smp 1/2).
+ops (`-e/-f/-d/-h/-L/-s/-r/-w/-x/-z/-n` plus `-b/-c/-p/-S`), string
+`=`/`!=`/`</>` (byte-order lex), integer `-eq/-ne/-lt/-le/-gt/-ge`, `-ot`/
+`-nt`, and a single leading `!`. The `[` form requires a closing `]` (same
+ELF published as `/bin/test` and `/bin/[`). Focused virtio login smoke
+covers file/string/int/lex forms with `&&`/`||` plus prior interactive
+greens (smp 1/2).
 
 
 ## /bin/uniq + /bin/sort — landed
@@ -1442,6 +1443,13 @@ table/filter. No new `/bin` dent. Focused virtio login smoke covers
 `-t`/`-l`/`-lt` + prior greens including `hash -p` (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## test/[ </> lex — landed
+
+`/bin/test` and `/bin/[` gain binary string `<` / `>` (byte-order
+`strcmp`, bash-like; mirrors shell `[[ a < b ]]`). No new `/bin` dent.
+Focused virtio login smoke covers `test`/`[` lex + prior greens including
+hash -t/-l (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1449,7 +1457,8 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (`set --`
-   still deferred until positional frames; skip large `getopts` / here-doc
-   / trap / `fc` / `bind` / `=~`; `ulimit`/`times` need kernel
-   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `local -r`/`-x`, `break N`/`continue N` if
+   loop frames allow, or other small `/bin`/shell bites (`set --` still
+   deferred; skip large `getopts` / here-doc / trap / `fc` / `bind` /
+   `=~`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.
