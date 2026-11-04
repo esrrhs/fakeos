@@ -248,46 +248,46 @@ isr_common:
     ; Interrupts are asynchronous: the interrupted (possibly user) context
     ; owns the full SSE register file, which kernel C code is free to use.
     ; Save all 16 vector registers (256 bytes, 16-byte aligned after the
-    ; 15 pushes + vector/error words). movdqa keeps the save area 16-aligned.
+    ; 15 pushes + vector/error words). movdqu: leaf hlt/pause may leave RSP only 8-aligned.
     sub     rsp, 256
-    movdqa  [rsp + 0x00], xmm0
-    movdqa  [rsp + 0x10], xmm1
-    movdqa  [rsp + 0x20], xmm2
-    movdqa  [rsp + 0x30], xmm3
-    movdqa  [rsp + 0x40], xmm4
-    movdqa  [rsp + 0x50], xmm5
-    movdqa  [rsp + 0x60], xmm6
-    movdqa  [rsp + 0x70], xmm7
-    movdqa  [rsp + 0x80], xmm8
-    movdqa  [rsp + 0x90], xmm9
-    movdqa  [rsp + 0xa0], xmm10
-    movdqa  [rsp + 0xb0], xmm11
-    movdqa  [rsp + 0xc0], xmm12
-    movdqa  [rsp + 0xd0], xmm13
-    movdqa  [rsp + 0xe0], xmm14
-    movdqa  [rsp + 0xf0], xmm15
+    movdqu  [rsp + 0x00], xmm0
+    movdqu  [rsp + 0x10], xmm1
+    movdqu  [rsp + 0x20], xmm2
+    movdqu  [rsp + 0x30], xmm3
+    movdqu  [rsp + 0x40], xmm4
+    movdqu  [rsp + 0x50], xmm5
+    movdqu  [rsp + 0x60], xmm6
+    movdqu  [rsp + 0x70], xmm7
+    movdqu  [rsp + 0x80], xmm8
+    movdqu  [rsp + 0x90], xmm9
+    movdqu  [rsp + 0xa0], xmm10
+    movdqu  [rsp + 0xb0], xmm11
+    movdqu  [rsp + 0xc0], xmm12
+    movdqu  [rsp + 0xd0], xmm13
+    movdqu  [rsp + 0xe0], xmm14
+    movdqu  [rsp + 0xf0], xmm15
 
     mov     rdi, rsp                ; (xmm area precedes the saved GPRs)
     add     rdi, 256                ; struct trap_frame *frame
     cld
     call    isr_dispatch
 
-    movdqa  xmm0,  [rsp + 0x00]
-    movdqa  xmm1,  [rsp + 0x10]
-    movdqa  xmm2,  [rsp + 0x20]
-    movdqa  xmm3,  [rsp + 0x30]
-    movdqa  xmm4,  [rsp + 0x40]
-    movdqa  xmm5,  [rsp + 0x50]
-    movdqa  xmm6,  [rsp + 0x60]
-    movdqa  xmm7,  [rsp + 0x70]
-    movdqa  xmm8,  [rsp + 0x80]
-    movdqa  xmm9,  [rsp + 0x90]
-    movdqa  xmm10, [rsp + 0xa0]
-    movdqa  xmm11, [rsp + 0xb0]
-    movdqa  xmm12, [rsp + 0xc0]
-    movdqa  xmm13, [rsp + 0xd0]
-    movdqa  xmm14, [rsp + 0xe0]
-    movdqa  xmm15, [rsp + 0xf0]
+    movdqu  xmm0,  [rsp + 0x00]
+    movdqu  xmm1,  [rsp + 0x10]
+    movdqu  xmm2,  [rsp + 0x20]
+    movdqu  xmm3,  [rsp + 0x30]
+    movdqu  xmm4,  [rsp + 0x40]
+    movdqu  xmm5,  [rsp + 0x50]
+    movdqu  xmm6,  [rsp + 0x60]
+    movdqu  xmm7,  [rsp + 0x70]
+    movdqu  xmm8,  [rsp + 0x80]
+    movdqu  xmm9,  [rsp + 0x90]
+    movdqu  xmm10, [rsp + 0xa0]
+    movdqu  xmm11, [rsp + 0xb0]
+    movdqu  xmm12, [rsp + 0xc0]
+    movdqu  xmm13, [rsp + 0xd0]
+    movdqu  xmm14, [rsp + 0xe0]
+    movdqu  xmm15, [rsp + 0xf0]
     add     rsp, 256
 
     pop     r15
@@ -314,7 +314,7 @@ isr_common:
 section .rodata
 align 4
 gdtr:
-    dw      7 * 8 - 1               ; 7 descriptors x 8 bytes, minus 1
+    dw      (5 + 8 * 2) * 8 - 1     ; 5 seg + 8 TSS descs (2 slots each), minus 1
     dq      gdt
 
 idtr:

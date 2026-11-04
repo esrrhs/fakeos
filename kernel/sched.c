@@ -103,7 +103,7 @@ struct kmutex {
 static struct tcb threads[MAX_THREADS];
 enum { SCHED_MAX_CPUS = 8 };
 static u32 cpu_current[SCHED_MAX_CPUS];
-static u32 idle_slot[SCHED_MAX_CPUS];
+static volatile u32 idle_slot[SCHED_MAX_CPUS];
 static u32 idle_mark[MAX_THREADS];   /* 1 => per-CPU idle TCB (not CFS-picked) */
 static volatile u32 sched_run_lock;
 static volatile u32 ap_sched_go;
@@ -127,8 +127,15 @@ extern u32 smp_cpu_online(u32 cpu);
 extern u64 smp_cpu_stack_top(u32 cpu);
 extern void idt_load(void);
 extern void gdt_flush(void);
+extern void gdt_load_cpu_tss(u32 cpu);
+extern void cpu_enable_sse(void);
 extern void lapic_ap_init(void);
+extern void lapic_ap_timer_enable(void);
+extern u64 lapic_get_cpu_ticks(u32 cpu);
 extern void cpu_pause(void);
+extern void cpu_halt(void);
+extern void cpu_sti(void);
+extern void cpu_cli(void);
 
 /* Per-CPU current index via LAPIC id. IRQs off or sched_run_lock held at callers. */
 static u32 sched_cur(void) {
@@ -337,7 +344,7 @@ void sched_init(void) {
 /* CFS-lite: pick the RUNNABLE non-idle thread with the lowest vruntime.
  * Per-CPU idle TCBs are never CFS-picked; if nothing else is runnable (or
  * this is an AP in the first SMP slice), return this CPU's idle slot.
- * APs do not steal work yet (shared TSS / no user on AP). */
+ * APs do not steal work yet (no cross-CPU runqueue / no user on AP). */
 static u32 pick_next(u32 from) {
     u32 i;
     u32 best = 0xFFFFFFFF;
@@ -1727,11 +1734,11 @@ u32 sched_has_pending_fatal(void) {
 }
 
 /* ---------------------------------------------------------------------------
- * SMP: release parked APs into per-CPU idle (first scheduler slice).
+ * SMP: release parked APs into per-CPU idle + local APIC timer.
  *
- * APs still do not steal user/kernel work (shared TSS; no per-CPU TSS yet).
- * They load the kernel GDT/IDT, soft-enable LAPIC (timer masked), and idle in
- * the scheduler so -smp N smoke proves multi-CPU sched entry.
+ * APs still do not steal user/kernel work. They load the kernel GDT/IDT,
+ * LTR a per-CPU TSS (RSP0 + IST1), soft-enable LAPIC, unmask the periodic
+ * timer, and sti;hlt in the idle TCB so -smp N smoke proves AP ticks.
  * ------------------------------------------------------------------------- */
 
 u32 sched_ap_waiting(void) {
@@ -1740,6 +1747,7 @@ u32 sched_ap_waiting(void) {
 
 void sched_ap_enter(u32 cpu) {
     u32 slot;
+    u64 ticks0;
     if (cpu == sched_bsp_cpu || cpu >= SCHED_MAX_CPUS) {
         for (;;) {
             arch.cpu_cli();
@@ -1756,24 +1764,30 @@ void sched_ap_enter(u32 cpu) {
     }
 
     /* Leave the SIPI trampoline GDT (CS=0x18) for the kernel GDT (CS=0x08)
-     * before any IDT gate (selector 0x08) can fire. Skip LTR: shared TSS is
-     * busy-bit hostile; AP stays ring-0 so RSP0/IST are unused. */
+     * before any IDT gate (selector 0x08) can fire. LTR this CPU's TSS so
+     * #DF IST1 / future user RSP0 are valid before the timer is unmasked. */
     gdt_flush();
     idt_load();
+    gdt_load_cpu_tss(cpu);
+    cpu_enable_sse();
     lapic_ap_init();
+    lapic_ap_timer_enable();
 
     cpu_current[cpu] = slot;
     threads[slot].state = TCB_RUNNABLE;
     ap_in_sched[cpu] = 1;
-    /* GDT/IDT/LAPIC are live; timer stays masked (no per-CPU TSS yet).
-     * Park in the idle TCB with IRQs off — proves sched attach without
-     * stealing work or taking ticks on the AP. */
-    kprintf("[SMP] AP%u entered scheduler (idle slot %u)\n",
+    ticks0 = lapic_get_cpu_ticks(cpu);
+    kprintf("[SMP] AP%u entered scheduler (idle slot %u, TSS+timer)\n",
             (u64)cpu, (u64)slot);
 
+    /* Idle with interrupts enabled: LAPIC timer (and only that, for now)
+     * wakes halt. pick_next still returns this CPU's idle — no steal. */
     for (;;) {
+        cpu_sti();
+        cpu_halt();
+        cpu_cli();
         ap_idle_wakeups[cpu] = ap_idle_wakeups[cpu] + 1;
-        cpu_pause();
+        (void)ticks0;
     }
 }
 
@@ -1859,6 +1873,35 @@ u32 sched_smp_start(void) {
         }
         kprintf("[SMP] sched: %u AP(s) in idle\n",
                 (u64)attached);
+
+        /* Give AP timers ~150 ms at 100 Hz, then require real per-CPU ticks.
+         * CLI on BSP so a tick cannot preempt kmain out of this probe. */
+        if (attached > 0) {
+            u32 ok = 1;
+            kprintf("[SMP] sched: probing AP timers...\n");
+            arch.cpu_cli();
+            arch.pit_busy_wait_ms(150);
+            for (cpu = 0; cpu < n && cpu < SCHED_MAX_CPUS; cpu++) {
+                u64 ct;
+                u64 wu;
+                if (cpu == sched_bsp_cpu || !ap_in_sched[cpu]) {
+                    continue;
+                }
+                ct = lapic_get_cpu_ticks(cpu);
+                wu = ap_idle_wakeups[cpu];
+                kprintf("[SMP] AP%u timer ticks=%u wakeups=%u\n",
+                        (u64)cpu, ct, wu);
+                if (ct < 5) {
+                    ok = 0;
+                }
+            }
+            if (ok) {
+                kprintf("[PASS] AP LAPIC timer + per-CPU TSS/IST\n");
+            } else {
+                kprintf("[FAIL] AP LAPIC timer + per-CPU TSS/IST\n");
+            }
+            arch.cpu_sti();
+        }
         return attached;
     }
 }

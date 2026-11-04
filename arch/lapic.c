@@ -52,7 +52,10 @@ static const u32 LAPIC_TIMER_MAXCOUNT = 0xFFFFFFFF;
 
 static volatile u32 *lapic_regs;
 static volatile u64 lapic_ticks;
+static volatile u64 lapic_ticks_cpu[8];
 static u32 lapic_timer_period; /* BSP-calibrated INITCNT for 100 Hz */
+
+extern u32 smp_cpuid(void);
 
 /* Oversized, page-aligned at runtime: the first 4 KiB-aligned window inside
  * this storage becomes the APIC page table (fakecc emits 16-byte-aligned
@@ -101,8 +104,13 @@ void pit_busy_wait_500ms(void) {
 }
 
 void lapic_irq(void) {
+    u32 cpu;
     lapic_wr(LAPIC_REG_EOI, 0);
     lapic_ticks++;
+    cpu = smp_cpuid();
+    if (cpu < 8) {
+        lapic_ticks_cpu[cpu] = lapic_ticks_cpu[cpu] + 1;
+    }
 }
 
 /* Returns 1 if the spurious vector (255, ISR word 7 bit 31) is genuinely
@@ -120,6 +128,13 @@ void lapic_send_eoi(void) {
 
 u64 lapic_get_ticks(void) {
     return lapic_ticks;
+}
+
+u64 lapic_get_cpu_ticks(u32 cpu) {
+    if (cpu >= 8) {
+        return 0;
+    }
+    return lapic_ticks_cpu[cpu];
 }
 
 u32 lapic_get_id(void) {
@@ -204,14 +219,30 @@ void lapic_ap_init(void) {
     lapic_wr(0x280, 0);
     (void)lapic_rd(0x280);
 
-    /* Arm divider + vector but leave LVTT masked until per-CPU TSS/IRQ
-     * stacks are ready; unmasked AP timer currently triple-faults. */
+    /* Arm divider + vector; leave LVTT masked until gdt_load_cpu_tss +
+     * lapic_ap_timer_enable (needs per-CPU TSS/IST before unmask). */
     period = lapic_timer_period;
     if (period == 0) {
         period = 1;
     }
     lapic_wr(LAPIC_REG_DIVCONF, 0x03);
     lapic_wr(LAPIC_REG_LVTT, LAPIC_LVT_MASKED | LAPIC_TIMER_VECTOR);
+    lapic_wr(LAPIC_REG_INITCNT, period);
+}
+
+/* Unmask the periodic LAPIC timer on this CPU using the BSP-calibrated
+ * period. Call only after this CPU has loaded its own TSS (LTR). */
+void lapic_ap_timer_enable(void) {
+    u32 period;
+    if (lapic_regs == 0) {
+        return;
+    }
+    period = lapic_timer_period;
+    if (period == 0) {
+        period = 1;
+    }
+    lapic_wr(LAPIC_REG_DIVCONF, 0x03);
+    lapic_wr(LAPIC_REG_LVTT, LAPIC_LVT_PERIODIC | LAPIC_TIMER_VECTOR);
     lapic_wr(LAPIC_REG_INITCNT, period);
 }
 

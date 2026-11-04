@@ -84,7 +84,8 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     types.uint64_t rsp0 = arch.gdt_get_rsp0();
     types.uint64_t ist1 = arch.gdt_get_ist1();
     kprintf("\n[INT] Interrupt Infrastructure Online:\n");
-    kprintf("      GDT            : 7 descriptors (kernel/user code+data, 64-bit TSS)\n");
+    kprintf("      GDT            : %u slots (kernel/user code+data + per-CPU 64-bit TSS)\n",
+            (types.uint64_t)arch.gdt_entry_count());
     kprintf("      IDT            : 256 gates at %p (vectors 0..47 + spurious 255)\n",
             idt_base);
     kprintf("      TSS            : base %p, RSP0=%p, IST1=%p (#DF guard stack)\n",
@@ -186,14 +187,14 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: AP sched idle + per-CPU current + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: AP timer + per-CPU TSS/IST + sched idle + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
     kprintf("           - UART 16550 Serial Output/Input: OK\n");
     kprintf("           - VGA Text Display Driver: OK\n");
     kprintf("           - Formatted Kernel Logger (kprintf): OK\n");
-    kprintf("           - 64-bit GDT / TSS / IST (#DF guard stack): OK\n");
+    kprintf("           - 64-bit GDT / per-CPU TSS / IST (#DF guard stack): OK\n");
     kprintf("           - 64-bit IDT + CPU exception capture & dump: OK\n");
     kprintf("           - Local APIC periodic timer (100 Hz ticks): OK\n");
     kprintf("           - HHDM direct map + identity mapping retired: OK\n");

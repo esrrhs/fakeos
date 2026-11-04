@@ -16,6 +16,7 @@ global cpu_halt
 global cpu_cli
 global cpu_sti
 global cpu_pause
+global cpu_enable_sse
 
 section .text
 
@@ -90,6 +91,18 @@ cpu_sti:
 ; void cpu_pause(void)
 cpu_pause:
     pause
+    ret
+
+; void cpu_enable_sse(void)
+; Match BSP boot.asm: CR4.OSFXSR|OSXMMEXCPT, clear CR0.EM, set CR0.MP.
+cpu_enable_sse:
+    mov     rax, cr4
+    or      rax, (1 << 9) | (1 << 10)
+    mov     cr4, rax
+    mov     rax, cr0
+    and     rax, ~(1 << 2)
+    or      rax, (1 << 1)
+    mov     cr0, rax
     ret
 
 section .note.GNU-stack noalloc noexec nowrite progbits

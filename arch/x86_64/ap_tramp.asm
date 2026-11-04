@@ -33,9 +33,9 @@ pm32:
     mov     fs, ax
     mov     gs, ax
 
-    ; CR4.PAE
+    ; CR4.PAE + SSE (OSFXSR|OSXMMEXCPT) — ISR saves XMM
     mov     eax, cr4
-    or      eax, (1 << 5)
+    or      eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov     cr4, eax
 
     ; CR3 = shared kernel PML4 (physical)
@@ -48,9 +48,10 @@ pm32:
     or      eax, (1 << 8)
     wrmsr
 
-    ; CR0.PG | PE (already PE)
+    ; CR0.PG|WP|MP|PE, clear EM so SSE executes (match boot.asm)
     mov     eax, cr0
-    or      eax, 0x80000000
+    and     eax, ~(1 << 2)
+    or      eax, 0x80010003
     mov     cr0, eax
 
     jmp     0x18:lm64
@@ -84,8 +85,8 @@ tramp_gdtr:
     dw tramp_gdt_end - tramp_gdt - 1
     dd tramp_gdt
 
-align 8
-; BSP-written fields (absolute phys addresses)
+; BSP-written fields at fixed file offsets 0xC8.. (smp.c OFF_*)
+times (0xC8 - ($ - $$)) db 0
 tramp_cr3:      dq 0
 tramp_stack:    dq 0
 tramp_entry:    dq 0
