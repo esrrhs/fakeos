@@ -20,10 +20,11 @@ extern void kprintf(const char *fmt, ...);
  * writeback commit modes with recovery markers in unused SB space
  * (magic/gen/flags/mode/jblk); journal control block + ring slots hold
  * DESCRIPTOR / REVOKE / COMMIT records across multiple txns. Commit also
- * snapshots dirtied meta blocks into a small copy pool via blk_async batch
- * writes; META_PENDING with a matching COMMIT replays those copies onto
- * home blocks (also blk_async) before clearing the marker (SB idle write
- * lost after commit). Dirty/incomplete mounts without COMMIT still recount.
+ * snapshots dirtied meta blocks into a copy pool (8 slots) via blk_async
+ * batch writes; META_PENDING with a matching COMMIT replays those copies
+ * onto home blocks (also blk_async), skipping any home listed in a ring
+ * REVOKE for that gen, before clearing the marker (SB idle write lost
+ * after commit). Dirty/incomplete mounts without COMMIT still recount.
  * ORDERED flushes data before COMMIT (not a full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
@@ -161,6 +162,8 @@ static void bitmap_clr(u8 *bm, u32 bit) {
 static void jl_desc_add(u32 blk);
 static void jl_revoke_add(u32 blk);
 static u32 jl_is_journal_blk(u32 blk);
+static u32 jl_ring_revoked(u32 blk);
+static u32 jl_ring_revoked_gen(u32 blk, u32 want_gen);
 
 /* Load block-group descriptor `g` from the BGDT. */
 static u32 bg_load(u32 g, struct ext2_bg *out) {
@@ -203,7 +206,8 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
  * REVOKE (freed blocks), COMMIT. ORDERED: device FLUSH before COMMIT
  * (data-before-commit). WRITEBACK: COMMIT without the extra data FLUSH
  * (fsync/sync still drain). Meta-copy pool writes ride blk_async_write_batch
- * (AHCI overlaps; VirtIO/ATA complete inline). Recovery: matching COMMIT
+ * (AHCI overlaps; VirtIO/ATA complete inline). Replay skips homes that a
+ * committed REVOKE lists for the pending gen. Recovery: matching COMMIT
  * gen in the ring clears a stale META_PENDING without recount; otherwise
  * recount. */
 enum {
@@ -226,12 +230,14 @@ enum {
     JL_J_COMMIT = 2,
     JL_RING_MAX = 8,
     JL_MAX_TAGS = 32,
-    JL_MAX_COPIES = 4,              /* meta snapshot pool (full FS blocks) */
+    JL_MAX_COPIES = 8,              /* meta snapshot pool (full FS blocks) */
     JL_CTRL_OFF_COPY_N = 48,        /* u16 allocated copy slots */
     JL_CTRL_OFF_COPY_USED = 50,     /* u16 valid homes in this gen */
     JL_CTRL_OFF_COPY_GEN = 52,      /* u32 gen of snapshot */
     JL_CTRL_OFF_COPY_BLKS = 56,     /* u32[JL_MAX_COPIES] pool FS blocks */
-    JL_CTRL_OFF_COPY_HOMES = 72,    /* u32[JL_MAX_COPIES] home FS blocks */
+    JL_CTRL_OFF_COPY_HOMES = 88,    /* u32[JL_MAX_COPIES] homes (after 8 blks) */
+    JL_LEGACY_COPIES = 4,           /* pre-grow ctrl layout (homes @ 72) */
+    JL_LEGACY_COPY_HOMES = 72
     EXT2_VALID_FS = 1,
     EXT2_ERROR_FS = 2
 };
@@ -252,7 +258,7 @@ static u32 jl_copy_blks[JL_MAX_COPIES]; /* durable meta snapshot pool */
 static u32 jl_copy_homes[JL_MAX_COPIES];
 static u32 jl_copy_n;                  /* valid homes for jl_copy_gen */
 static u32 jl_copy_gen;
-/* Bounce pool for ordered meta-copy / replay blk_async batches (4 KiB slots). */
+/* Bounce pool for ordered meta-copy / replay blk_async batches (8 x 4 KiB). */
 static u8 jl_aio_bufs[JL_MAX_COPIES * 4096];
 static u64 jl_aio_secs[JL_MAX_COPIES];
 static u32 jl_aio_submits;             /* cumulative batch submits (selftest) */
@@ -348,7 +354,7 @@ static u32 jl_load_ctrl(void) {
         jl_ring[i] = rd32(blk_buf + 16 + i * 4);
         if (!jl_jblk_sane(jl_ring[i])) return 0;
     }
-    /* Copy pool may be absent on pre-copy images (zeros) — caller upgrades. */
+    /* Copy pool may be absent / undersized — caller upgrades via ensure. */
     cn = rd16(blk_buf + JL_CTRL_OFF_COPY_N);
     jl_copy_n = 0;
     jl_copy_gen = 0;
@@ -356,13 +362,20 @@ static u32 jl_load_ctrl(void) {
         jl_copy_blks[i] = 0;
         jl_copy_homes[i] = 0;
     }
-    if (cn == JL_MAX_COPIES) {
+    if (cn == JL_MAX_COPIES || cn == JL_LEGACY_COPIES) {
         u32 used = rd16(blk_buf + JL_CTRL_OFF_COPY_USED);
+        u32 homes_off = JL_CTRL_OFF_COPY_HOMES;
+        u32 nload = cn;
         jl_copy_gen = rd32(blk_buf + JL_CTRL_OFF_COPY_GEN);
+        if (cn == JL_LEGACY_COPIES) {
+            /* Pre-grow ctrl: 4 blks @56, 4 homes @72. */
+            homes_off = JL_LEGACY_COPY_HOMES;
+        }
+        if (used > nload) used = nload;
         if (used > JL_MAX_COPIES) used = JL_MAX_COPIES;
-        for (i = 0; i < JL_MAX_COPIES; i++) {
+        for (i = 0; i < nload && i < JL_MAX_COPIES; i++) {
             jl_copy_blks[i] = rd32(blk_buf + JL_CTRL_OFF_COPY_BLKS + i * 4);
-            jl_copy_homes[i] = rd32(blk_buf + JL_CTRL_OFF_COPY_HOMES + i * 4);
+            jl_copy_homes[i] = rd32(blk_buf + homes_off + i * 4);
             if (jl_copy_blks[i] != 0 && !jl_jblk_sane(jl_copy_blks[i])) {
                 return 0;
             }
@@ -579,6 +592,8 @@ static u32 jl_replay_meta_copies(u32 want_gen) {
          * jl_jblk_sane rejects bg_block and must not be used here. */
         if (home < sb.first_data_block || home >= sb.blocks_count) return 0;
         if (jl_is_journal_blk(home)) return 0;
+        /* Revoke-aware: a freed/reissued home must not be restored. */
+        if (jl_ring_revoked_gen(home, want_gen)) continue;
         if (!bread(jl_copy_blks[i], blk_buf)) return 0;
         for (b = 0; b < sb.block_size; b++) {
             jl_aio_bufs[(u64)nsub * 4096 + b] = blk_buf[b];
@@ -650,6 +665,29 @@ static u32 jl_ring_revoked(u32 blk) {
         if (!bread(jl_ring[i], blk_buf)) continue;
         magic = rd32(blk_buf + 0);
         if (magic != JL_REVOKE_MAGIC) continue;
+        ntags = rd16(blk_buf + 12);
+        if (ntags > JL_MAX_TAGS) ntags = JL_MAX_TAGS;
+        for (t = 0; t < ntags; t++) {
+            if (rd32(blk_buf + 16 + t * 4) == blk) return 1;
+        }
+    }
+    return 0;
+}
+
+/* True if a REVOKE record for want_gen lists blk (replay filter). */
+static u32 jl_ring_revoked_gen(u32 blk, u32 want_gen) {
+    u32 i;
+    u32 t;
+    for (i = 0; i < jl_ring_len; i++) {
+        u32 magic;
+        u32 gen;
+        u16 ntags;
+        if (!jl_jblk_sane(jl_ring[i])) continue;
+        if (!bread(jl_ring[i], blk_buf)) continue;
+        magic = rd32(blk_buf + 0);
+        if (magic != JL_REVOKE_MAGIC) continue;
+        gen = rd32(blk_buf + 4);
+        if (gen != want_gen) continue;
         ntags = rd16(blk_buf + 12);
         if (ntags > JL_MAX_TAGS) ntags = JL_MAX_TAGS;
         for (t = 0; t < ntags; t++) {
@@ -1706,8 +1744,9 @@ u32 ext2_mount(void) {
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen,
             (u64)jl_jblk, (u64)jl_ring_len);
-    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy replay + blk_async online (not a full journal)\n",
-            jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback");
+    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy/%u + revoke-aware replay + blk_async online (not a full journal)\n",
+            jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback",
+            (u64)JL_MAX_COPIES);
     return 1;
 }
 
@@ -2873,6 +2912,202 @@ void ext2_selftest(void) {
         jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] journal ordered blk_async meta-copy (submits=%u)\n",
                 (u64)jl_aio_submits);
+    }
+
+    /* Grown copy pool: tag 5 distinct meta homes; commit must snapshot all
+     * five (JL_MAX_COPIES >= 8). Proves upgrade past the legacy 4-slot cap. */
+    {
+        u32 saved_mode = jl_mode;
+        u32 g;
+        u32 homes[5];
+        u32 nh = 0;
+        u32 i;
+        u32 j;
+        struct ext2_bg bg0;
+        jl_set_mode(JL_MODE_ORDERED);
+        if (!jl_copy_pool_ready() || JL_MAX_COPIES < 8) {
+            kprintf("[EXT2] [FAIL] journal pool grow missing (max=%u)\n",
+                    (u64)JL_MAX_COPIES);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bg_load(0, &bg0)) {
+            kprintf("[EXT2] [FAIL] journal pool grow bg0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        homes[0] = sb.bg_block;
+        homes[1] = bg0.block_bitmap;
+        homes[2] = bg0.inode_bitmap;
+        homes[3] = bg0.inode_table;
+        homes[4] = bg0.inode_table + 1;
+        nh = 5;
+        for (i = 0; i < nh; i++) {
+            if (homes[i] == 0 || homes[i] < sb.first_data_block
+                || homes[i] >= sb.blocks_count
+                || jl_is_journal_blk(homes[i])) {
+                kprintf("[EXT2] [FAIL] journal pool grow home[%u]=%u\n",
+                        (u64)i, (u64)homes[i]);
+                jl_set_mode(saved_mode);
+                return;
+            }
+            for (j = 0; j < i; j++) {
+                if (homes[j] == homes[i]) {
+                    kprintf("[EXT2] [FAIL] journal pool grow dup home\n");
+                    jl_set_mode(saved_mode);
+                    return;
+                }
+            }
+        }
+        jl_begin();
+        g = jl_gen;
+        for (i = 0; i < nh; i++) jl_desc_add(homes[i]);
+        if (jl_desc_n < nh) {
+            kprintf("[EXT2] [FAIL] journal pool grow tags %u\n",
+                    (u64)jl_desc_n);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        jl_commit();
+        if (jl_copy_gen != g || jl_copy_n < nh) {
+            kprintf("[EXT2] [FAIL] journal pool grow n=%u gen=%u want=%u\n",
+                    (u64)jl_copy_n, (u64)jl_copy_gen, (u64)nh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < nh; i++) {
+            if (jl_copy_homes[i] != homes[i]) {
+                kprintf("[EXT2] [FAIL] journal pool grow home mismatch\n");
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal copy pool grow (n=%u max=%u)\n",
+                (u64)jl_copy_n, (u64)JL_MAX_COPIES);
+    }
+
+    /* Revoke-aware meta-copy replay: snapshot two homes, revoke the second,
+     * corrupt both under META_PENDING+COMMIT; recover must restore home0
+     * and leave the revoked home1 untouched (still 0xA5). */
+    {
+        u32 saved_mode = jl_mode;
+        u32 g;
+        u32 home0;
+        u32 home1;
+        u32 i;
+        u8 expect0[64];
+        struct ext2_bg bg0;
+        jl_set_mode(JL_MODE_ORDERED);
+        if (!jl_copy_pool_ready()) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay pool missing\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bg_load(0, &bg0)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay bg0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        home0 = sb.bg_block;
+        home1 = bg0.inode_bitmap;
+        if (home1 == 0 || home1 == home0 || jl_is_journal_blk(home1)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay homes\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(home0, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay bread0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) expect0[i] = blk_buf[i];
+        jl_begin();
+        g = jl_gen;
+        jl_desc_add(home0);
+        jl_desc_add(home1);
+        jl_revoke_add(home1);
+        if (jl_desc_n < 2 || jl_rev_n == 0) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay tags\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        jl_commit();
+        if (jl_copy_gen != g || jl_copy_n < 2) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay copy n=%u\n",
+                    (u64)jl_copy_n);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!jl_ring_revoked(home1)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay ring miss\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        /* Crash window: COMMIT+copies durable, SB idle lost; both homes torn. */
+        jl_flags = JL_META_PENDING;
+        jl_gen = g;
+        if (!sb_write_counts(0xFFFF)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay pending stamp\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < sb.block_size; i++) blk_buf[i] = 0xA5;
+        if (!bwrite(home0, blk_buf) || !bwrite(home1, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-replay corrupt\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        drivers.blk_flush();
+        if (!jl_try_commit_recover()) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware recover\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_flags != JL_IDLE) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware recover idle\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(home0, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware reread0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) {
+            if (blk_buf[i] != expect0[i]) {
+                kprintf("[EXT2] [FAIL] journal revoke-aware home0 mismatch\n");
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        if (!bread(home1, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware reread1\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) {
+            if (blk_buf[i] != 0xA5) {
+                kprintf("[EXT2] [FAIL] journal revoke-aware home1 restored\n");
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        /* Repair home1 (inode bitmap) so later FS ops stay healthy. */
+        if (!bread(jl_copy_blks[1], blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware repair bread\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bwrite(home1, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal revoke-aware repair write\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal revoke-aware meta-copy replay\n");
     }
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to
