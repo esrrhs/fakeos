@@ -1514,6 +1514,15 @@ any of `-nbs`). Glued `-nbs` ok. No new `/bin` dent. Focused virtio login
 smoke covers `cat -s` / `-ns` + prior greens including grep -l/-L
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## kill -l — landed
+
+`/bin/kill -l` lists signal names 1..31 (thin table: HUP..SYS) or resolves
+`SIGNUM`↔`NAME`/`SIGNAME` (case-insensitive). Existing `kill [-SIG] PID…`
+unchanged. Shell builtin `kill -l` forks/`execve`s `/bin/kill` so the table
+stays in one place. No new `/bin` dent. Focused virtio login smoke covers
+`kill -l` / `-l 15` / `-l TERM` + prior greens (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1521,8 +1530,7 @@ smoke covers `cat -s` / `-ns` + prior greens including grep -l/-L
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `kill -l`, or other util flags / thin `/bin`
-   with dent room (`set --` still deferred; skip large `getopts` /
-   here-doc / trap / `fc` / `bind` / `=~` / `select` / `coproc`;
-   `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags / thin `/bin` with dent
+   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
+   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
+   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

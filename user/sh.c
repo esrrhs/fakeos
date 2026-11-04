@@ -2668,7 +2668,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "fg", "fg [%N]" },
     { "bg", "bg [%N]" },
     { "wait", "wait [PID|%N]" },
-    { "kill", "kill [-SIG] PID..." },
+    { "kill", "kill [-l [SIG]...] | [-SIG] PID..." },
     { "shift", "shift [N]" },
     { "local", "local [-rx] NAME[=VALUE]..." },
     { "return", "return [N]" },
@@ -4175,15 +4175,45 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return rc;
     }
     if (eq(tokens[0], "kill")) {
+        /* kill -l … → /bin/kill (signal name table lives there).
+         * kill [-SIG] PID → thin builtin send. */
         long pid;
         long sig = 15; /* SIGTERM */
         int ai = 1;
+        if (tokens[1] != 0 && eq(tokens[1], "-l")) {
+            char *av[8];
+            int n = 0;
+            int k;
+            long child;
+            long st = 0;
+            long reaped;
+            av[n++] = "/bin/kill";
+            for (k = 1; tokens[k] != 0 && n < 7; k++) av[n++] = tokens[k];
+            av[n] = 0;
+            child = u_fork();
+            if (child < 0) {
+                puts("sh: kill: fork failed");
+                pop_redirects(saved_in, saved_out);
+                return 1;
+            }
+            if (child == 0) {
+                if (u_execve("/bin/kill", av, sh_build_envp()) < 0) {
+                    puts("sh: kill: /bin/kill missing");
+                    u_exit(127);
+                }
+                u_exit(127);
+            }
+            reaped = u_wait4(child, &st, 0, 0);
+            pop_redirects(saved_in, saved_out);
+            if (reaped != child) return 1;
+            return status_exit(st);
+        }
         if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[2] != 0) {
             sig = strtol_dec(tokens[1] + 1);
             ai = 2;
         }
         if (tokens[ai] == 0) {
-            puts("sh: kill: usage: kill [-SIG] PID");
+            puts("sh: kill: usage: kill [-l [SIG]...] | [-SIG] PID");
             return 1;
         }
         pid = strtol_dec(tokens[ai]);
