@@ -1575,6 +1575,13 @@ exit nonzero on any failure. Generate mode unchanged. No new `/bin` dent.
 Focused virtio login smoke covers `-c` OK/FAILED + prior greens including
 ls -1/-F (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## sha1sum -c — landed
+
+`/bin/sha1sum -c` mirrors md5/sha256 check mode (40-hex DIGEST lines;
+`PATH: OK` / `FAILED`). Generate mode unchanged. No new `/bin` dent.
+Focused virtio login smoke covers `sha1sum -c` + prior greens including
+md5/sha256 -c (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1583,7 +1590,6 @@ ls -1/-F (smp 1/2). Ramfs `/bin` dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags / thin `/bin` with dent
-   room (`sha1sum -c` optional mirror; `set --` still deferred; skip large
-   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
-   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
+   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
+   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
