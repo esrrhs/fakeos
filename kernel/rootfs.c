@@ -218,6 +218,8 @@ extern char user_arch_start;
 extern char user_arch_end;
 extern char user_time_start;
 extern char user_time_end;
+extern char user_watch_start;
+extern char user_watch_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -438,6 +440,7 @@ void rootfs_publish(void) {
     publish_one("/bin/nice", (u64)(&user_nice_start), (u64)(&user_nice_end));
     publish_one("/bin/arch", (u64)(&user_arch_start), (u64)(&user_arch_end));
     publish_one("/bin/time", (u64)(&user_time_start), (u64)(&user_time_end));
+    publish_one("/bin/watch", (u64)(&user_watch_start), (u64)(&user_watch_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));

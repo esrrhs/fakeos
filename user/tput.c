@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (strcmp(argv[1], "clear") == 0) {
-        u_write(1, "\033[2J\033[H", 11);
+        u_write(1, "\033[2J\033[H", 7);
         return 0;
     }
     if (strcmp(argv[1], "cup") == 0) {

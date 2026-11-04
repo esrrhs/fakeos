@@ -1547,7 +1547,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "clear")) {
         /* ANSI clear for serial; VGA users still see history (no userspace VGA). */
-        u_write(1, "\033[2J\033[H", 11);
+        u_write(1, "\033[2J\033[H", 7);
         return 0;
     }
     if (eq(tokens[0], "break")) {

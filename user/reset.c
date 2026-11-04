@@ -44,6 +44,6 @@ int main(int argc, char **argv) {
     tio[17 + 10] = 0x1A;
     /* Best-effort: ignore TCSETS failure (e.g. redirected stdin). */
     u_ioctl(0, (unsigned long)TCSETS, (unsigned long)tio);
-    u_write(1, "\033[2J\033[H", 11);
+    u_write(1, "\033[2J\033[H", 7);
     return 0;
 }

@@ -1026,14 +1026,13 @@ Ramfs `/bin` dents ~107/128.
 `ioctl(TIOCGWINSZ)` returns fixed VGA 80×25 (no SIGWINCH). `/bin/stty`
 (`size|sane|echo|-echo|raw|-raw|[-a]`), `/bin/tput` (`cols|lines|clear|cup`),
 `/bin/reset` (sane + ANSI clear). Ramfs `/bin` dents ~110/128. Focused virtio
-login smoke green on smp 1/2. `watch` still deferred.
+login smoke green on smp 1/2. Prefer `/bin/watch` next if bite-sized.
 
 ## shell until/elif/break/continue — landed
 
 Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
 still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
-`df`, `touch -r|-d`, `mkfifo` deferred. `watch` deferred. Left Ext2-redirect
-duplex / multi-nc SMP races, CFS, deep jbd alone.
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc SMP races, CFS, deep jbd alone.
 
 Forms: `until LIST; do LIST; done` (invert of while), `if`…`elif`…`then`…
 `[else …]` `fi`, builtins `break`/`continue` (error outside loops).
@@ -1048,8 +1047,7 @@ covers until / elif chain / break+continue in for|while / Ext2 prior greens
 
 Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
 still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
-`df`, `touch -r|-d`, `mkfifo` deferred. `watch` deferred. Left Ext2-redirect
-duplex / multi-nc SMP races, CFS, deep jbd alone.
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc SMP races, CFS, deep jbd alone.
 
 Forms: `case WORD in PAT) LIST ;; … esac`. Fixed patterns and simple `*`/`?`
 globs (same thin matcher as `find -name`). Alternatives via glued `a|b)` or
@@ -1060,13 +1058,29 @@ matched clause returns last body status. `;;` is two `;` tokens from
 `$VAR` / default `*` / no-match + prior greens (smp 1/2). Ramfs `/bin`
 dents ~110/128.
 
+## /bin/watch — landed
+
+Thin `/bin/watch [-n SEC|-nSEC] COMMAND [ARG...]` (default interval 2s):
+ANSI clear + fork/exec/wait + `nanosleep` loop. COMMAND without `/` resolves
+as `/bin/COMMAND`. Compact argv for `EXEC_MAX_ARGC=8`. No header line; pair
+with `/bin/timeout` in smokes. Also correct ANSI clear write length to 7
+(`ESC[2J ESC[H`) in `watch`/`clear`/`reset`/`tput`/shell builtin (was 11,
+leaking NUL + trailing rodata into the serial console). Inventory: `/proc` still thin — skip
+`ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` — `df`, `touch -r|-d`,
+`mkfifo` deferred. Left Ext2-redirect duplex / multi-nc SMP races, CFS, deep
+jbd alone. Focused virtio login smoke covers `timeout`+`watch -n1` echo +
+prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`case`/`esac` + `until`/`elif`/
-   `break`/`continue` + `for`/`while`/`if` + stty/tput/reset + …): prefer
-   small coherent chunks. `/bin/watch` only if bite-sized. Keep
+3. More daily-driver gaps after inventory (`watch` + `case`/`esac` +
+   `until`/`elif`/`break`/`continue` + `for`/`while`/`if` + stty/tput/reset
+   + …): prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish after inventory: `printf %o` ( `%x` already),
+   shell `export -n` / `type` / `command -v` / `hash` / `read` builtin if
+   missing; skip large `getopts` / here-doc. Leave Ext2 duplex / multi-nc /
+   CFS / jbd alone.
