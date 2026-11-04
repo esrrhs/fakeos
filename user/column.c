@@ -1,10 +1,15 @@
-/* fakeos userland - column: table layout (thin).
- * Forms: column -t [-s SEP|-sSEP] [-o OSEP|-oOSEP] [FILE...]
- * -t required: determine column widths and pad fields into a table.
+/* fakeos userland - column: table + fill layout (thin).
+ * Forms:
+ *   column -t [-s SEP|-sSEP] [-o OSEP|-oOSEP] [FILE...]
+ *   column [-c WIDTH|-cWIDTH] [FILE...]
+ * -t: size columns from input and pad fields into a table.
  * Default field split is runs of spaces/tabs. -s SEP treats each character
  * in SEP as a separator (empty fields kept). -o OSEP sets the output
- * column separator (default two spaces). Glued -sSEP/-oOSEP/-toOSEP keep
- * argv under EXEC_MAX_ARGC=8. stdin if no FILE. Bounded: MAX_LINES x MAX_COLS.
+ * column separator (default two spaces).
+ * Without -t: fill mode — whitespace words arranged column-major into a
+ * grid that fits -c WIDTH (default 80); two spaces between columns.
+ * Glued -sSEP/-oOSEP/-toOSEP/-cN keep argv under EXEC_MAX_ARGC=8.
+ * stdin if no FILE. Bounded: MAX_LINES x MAX_COLS / MAX_WORDS.
  */
 package user;
 
@@ -19,12 +24,14 @@ enum {
     LINE_MAX = 256,
     MAX_LINES = 128,
     MAX_COLS = 16,
-    FIELD_MAX = 64
+    FIELD_MAX = 64,
+    MAX_WORDS = 256
 };
 
 static int table_mode;
 static const char *sep = 0; /* NULL => whitespace runs */
 static const char *out_sep = "  "; /* between columns on output */
+static int out_width = 80; /* fill-mode output width (-c) */
 
 static char lines[MAX_LINES][LINE_MAX];
 static int nlines;
@@ -33,8 +40,11 @@ static int ncols_row[MAX_LINES];
 static int col_width[MAX_COLS];
 static int max_cols;
 
+static char words[MAX_WORDS][FIELD_MAX];
+static int nwords;
+
 static void usage(void) {
-    u_write(2, "usage: column -t [-s SEP] [-o OSEP] [FILE...]\n", 48);
+    u_write(2, "usage: column [-t [-s SEP] [-o OSEP] | -c WIDTH] [FILE...]\n", 59);
 }
 
 static int is_ws(char c) {
@@ -47,6 +57,20 @@ static int is_sep_char(char c) {
     for (i = 0; sep[i]; i++) {
         if (sep[i] == c) return 1;
     }
+    return 0;
+}
+
+static int parse_pos(const char *s, int *out) {
+    int v = 0;
+    int i = 0;
+    if (!s || !s[0]) return 1;
+    for (; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        v = v * 10 + (s[i] - '0');
+        if (v > 4096) return 1;
+    }
+    if (v < 1) return 1;
+    *out = v;
     return 0;
 }
 
@@ -131,6 +155,27 @@ static int load_fd(long fd) {
     return n < 0 ? 1 : 0;
 }
 
+static void collect_words(void) {
+    int r, i, fi;
+    nwords = 0;
+    for (r = 0; r < nlines; r++) {
+        const char *s = lines[r];
+        i = 0;
+        while (s[i]) {
+            while (is_ws(s[i])) i++;
+            if (!s[i]) break;
+            if (nwords >= MAX_WORDS) return;
+            fi = 0;
+            while (s[i] && !is_ws(s[i])) {
+                if (fi < FIELD_MAX - 1) words[nwords][fi++] = s[i];
+                i++;
+            }
+            words[nwords][fi] = 0;
+            nwords++;
+        }
+    }
+}
+
 static void emit_table(void) {
     int r, c, k;
     int w;
@@ -163,11 +208,53 @@ static void emit_table(void) {
     }
 }
 
+/* Column-major fill: down each column, then next. Two spaces between cols. */
+static void emit_fill(void) {
+    int maxlen = 0;
+    int ncols, nrows;
+    int r, c, k, idx;
+    int w;
+
+    collect_words();
+    if (nwords == 0) return;
+    for (k = 0; k < nwords; k++) {
+        w = (int)strlen(words[k]);
+        if (w > maxlen) maxlen = w;
+    }
+    if (maxlen < 1) maxlen = 1;
+    /* cell = word + two inter-column spaces; last col needs no trailing gap */
+    ncols = (out_width + 2) / (maxlen + 2);
+    if (ncols < 1) ncols = 1;
+    if (ncols > nwords) ncols = nwords;
+    nrows = (nwords + ncols - 1) / ncols;
+
+    for (r = 0; r < nrows; r++) {
+        for (c = 0; c < ncols; c++) {
+            idx = c * nrows + r;
+            if (idx >= nwords) {
+                /* no more words in this / later cols for this row */
+                break;
+            }
+            w = (int)strlen(words[idx]);
+            if (w > 0) u_write(1, words[idx], (unsigned long)w);
+            if (c + 1 < ncols && (c + 1) * nrows + r < nwords) {
+                int pad = maxlen - w;
+                if (pad < 0) pad = 0;
+                for (k = 0; k < pad; k++) u_write(1, " ", 1);
+                u_write(1, "  ", 2);
+            }
+        }
+        u_write(1, "\n", 1);
+    }
+}
+
 static int column_fd(long fd) {
     nlines = 0;
     max_cols = 0;
+    nwords = 0;
     if (load_fd(fd) != 0) return 1;
-    emit_table();
+    if (table_mode) emit_table();
+    else emit_fill();
     return 0;
 }
 
@@ -186,6 +273,12 @@ int main(int argc, char **argv) {
             i++;
             continue;
         }
+        if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            if (parse_pos(argv[i + 1], &out_width) != 0) { usage(); return 1; }
+            i += 2;
+            continue;
+        }
         if (strcmp(argv[i], "-s") == 0) {
             if (i + 1 >= argc) { usage(); return 1; }
             sep = argv[i + 1];
@@ -198,6 +291,11 @@ int main(int argc, char **argv) {
             i += 2;
             continue;
         }
+        if (argv[i][1] == 'c' && argv[i][2] != 0) {
+            if (parse_pos(argv[i] + 2, &out_width) != 0) { usage(); return 1; }
+            i++;
+            continue;
+        }
         if (argv[i][1] == 's' && argv[i][2] != 0) {
             sep = argv[i] + 2;
             i++;
@@ -208,7 +306,7 @@ int main(int argc, char **argv) {
             i++;
             continue;
         }
-        /* combined -ts / -tsSEP / -to / -toOSEP / -tso... */
+        /* combined -ts / -tsSEP / -to / -toOSEP */
         if (argv[i][1] == 't') {
             int j = 2;
             table_mode = 1;
@@ -247,10 +345,7 @@ int main(int argc, char **argv) {
         continue;
     }
 
-    if (!table_mode) {
-        usage();
-        return 1;
-    }
+    /* fill mode is default; -t selects table. -s/-o without -t still ok (ignored). */
 
     if (i >= argc) {
         return column_fd(0);
