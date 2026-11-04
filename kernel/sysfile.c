@@ -716,6 +716,222 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     return done;
 }
 
+/* Linux x86-64 struct stat is 144 bytes. Offsets:
+ *   0 st_dev, 8 st_ino, 16 st_nlink, 24 st_mode, 28 st_uid, 32 st_gid,
+ *   36 pad, 40 st_rdev, 48 st_size, 56 st_blksize, 64 st_blocks,
+ *   72..112 timespecs, 120 reserved. */
+enum {
+    STAT_SIZE = 144,
+    AT_FDCWD_U = 0xFFFFFF9C, /* -100 */
+    AT_EMPTY_PATH = 0x1000,
+    AT_SYMLINK_NOFOLLOW = 0x100,
+    S_IFIFO = 0x1000,
+    S_IFCHR = 0x2000,
+    S_IFDIR = 0x4000,
+    S_IFREG = 0x8000,
+    S_IFSOCK = 0xC000
+};
+
+static void kstat_zero(char *k) {
+    u32 i;
+    for (i = 0; i < STAT_SIZE; i++) {
+        k[i] = 0;
+    }
+}
+
+static void kstat_put_u32(char *k, u32 off, u32 v) {
+    k[off] = (char)(v & 0xFF);
+    k[off + 1] = (char)((v >> 8) & 0xFF);
+    k[off + 2] = (char)((v >> 16) & 0xFF);
+    k[off + 3] = (char)((v >> 24) & 0xFF);
+}
+
+static void kstat_put_u64(char *k, u32 off, u64 v) {
+    u32 i;
+    for (i = 0; i < 8; i++) {
+        k[off + i] = (char)((v >> (8 * i)) & 0xFF);
+    }
+}
+
+static void kstat_fill(char *k, u64 ino, u32 mode, u64 size, u64 rdev, u32 nlink) {
+    u64 blocks;
+    kstat_zero(k);
+    kstat_put_u64(k, 0, 1);                      /* st_dev: fake major */
+    kstat_put_u64(k, 8, ino);
+    kstat_put_u64(k, 16, (u64)nlink);
+    kstat_put_u32(k, 24, mode);
+    kstat_put_u32(k, 28, 0);                     /* uid */
+    kstat_put_u32(k, 32, 0);                     /* gid */
+    kstat_put_u64(k, 40, rdev);
+    kstat_put_u64(k, 48, size);
+    kstat_put_u64(k, 56, 4096);                  /* blksize */
+    blocks = (size + 511) / 512;
+    kstat_put_u64(k, 64, blocks);
+}
+
+static u32 copy_kstat_to_user(u64 ubuf, const char *k) {
+    u64 as = sched_current_as_h();
+    u32 i;
+    if (as == 0 || ubuf == 0 || !mem.as_user_range_ok(as, ubuf, STAT_SIZE)) {
+        return 0;
+    }
+    {
+        volatile char *u = (volatile char *)ubuf;
+        for (i = 0; i < STAT_SIZE; i++) {
+            u[i] = k[i];
+        }
+    }
+    return 1;
+}
+
+/* Populate kstat for a kernel open-file handle (ramfs/ext2/pipe/sock). */
+static u32 kstat_from_fh(u32 fh, char *k) {
+    u32 ino = 0;
+    u32 mode = 0;
+    u64 size = 0;
+    u32 rdev = 0;
+    u32 nlink = 1;
+    if (fh == FD_BAD) {
+        return 0;
+    }
+    if (pipe_fh_is(fh)) {
+        kstat_fill(k, (u64)fh, S_IFIFO | 0x1B6, 0, 0, 1);
+        return 1;
+    }
+    if (sock_fh_is(fh)) {
+        kstat_fill(k, (u64)fh, S_IFSOCK | 0x1B6, 0, 0, 1);
+        return 1;
+    }
+    if (fs.ext2_fh_is(fh)) {
+        if (!fs.ext2_fstat(fh, &ino, &mode, &size, &nlink)) {
+            return 0;
+        }
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        return 1;
+    }
+    ino = fs.fs_file_ino(fh);
+    if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
+        return 0;
+    }
+    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
+    return 1;
+}
+
+static u32 kstat_from_path(const char *path, char *k) {
+    u32 ino = 0;
+    u32 mode = 0;
+    u64 size = 0;
+    u32 rdev = 0;
+    u32 nlink = 1;
+    if (path == 0) {
+        return 0;
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted()) {
+            return 0;
+        }
+        if (!fs.ext2_stat_path(path, &ino, &mode, &size, &nlink)) {
+            return 0;
+        }
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        return 1;
+    }
+    ino = fs.fs_lookup(path);
+    if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
+        return 0;
+    }
+    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
+    return 1;
+}
+
+u64 sys_fstat(u64 fd, u64 ustat) {
+    u32 fh = sched_fd_get((u32)fd);
+    char k[STAT_SIZE];
+    if (fh == FD_BAD) {
+        return (u64)(-1);
+    }
+    if (!kstat_from_fh(fh, k)) {
+        return (u64)(-1);
+    }
+    return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+}
+
+u64 sys_stat(u64 upath, u64 ustat) {
+    char path[PATH_KMAX];
+    char k[STAT_SIZE];
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (!kstat_from_path(path, k)) {
+        return (u64)(-1);
+    }
+    return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+}
+
+/* newfstatat(dfd, path, statbuf, flags): AT_FDCWD + cwd-relative paths,
+ * AT_EMPTY_PATH on a real fd, and relative names under a directory fd. */
+u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
+    char rel[PATH_KMAX];
+    char path[PATH_KMAX];
+    char k[STAT_SIZE];
+    u32 fh;
+    u32 ino;
+    u32 mode;
+    u64 size;
+    u32 rdev;
+    u32 nlink;
+    (void)flags;                     /* no symlinks: NOFOLLOW is a no-op */
+
+    if ((flags & (u64)AT_EMPTY_PATH) != 0) {
+        /* May have empty path: fstat(dfd). */
+        if (!copy_user_cstring(rel, upath, PATH_KMAX - 1)) {
+            return (u64)(-1);
+        }
+        if (rel[0] == 0) {
+            return sys_fstat(dfd, ustat);
+        }
+    }
+
+    if ((u32)dfd == AT_FDCWD_U) {
+        return sys_stat(upath, ustat);
+    }
+
+    if (!copy_user_cstring(rel, upath, PATH_KMAX - 1)) {
+        return (u64)(-1);
+    }
+    if (rel[0] == '/') {
+        /* Absolute path ignores dfd. */
+        if (!canon_path("/", rel, path, PATH_KMAX)) {
+            return (u64)(-1);
+        }
+        if (!kstat_from_path(path, k)) {
+            return (u64)(-1);
+        }
+        return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+    }
+
+    fh = sched_fd_get((u32)dfd);
+    if (fh == FD_BAD || pipe_fh_is(fh) || sock_fh_is(fh)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_fh_is(fh)) {
+        if (!fs.ext2_stat_at(fh, rel, &ino, &mode, &size, &nlink)) {
+            return (u64)(-1);
+        }
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+    }
+    if (!fs.fs_file_is_dir(fh)) {
+        return (u64)(-1);
+    }
+    ino = fs.fs_lookup_at(fs.fs_file_ino(fh), rel);
+    if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
+        return (u64)(-1);
+    }
+    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
+    return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+}
+
 u64 sys_sync(void) {
     if (fs.ext2_mounted()) {
         fs.ext2_sync();

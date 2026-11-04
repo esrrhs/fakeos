@@ -152,6 +152,7 @@ def second_boot_checks(disk):
         "fakeos:",
         "Welcome root",
         "hello from /bin/hello",
+        "-rw-r--r--",
         "exited (code 42)",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -216,6 +217,7 @@ def main():
         "pwd",              # getcwd -> /home
         "cd ..",
         "ls /bin",          # getdents64, programs including kbuild/ldfake
+        "ls -l /bin",       # fstatat mode/size listing
         "mkdir /home",      # duplicate -> error, shell survives
         "nosuchcmd",        # exec failure -> 127 + not found
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
@@ -337,6 +339,7 @@ def main():
         "[PASS] MAP_SHARED anon",
         "[U][PASS] POSIX shm_open/mmap/unlink",
         "[U][PASS] /dev/null /dev/zero /dev/tty",
+        "[U][PASS] stat/fstat/newfstatat",
         "[U][PASS] futex WAIT/WAKE",
         "[U][PASS] pthread_mutex futex lock/unlock",
         "[U][PASS] pthread_create clone same-AS",

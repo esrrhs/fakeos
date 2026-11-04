@@ -59,6 +59,9 @@ extern u64 sys_chdir(u64 upath);
 extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
 extern u64 sys_ftruncate(u64 fd, u64 length);
+extern u64 sys_stat(u64 upath, u64 ustat);
+extern u64 sys_fstat(u64 fd, u64 ustat);
+extern u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags);
 
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
@@ -181,6 +184,10 @@ enum {
     SC_RT_SIGRETURN = 15,
     SC_NICE = 89,
     SC_FTRUNCATE = 77,
+    SC_STAT = 4,
+    SC_FSTAT = 5,
+    SC_LSTAT = 6,
+    SC_NEWFSTATAT = 262,
     SC_ARCH_PRCTL = 158,
     SC_SET_TID_ADDRESS = 218
 };
@@ -407,6 +414,15 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_FTRUNCATE) {
         return sys_ftruncate(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_STAT || f->rax == SC_LSTAT) {
+        return sys_stat(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_FSTAT) {
+        return sys_fstat(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NEWFSTATAT) {
+        return sys_newfstatat(f->rdi, f->rsi, f->rdx, f->r10);
     }
     if (f->rax == SC_CHMOD) {
         return sys_chmod(f->rdi, f->rsi);

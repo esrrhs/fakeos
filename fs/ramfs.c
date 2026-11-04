@@ -196,11 +196,17 @@ static u32 dir_add(u32 dir_ino, const char *name, u32 n, u32 child) {
 
 /* Absolute path lookup. Empty components (leading/double/trailing slash),
  * "." and ".." are honored. Returns inode number or 0 on any failure. */
-static u32 walk_lookup(const char *path) {
-    u32 cur = ROOT_INO;
+/* Walk components of `path` starting at `cur`. Absolute paths that begin
+ * with '/' still walk from ROOT_INO when cur is ROOT_INO; callers that pass
+ * a directory inode feed a relative path (no leading slash required). */
+static u32 walk_lookup_from(u32 cur, const char *path) {
     u32 i = 0;
-    if (path == 0 || path[0] != '/') {
+    if (path == 0 || cur == 0 || cur >= MAX_INODES
+        || inodes[cur].type == INO_FREE) {
         return 0;
+    }
+    if (path[0] == '/') {
+        cur = ROOT_INO;
     }
     while (path[i] != 0) {
         u32 n;
@@ -232,6 +238,13 @@ static u32 walk_lookup(const char *path) {
         i += n;
     }
     return cur;
+}
+
+static u32 walk_lookup(const char *path) {
+    if (path == 0 || path[0] != '/') {
+        return 0;
+    }
+    return walk_lookup_from(ROOT_INO, path);
 }
 
 /* Split path into parent directory + final component, creating missing
@@ -402,6 +415,18 @@ u32 fs_publish_file(const char *path, u64 kva, u64 size) {
 u32 fs_lookup(const char *path) {
     u32 ino = walk_lookup(path);
     return ino;
+}
+
+/* Resolve `rel` relative to directory inode `dir_ino` ("" / "." => dir). */
+u32 fs_lookup_at(u32 dir_ino, const char *rel) {
+    if (dir_ino == 0 || dir_ino >= MAX_INODES
+        || inodes[dir_ino].type != INO_DIR) {
+        return 0;
+    }
+    if (rel == 0 || rel[0] == 0 || (rel[0] == '.' && rel[1] == 0)) {
+        return dir_ino;
+    }
+    return walk_lookup_from(dir_ino, rel);
 }
 
 /* Create a dynamic writable file (fail if the name already exists). */
@@ -1095,4 +1120,60 @@ u32 fs_ino_count(void) {
         }
     }
     return n;
+}
+
+/* Fill Linux-ish mode/size/rdev for a ramfs inode. Returns 0 on failure.
+ * mode already includes S_IFxxx | permission bits; rdev is major/minor for
+ * char devices (null/zero/tty), else 0. */
+u32 fs_stat_ino(u32 ino, u32 *mode_out, u64 *size_out, u32 *rdev_out,
+                u32 *nlink_out) {
+    u32 mode;
+    u32 rdev;
+    u32 nlink;
+    u64 size;
+    u32 t;
+    if (ino == 0 || ino >= MAX_INODES) {
+        return 0;
+    }
+    t = inodes[ino].type;
+    if (t == INO_FREE) {
+        return 0;
+    }
+    size = inodes[ino].size;
+    rdev = 0;
+    nlink = 1;
+    if (t == INO_DIR) {
+        mode = 0x41ED;               /* S_IFDIR | 0755 */
+        nlink = inodes[ino].ndent + 2;
+        size = 0;
+    } else if (t == INO_FILE) {
+        mode = 0x81A4;               /* S_IFREG | 0644 */
+    } else if (t == INO_CONSOLE) {
+        mode = 0x21B6;               /* S_IFCHR | 0666 */
+        rdev = (5 << 8) | 0;         /* tty-ish */
+        size = 0;
+    } else if (t == INO_NULL) {
+        mode = 0x21B6;
+        rdev = (1 << 8) | 3;         /* /dev/null */
+        size = 0;
+    } else if (t == INO_ZERO) {
+        mode = 0x21B6;
+        rdev = (1 << 8) | 5;         /* /dev/zero */
+        size = 0;
+    } else {
+        return 0;
+    }
+    if (mode_out) {
+        *mode_out = mode;
+    }
+    if (size_out) {
+        *size_out = size;
+    }
+    if (rdev_out) {
+        *rdev_out = rdev;
+    }
+    if (nlink_out) {
+        *nlink_out = nlink;
+    }
+    return 1;
 }

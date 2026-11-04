@@ -59,6 +59,10 @@ global u_rt_sigaction
 global u_rt_sigreturn
 global u_sig_restorer
 global u_ftruncate
+global u_stat
+global u_fstat
+global u_lstat
+global u_newfstatat
 global u_futex
 global u_gettid
 global u_clone
@@ -299,6 +303,24 @@ u_rt_sigreturn:
 
 ; long u_ftruncate(long fd, unsigned long length)
 USYSC1 u_ftruncate, 77
+
+; long u_stat(const char *path, void *statbuf) -- Linux nr 4
+USYSC1 u_stat, 4
+
+; long u_fstat(long fd, void *statbuf) -- Linux nr 5
+USYSC1 u_fstat, 5
+
+; long u_lstat(const char *path, void *statbuf) -- Linux nr 6 (no symlinks)
+USYSC1 u_lstat, 6
+
+; long u_newfstatat(long dfd, const char *path, void *statbuf, long flags)
+; 4th C arg RCX -> R10
+align 16
+u_newfstatat:
+    mov     r10, rcx
+    mov     eax, 262
+    syscall
+    ret
 
 ; long u_gettid(void)
 USYSC1 u_gettid, 186

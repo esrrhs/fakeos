@@ -72,12 +72,19 @@ unmap). `mprotect(2)` (nr 10) changes VMA prot with munmap-style splits and
 updates present leaf PTEs (COW-shared private pages stay RO until write fault).
 Init smokes: `[U][PASS] file MAP_FIXED mmap` / `mprotect RO/RW`.
 
+## stat / fstat / newfstatat — landed
+
+Linux x86-64 `struct stat` (144 bytes) via `stat(4)` / `fstat(5)` / `lstat(6)` /
+`newfstatat(262)`. Ramfs fills mode/size/rdev for files/dirs/char nodes;
+Ext2 reads on-disk mode/size/nlink; pipes → `S_IFIFO`, sockets → `S_IFSOCK`.
+`newfstatat` covers `AT_FDCWD`, relative names under a directory fd, and
+`AT_EMPTY_PATH`. `ls -l` uses `fstatat(dirfd, name)` for mode/size. Init smoke:
+`[U][PASS] stat/fstat/newfstatat`.
+
 ## Suggested next steps
 
-1. Richer mmap POSIX leftovers (MAP_FIXED replace/unmap-overlap, PROT_NONE,
-   partial mprotect stress, hint-addr without FIXED) — when needed.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
-
-Until then, Makefile default keeps `disable-modern=on` for blk and net; use
-`make qemu-modern` to exercise the MMIO + MSI-X path.
+1. PROT_NONE + mmap addr hint (+ optional MAP_FIXED replace) — small follow-on.
+2. /proc/self/{status,maps,cmdline} — partial /proc already (environ).
+3. nanosleep / clock_gettime / getppid/uname — interactive POSIX basics.
+4. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+5. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).

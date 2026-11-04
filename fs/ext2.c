@@ -1518,11 +1518,11 @@ static u32 dir_remove(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
     return 0;
 }
 
-/* Walk a path relative to the Ext2 root. Leading slashes ignored. */
-static u32 walk_rel(const char *rel, u32 *is_dir) {
-    u32 cur = EXT2_ROOT_INO;
+/* Walk a path relative to start_ino. Leading slashes ignored. */
+static u32 walk_rel_from(u32 start_ino, const char *rel, u32 *is_dir) {
+    u32 cur = start_ino;
     u32 i = 0;
-    if (rel == 0) return 0;
+    if (rel == 0 || cur == 0) return 0;
     while (rel[i] != 0) {
         u32 n;
         u32 nxt;
@@ -1548,6 +1548,11 @@ static u32 walk_rel(const char *rel, u32 *is_dir) {
         *is_dir = ((rd16(ino_raw + I_MODE) & EXT2_S_IFMT) == EXT2_S_IFDIR) ? 1 : 0;
     }
     return cur;
+}
+
+/* Walk a path relative to the Ext2 root. Leading slashes ignored. */
+static u32 walk_rel(const char *rel, u32 *is_dir) {
+    return walk_rel_from(EXT2_ROOT_INO, rel, is_dir);
 }
 
 /* Split "/mnt/foo/bar" -> parent ino of "bar" + name. Creates nothing. */
@@ -1929,6 +1934,69 @@ u32 ext2_fh_ino(u32 fh) {
     s = fh_slot(fh);
     if (s >= MAX_OPEN || !opens[s].used) return 0;
     return opens[s].ino;
+}
+
+/* Path-based Ext2 stat: fills ino/mode/size from the on-disk inode.
+ * Returns 1 on success. */
+u32 ext2_stat_path(const char *path, u32 *ino_out, u32 *mode_out, u64 *size_out,
+                   u32 *nlink_out) {
+    const char *rel;
+    u32 ino;
+    u8 raw[128];
+    if (!sb.mounted || path == 0) return 0;
+    rel = persist_rel(path);
+    if (rel == 0) return 0;
+    ino = walk_rel(rel, 0);
+    if (ino == 0) return 0;
+    if (!inode_read(ino, raw)) return 0;
+    if (ino_out) *ino_out = ino;
+    if (mode_out) *mode_out = rd16(raw + I_MODE);
+    if (size_out) *size_out = rd32(raw + I_SIZE_LO);
+    if (nlink_out) *nlink_out = rd16(raw + I_LINKS);
+    return 1;
+}
+
+/* fstat for an Ext2 open handle (refreshes size from disk). */
+u32 ext2_fstat(u32 fh, u32 *ino_out, u32 *mode_out, u64 *size_out,
+               u32 *nlink_out) {
+    u32 s;
+    u8 raw[128];
+    if (!ext2_fh_is(fh)) return 0;
+    s = fh_slot(fh);
+    if (s >= MAX_OPEN || !opens[s].used) return 0;
+    if (!inode_read(opens[s].ino, raw)) return 0;
+    opens[s].mode = rd16(raw + I_MODE);
+    opens[s].size = rd32(raw + I_SIZE_LO);
+    if (ino_out) *ino_out = opens[s].ino;
+    if (mode_out) *mode_out = opens[s].mode;
+    if (size_out) *size_out = opens[s].size;
+    if (nlink_out) *nlink_out = rd16(raw + I_LINKS);
+    return 1;
+}
+
+/* Resolve `rel` under an open Ext2 directory handle, then stat. Empty/"."
+ * stats the directory itself. */
+u32 ext2_stat_at(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
+                 u64 *size_out, u32 *nlink_out) {
+    u32 s;
+    u32 ino;
+    u8 raw[128];
+    if (!ext2_fh_is(fh)) return 0;
+    s = fh_slot(fh);
+    if (s >= MAX_OPEN || !opens[s].used) return 0;
+    if ((opens[s].mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
+    if (rel == 0 || rel[0] == 0 || (rel[0] == '.' && rel[1] == 0)) {
+        ino = opens[s].ino;
+    } else {
+        ino = walk_rel_from(opens[s].ino, rel, 0);
+        if (ino == 0) return 0;
+    }
+    if (!inode_read(ino, raw)) return 0;
+    if (ino_out) *ino_out = ino;
+    if (mode_out) *mode_out = rd16(raw + I_MODE);
+    if (size_out) *size_out = rd32(raw + I_SIZE_LO);
+    if (nlink_out) *nlink_out = rd16(raw + I_LINKS);
+    return 1;
 }
 
 /* Read up to `len` bytes from inode at absolute file offset into kbuf.

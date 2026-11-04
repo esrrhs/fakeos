@@ -26,6 +26,9 @@ extern long u_mkdir(const char *path);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
 extern long u_unlink(const char *path);
+extern long u_stat(const char *path, void *statbuf);
+extern long u_fstat(long fd, void *statbuf);
+extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
 extern void *signal(int sig, void *handler);
 extern int sigaction(int sig, void *act, void *oldact);
 extern int shm_open(const char *name, int oflag, unsigned int mode);
@@ -779,6 +782,157 @@ static void shm_test(void) {
     puts("[U][PASS] POSIX shm_open/mmap/unlink");
 }
 
+
+static void stat_test(void) {
+    char st[144];
+    long fd;
+    long n;
+    unsigned int mode;
+    unsigned long size;
+    unsigned long ino;
+    int pipes[2];
+    unsigned long i;
+
+    /* Zero the buffer so stale fields fail loudly. */
+    for (i = 0; i < 144; i++) {
+        st[i] = (char)0xA5;
+    }
+
+    /* stat("/etc/hosts"): regular file with non-zero size. */
+    if (u_stat("/etc/hosts", st) != 0) {
+        puts("[U][FAIL] stat /etc/hosts");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    size = 0;
+    for (i = 0; i < 8; i++) {
+        size |= ((unsigned long)(unsigned char)st[48 + i]) << (8 * i);
+    }
+    ino = 0;
+    for (i = 0; i < 8; i++) {
+        ino |= ((unsigned long)(unsigned char)st[8 + i]) << (8 * i);
+    }
+    if ((mode & 0xF000) != 0x8000 || size == 0 || ino == 0) {
+        puts("[U][FAIL] stat /etc/hosts fields");
+        return;
+    }
+
+    /* fstat on the same file. */
+    fd = u_open("/etc/hosts", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /etc/hosts for fstat");
+        return;
+    }
+    if (u_fstat(fd, st) != 0) {
+        puts("[U][FAIL] fstat /etc/hosts");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* Directory: S_IFDIR. */
+    if (u_stat("/bin", st) != 0) {
+        puts("[U][FAIL] stat /bin");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    if ((mode & 0xF000) != 0x4000) {
+        puts("[U][FAIL] stat /bin not dir");
+        return;
+    }
+
+    /* Char device /dev/null. */
+    if (u_stat("/dev/null", st) != 0) {
+        puts("[U][FAIL] stat /dev/null");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    if ((mode & 0xF000) != 0x2000) {
+        puts("[U][FAIL] stat /dev/null not chr");
+        return;
+    }
+
+    /* newfstatat(dirfd, name): open /etc and stat hosts via dfd. */
+    fd = u_open("/etc", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /etc for fstatat");
+        return;
+    }
+    if (u_newfstatat(fd, "hosts", st, 0) != 0) {
+        puts("[U][FAIL] newfstatat /etc hosts");
+        u_close(fd);
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    size = 0;
+    for (i = 0; i < 8; i++) {
+        size |= ((unsigned long)(unsigned char)st[48 + i]) << (8 * i);
+    }
+    if ((mode & 0xF000) != 0x8000 || size == 0) {
+        puts("[U][FAIL] newfstatat hosts fields");
+        u_close(fd);
+        return;
+    }
+    /* AT_EMPTY_PATH on the dirfd itself. */
+    if (u_newfstatat(fd, "", st, 0x1000) != 0) {
+        puts("[U][FAIL] newfstatat AT_EMPTY_PATH");
+        u_close(fd);
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    if ((mode & 0xF000) != 0x4000) {
+        puts("[U][FAIL] AT_EMPTY_PATH not dir");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* Missing path fails. */
+    if (u_stat("/no/such/stat/path", st) == 0) {
+        puts("[U][FAIL] stat missing should fail");
+        return;
+    }
+
+    /* Pipe: S_IFIFO via fstat. */
+    if (u_pipe(pipes) != 0) {
+        puts("[U][FAIL] pipe for fstat");
+        return;
+    }
+    if (u_fstat(pipes[0], st) != 0) {
+        puts("[U][FAIL] fstat pipe");
+        u_close(pipes[0]);
+        u_close(pipes[1]);
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    u_close(pipes[0]);
+    u_close(pipes[1]);
+    if ((mode & 0xF000) != 0x1000) {
+        puts("[U][FAIL] fstat pipe not fifo");
+        return;
+    }
+
+    puts("[U][PASS] stat/fstat/newfstatat");
+}
+
 static void dev_nodes_test(void) {
     long fd;
     long n;
@@ -1209,6 +1363,7 @@ int main(int argc, char **argv) {
     mmap_test();
     shm_test();
     dev_nodes_test();
+    stat_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();
