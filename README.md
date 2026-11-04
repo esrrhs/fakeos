@@ -340,6 +340,7 @@ flowchart TD
 - [x] **cksum -c**：校验 `CRC LENGTH FILE` 行（对齐 md5sum/sha* `-c`）；开失败带路径；`--` 支持。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **sort -b**：排序键忽略前导空白（可与 `-rnuf`/`-k` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **find -path**：全路径薄 glob（`*`/`?`；与 `-name`/`-iname`/`-type`/depth AND）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **find -prune**：匹配目录不下降（薄 AND；无 `-o`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

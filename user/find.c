@@ -2,10 +2,11 @@
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
- * folds A-Z), -path GLOB (full path *,? only), -type f|d, -print,
- * -maxdepth N, -mindepth N (start points are depth 0; GNU-ish). Uses
- * lstat(2). No -o/parens/actions beyond print. Depth-first. Compact argv
- * for EXEC_MAX_ARGC=8.
+ * folds A-Z), -path GLOB (full path *,? only), -type f|d, -prune (do not
+ * descend into a matched directory), -print, -maxdepth N, -mindepth N
+ * (start points are depth 0; GNU-ish). Uses lstat(2). No -o/parens. Thin
+ * -prune: when predicates match a directory, skip walk_dir. Depth-first.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -44,6 +45,7 @@ static int want_path;
 static char path_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int do_print = 1;
+static int want_prune;
 static int max_depth = DEPTH_UNLIM;
 static int min_depth = 0;
 static int err_rc;
@@ -153,6 +155,7 @@ static int is_primary(const char *a) {
     if (strcmp(a, "-path") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
+    if (strcmp(a, "-prune") == 0) return 1;
     if (strcmp(a, "-maxdepth") == 0) return 1;
     if (strcmp(a, "-mindepth") == 0) return 1;
     return 0;
@@ -233,7 +236,14 @@ static void walk(const char *path, int depth) {
     }
     mode = load_u32(st + ST_MODE);
     if (depth >= min_depth && match_preds(path, mode)) emit(path);
-    if (is_dir_mode(mode) && depth < max_depth) walk_dir(path, depth);
+    if (is_dir_mode(mode) && depth < max_depth) {
+        /* Thin -prune: matched directory is not descended. */
+        if (want_prune && match_preds(path, mode)) {
+            /* skip */
+        } else {
+            walk_dir(path, depth);
+        }
+    }
 }
 
 int main(int argc, char **argv) {
@@ -302,6 +312,11 @@ int main(int argc, char **argv) {
             ai++;
             continue;
         }
+        if (strcmp(argv[ai], "-prune") == 0) {
+            want_prune = 1;
+            ai++;
+            continue;
+        }
         if (strcmp(argv[ai], "-maxdepth") == 0) {
             if (ai + 1 >= argc || !parse_depth(argv[ai + 1], &max_depth)) {
                 u_write(2, "find: -maxdepth needs N\n", 24);
@@ -318,7 +333,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]\n", 98);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-prune] [-maxdepth N] [-mindepth N] [-print]\n", 107);
         return 1;
     }
 

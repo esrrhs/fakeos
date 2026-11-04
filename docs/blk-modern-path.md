@@ -1634,6 +1634,14 @@ glob as `-name` (no casefold). ANDs with `-name`/`-iname`/`-type`/depth.
 No new `/bin` dent. Focused virtio login smoke covers `find -path` + prior
 greens including sort -b (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## find -prune — landed
+
+`/bin/find -prune`: when predicates match a directory, do not descend
+(thin AND model; no `-o`/parens). Matched dirs still print under default
+`-print`. No new `/bin` dent. Focused virtio login smoke covers
+`find -name DIR -prune` + prior greens including find -path (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1641,8 +1649,8 @@ greens including sort -b (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `find -prune` / `ls -R` / `cp -p` / other util
-   flags / thin `/bin` with dent room (`set --` still deferred; skip large
-   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
-   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex
-   / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `ls -R` / `cp -p` (mtime needs utimensat —
+   mode-only is incomplete) / other util flags / thin `/bin` with dent room
+   (`set --` still deferred; skip large `getopts` / here-doc / trap / `fc` /
+   `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need kernel
+   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
