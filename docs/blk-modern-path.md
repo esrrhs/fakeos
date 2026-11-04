@@ -1752,6 +1752,13 @@ Ramfs `/bin` dents ~114/128.
 covers `tee -i` functional copy + prior greens including wc -m (smp 1/2);
 SIGINT ignore not asserted in QEMU smoke. Ramfs `/bin` dents ~114/128.
 
+## paste -z — landed
+
+`/bin/paste -z` uses NUL-terminated records for input and output (GNU-ish;
+pairs with `xargs -0` / `sort -z`). Keeps `-s`/`-d`; glued `-sz`/`-zs`. No
+new `/bin` dent. Focused virtio login smoke covers `paste -z` + prior greens
+including tee -i (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1759,6 +1766,6 @@ SIGINT ignore not asserted in QEMU smoke. Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin`
-   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
-   Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `env -0` / `fold -b` / other util flags on
+   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

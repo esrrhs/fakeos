@@ -1,6 +1,7 @@
 /* fakeos userland - paste: merge lines of files (thin POSIX subset).
- * Forms: paste [-s] [-d LIST] [FILE...]
- * Default delim tab. FILE "-" is stdin (at most one). Compact -dLIST ok.
+ * Forms: paste [-sz] [-d LIST] [FILE...]
+ * Default delim tab. -z NUL-terminated records (input+output). FILE "-" is
+ * stdin (at most one). Compact -dLIST ok. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -18,9 +19,10 @@ enum {
 
 static const char *delim = "\t";
 static int serial; /* -s */
+static int opt_z; /* NUL records */
 
 static void usage(void) {
-    u_write(2, "usage: paste [-s] [-d LIST] [FILE...]\n", 38);
+    u_write(2, "usage: paste [-sz] [-d LIST] [FILE...]\n", 39);
 }
 
 static char next_delim(unsigned long *di) {
@@ -32,8 +34,8 @@ static char next_delim(unsigned long *di) {
     return c;
 }
 
-/* Read one line into out (no newline). Returns 1 ok, 0 EOF, -1 error.
- * empty=1 if line was empty (still counts as a line when terminated by \n). */
+/* Read one record into out (no delimiter). Returns 1 ok, 0 EOF, -1 error.
+ * Default delimiter newline; -z uses NUL. */
 static int read_line(long fd, char *out, int *len_out, int *saw_eol) {
     char c;
     long n;
@@ -46,7 +48,7 @@ static int read_line(long fd, char *out, int *len_out, int *saw_eol) {
             *len_out = li;
             return li > 0 ? 1 : 0;
         }
-        if (c == '\n') {
+        if (opt_z ? (c == 0) : (c == '\n')) {
             *saw_eol = 1;
             out[li] = 0;
             *len_out = li;
@@ -94,7 +96,12 @@ static int paste_parallel(long *fds, int nfds) {
             }
             if (lens[i] > 0) u_write(1, lines[i], (unsigned long)lens[i]);
         }
-        u_write(1, "\n", 1);
+        if (opt_z) {
+            char z = 0;
+            u_write(1, &z, 1);
+        } else {
+            u_write(1, "\n", 1);
+        }
         any = 0;
         for (i = 0; i < nfds; i++) if (alive[i]) any = 1;
     }
@@ -120,7 +127,12 @@ static int paste_serial(long *fds, int nfds) {
             if (len > 0) u_write(1, line, (unsigned long)len);
         }
         if (r < 0) return 1;
-        u_write(1, "\n", 1);
+        if (opt_z) {
+            char z = 0;
+            u_write(1, &z, 1);
+        } else {
+            u_write(1, "\n", 1);
+        }
         di = 0; /* POSIX: delim list restarts per file in -s */
     }
     return 0;
@@ -133,6 +145,10 @@ int main(int argc, char **argv) {
     int rc = 0;
     int stdin_used = 0;
 
+    serial = 0;
+    opt_z = 0;
+    delim = "\t";
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         const char *a = argv[i];
         if (strcmp(a, "--") == 0) {
@@ -141,6 +157,18 @@ int main(int argc, char **argv) {
         }
         if (strcmp(a, "-s") == 0) {
             serial = 1;
+            i++;
+        } else if (strcmp(a, "-z") == 0) {
+            opt_z = 1;
+            i++;
+        } else if (a[1] != 0 && a[2] != 0 && a[1] != 'd') {
+            /* glued short opts: -sz / -zs (and lone letters) */
+            int j;
+            for (j = 1; a[j]; j++) {
+                if (a[j] == 's') serial = 1;
+                else if (a[j] == 'z') opt_z = 1;
+                else { usage(); return 1; }
+            }
             i++;
         } else if (strcmp(a, "-d") == 0) {
             if (i + 1 >= argc) { usage(); return 1; }
