@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
+ * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
  * readlink, realpath, env/export[-n]/unset/which/type/command[-vV]/hash/read/alias/unalias/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg, wait.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -2253,7 +2253,280 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "return") || eq(cmd, "local") || eq(cmd, "shift")
         || eq(cmd, ":") || eq(cmd, "true") || eq(cmd, "false")
         || eq(cmd, "eval") || eq(cmd, "source") || eq(cmd, ".")
-        || eq(cmd, "[[");
+        || eq(cmd, "[[") || eq(cmd, "printf");
+}
+
+/* ---- thin shell printf (mirror /bin/printf; avoid C printf name clash) ---- */
+enum { SPF_PAD_CAP = 128, SPF_FMT = 1024, SPF_NUM = 40 };
+
+static void spf_out_ch(char c) {
+    u_write(1, &c, 1);
+}
+
+static void spf_out_nch(char c, int n) {
+    while (n > 0) {
+        spf_out_ch(c);
+        n--;
+    }
+}
+
+static void spf_out_pad(const char *buf, int len, int width, int left, int zero) {
+    int pad;
+    if (width < 0) width = 0;
+    if (len < 0) len = 0;
+    pad = width - len;
+    if (pad < 0) pad = 0;
+    if (left) {
+        if (len > 0) u_write(1, buf, (unsigned long)len);
+        spf_out_nch(' ', pad);
+    } else if (zero && pad > 0) {
+        int si = 0;
+        if (len > 0 && (buf[0] == '-' || buf[0] == '+')) {
+            spf_out_ch(buf[0]);
+            si = 1;
+            len--;
+        }
+        spf_out_nch('0', pad);
+        if (len > 0) u_write(1, buf + si, (unsigned long)len);
+    } else {
+        spf_out_nch(' ', pad);
+        if (len > 0) u_write(1, buf, (unsigned long)len);
+    }
+}
+
+static int spf_fmt_udec(char *tmp, int cap, u64 v) {
+    char rev[24];
+    int i = 0;
+    int k;
+    int n = 0;
+    if (cap < 2) return 0;
+    if (v == 0) {
+        tmp[0] = '0';
+        tmp[1] = 0;
+        return 1;
+    }
+    while (v > 0 && i < 24) {
+        rev[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = i - 1; k >= 0 && n + 1 < cap; k--) tmp[n++] = rev[k];
+    tmp[n] = 0;
+    return n;
+}
+
+static int spf_fmt_hex(char *tmp, int cap, u64 v, int upper) {
+    const char *d = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    char rev[20];
+    int i = 0;
+    int k;
+    int n = 0;
+    if (cap < 2) return 0;
+    if (v == 0) {
+        tmp[0] = '0';
+        tmp[1] = 0;
+        return 1;
+    }
+    while (v > 0 && i < 20) {
+        rev[i++] = d[v & 0xF];
+        v >>= 4;
+    }
+    for (k = i - 1; k >= 0 && n + 1 < cap; k--) tmp[n++] = rev[k];
+    tmp[n] = 0;
+    return n;
+}
+
+static int spf_fmt_oct(char *tmp, int cap, u64 v) {
+    char rev[24];
+    int i = 0;
+    int k;
+    int n = 0;
+    if (cap < 2) return 0;
+    if (v == 0) {
+        tmp[0] = '0';
+        tmp[1] = 0;
+        return 1;
+    }
+    while (v > 0 && i < 24) {
+        rev[i++] = (char)('0' + (v & 7));
+        v >>= 3;
+    }
+    for (k = i - 1; k >= 0 && n + 1 < cap; k--) tmp[n++] = rev[k];
+    tmp[n] = 0;
+    return n;
+}
+
+static int spf_parse_oct3(const char *s, int *consumed) {
+    int v = 0;
+    int n = 0;
+    while (n < 3 && s[n] >= '0' && s[n] <= '7') {
+        v = (v << 3) + (s[n] - '0');
+        n++;
+    }
+    *consumed = n;
+    return v;
+}
+
+static int spf_expand_escapes(const char *src, char *out, int cap) {
+    int n = 0;
+    int stopped = 0;
+    while (*src && n + 1 < cap) {
+        if (*src != '\\') {
+            out[n++] = *src++;
+            continue;
+        }
+        src++;
+        if (*src == 0) {
+            out[n++] = '\\';
+            break;
+        }
+        if (*src == 'c') {
+            src++;
+            stopped = 1;
+            break;
+        }
+        if (*src == 'n') { out[n++] = '\n'; src++; }
+        else if (*src == 't') { out[n++] = '\t'; src++; }
+        else if (*src == 'r') { out[n++] = '\r'; src++; }
+        else if (*src == 'a') { out[n++] = '\a'; src++; }
+        else if (*src == 'b') { out[n++] = '\b'; src++; }
+        else if (*src == 'f') { out[n++] = '\f'; src++; }
+        else if (*src == 'v') { out[n++] = '\v'; src++; }
+        else if (*src == '\\') { out[n++] = '\\'; src++; }
+        else if (*src == '%') { out[n++] = '%'; src++; }
+        else if (*src >= '0' && *src <= '7') {
+            int cons = 0;
+            int v = spf_parse_oct3(src, &cons);
+            out[n++] = (char)v;
+            src += cons;
+        } else {
+            out[n++] = *src++;
+        }
+    }
+    out[n] = 0;
+    return stopped;
+}
+
+/* args[0]=FORMAT, args[1..]=ARGUMENT…, NULL-terminated. Returns 0. */
+static long sh_do_printf(char **args) {
+    char expanded[SPF_FMT];
+    char bbuf[SPF_FMT];
+    char numbuf[SPF_NUM];
+    const char *fmt;
+    int ai;
+    int i;
+    int argc;
+    int fmt_stop;
+
+    if (args == 0 || args[0] == 0) {
+        return 0;
+    }
+    argc = 0;
+    while (args[argc] != 0) argc++;
+    fmt_stop = spf_expand_escapes(args[0], expanded, SPF_FMT);
+    fmt = expanded;
+    ai = 1;
+
+    for (i = 0; fmt[i]; ) {
+        int left = 0;
+        int zero = 0;
+        int width = 0;
+        char spec;
+
+        if (fmt[i] != '%') {
+            spf_out_ch(fmt[i++]);
+            continue;
+        }
+        i++;
+        if (fmt[i] == 0) {
+            spf_out_ch('%');
+            break;
+        }
+        if (fmt[i] == '%') {
+            spf_out_ch('%');
+            i++;
+            continue;
+        }
+        while (fmt[i] == '-' || fmt[i] == '0') {
+            if (fmt[i] == '-') left = 1;
+            else zero = 1;
+            i++;
+        }
+        if (left) zero = 0;
+        while (fmt[i] >= '0' && fmt[i] <= '9') {
+            width = width * 10 + (fmt[i] - '0');
+            if (width > SPF_PAD_CAP) width = SPF_PAD_CAP;
+            i++;
+        }
+        if (fmt[i] == 0) {
+            spf_out_ch('%');
+            break;
+        }
+        spec = fmt[i++];
+        if (spec == 's') {
+            const char *a = (ai < argc) ? args[ai] : "";
+            int n;
+            if (ai < argc) ai++;
+            if (a == 0) a = "";
+            n = (int)strlen(a);
+            spf_out_pad(a, n, width, left, 0);
+        } else if (spec == 'c') {
+            const char *a = (ai < argc) ? args[ai] : "";
+            char cb[2];
+            if (ai < argc) ai++;
+            cb[0] = a[0];
+            cb[1] = 0;
+            spf_out_pad(cb, a[0] ? 1 : 0, width, left, 0);
+        } else if (spec == 'b') {
+            const char *a = (ai < argc) ? args[ai] : "";
+            int bstop;
+            int n;
+            if (ai < argc) ai++;
+            bstop = spf_expand_escapes(a, bbuf, SPF_FMT);
+            n = (int)strlen(bbuf);
+            spf_out_pad(bbuf, n, width, left, 0);
+            if (bstop) {
+                return 0;
+            }
+        } else if (spec == 'd' || spec == 'i') {
+            long v = 0;
+            const char *a = (ai < argc) ? args[ai] : "0";
+            int neg = 0;
+            int n = 0;
+            if (ai < argc) ai++;
+            if (a[0] == '-') { neg = 1; a++; }
+            v = strtol_dec(a);
+            if (neg) {
+                numbuf[0] = '-';
+                n = 1 + spf_fmt_udec(numbuf + 1, SPF_NUM - 1, (u64)v);
+            } else {
+                n = spf_fmt_udec(numbuf, SPF_NUM, (u64)v);
+            }
+            spf_out_pad(numbuf, n, width, left, zero);
+        } else if (spec == 'u') {
+            const char *a = (ai < argc) ? args[ai] : "0";
+            int n;
+            if (ai < argc) ai++;
+            n = spf_fmt_udec(numbuf, SPF_NUM, (u64)strtol_dec(a));
+            spf_out_pad(numbuf, n, width, left, zero);
+        } else if (spec == 'x' || spec == 'X') {
+            const char *a = (ai < argc) ? args[ai] : "0";
+            int n;
+            if (ai < argc) ai++;
+            n = spf_fmt_hex(numbuf, SPF_NUM, (u64)strtol_dec(a), spec == 'X');
+            spf_out_pad(numbuf, n, width, left, zero);
+        } else if (spec == 'o') {
+            const char *a = (ai < argc) ? args[ai] : "0";
+            int n;
+            if (ai < argc) ai++;
+            n = spf_fmt_oct(numbuf, SPF_NUM, (u64)strtol_dec(a));
+            spf_out_pad(numbuf, n, width, left, zero);
+        } else {
+            spf_out_ch('%');
+            spf_out_ch(spec);
+        }
+    }
+    (void)fmt_stop;
+    return 0;
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -2864,9 +3137,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -4168,6 +4441,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             puts(buf);
             rc = 0;
         }
+    } else if (eq(tokens[0], "printf")) {
+        /* printf FORMAT [ARGUMENT...] — thin mirror of /bin/printf (width/flags). */
+        rc = sh_do_printf(tokens + 1);
     } else if (eq(tokens[0], "echo")) {
         /* echo [-neE] [ARGS...] — -n no newline, -e escapes, -E literal (default). */
         int nonew = 0;
@@ -5845,7 +6121,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
