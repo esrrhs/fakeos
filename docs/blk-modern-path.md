@@ -310,11 +310,24 @@ each differing byte as `POS OCT1 OCT2`; `-` = stdin). `dd [if=FILE] [of=FILE]
 Focused virtio login smoke covers `cmp`/`-s`/`-l`, `dd` if/of/bs/count/skip +
 prior interactive greens (smp 1/2).
 
+
+## /bin/expr + /bin/hostname — landed
+
+Thin coreutils pair for scripting. `expr INTEGER OP INTEGER` supports
+`+ - * / %` and `= != < > <= >=` (integers; string `=`/`!=` when a side is
+non-numeric); `expr length STRING`; `expr ARG` prints ARG. Exit 0 if the
+result is non-zero/non-empty, 1 if zero/empty, 2 on error (`*` must be quoted
+in the shell). `/bin/hostname` prints the `uname(2)` nodename field (no set).
+Focused virtio login smoke covers `expr` arith/length/cmp + `hostname` plus
+prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: other thin coreutils / kernel POSIX after README
-   scan (higher value than deep jbd).
+4. More daily-driver gaps: thin `/bin/echo` (mirror shell -n/-e for xargs),
+   other POSIX coreutils / kernel bits after README scan (higher value than
+   deep jbd). Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless
+   a clear bite-sized fix.
