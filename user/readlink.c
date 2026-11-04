@@ -1,9 +1,10 @@
 /* fakeos userland - readlink: print symlink target (thin; mirrors shell).
- *   readlink [-n] [-f] PATH
- * Default: readlink(2) + trailing newline. -n omits the newline. -f
- * canonicalizes via readlink walks (same algorithm as /bin/realpath);
- * prints the physical path even when PATH is not a symlink. Glued short
- * options (-nf/-fn) accepted. Compact argv for EXEC_MAX_ARGC=8.
+ *   readlink [-n] [-f] [-z] PATH
+ * Default: readlink(2) + trailing newline. -n omits the newline. -z ends
+ * with NUL instead of newline (wins over -n). -f canonicalizes via readlink
+ * walks (same algorithm as /bin/realpath); prints the physical path even
+ * when PATH is not a symlink. Glued short options (-nfz/...) accepted.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -216,7 +217,7 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: readlink [-n] [-f] PATH\n", 31);
+    u_write(2, "usage: readlink [-n] [-f] [-z] PATH\n", 36);
 }
 
 int main(int argc, char **argv) {
@@ -225,6 +226,7 @@ int main(int argc, char **argv) {
     int ai = 1;
     int no_nl = 0;
     int canon = 0;
+    int opt_z = 0;
     const char *path;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
@@ -237,6 +239,7 @@ int main(int argc, char **argv) {
             char o = argv[ai][j];
             if (o == 'n') no_nl = 1;
             else if (o == 'f') canon = 1;
+            else if (o == 'z') opt_z = 1;
             else {
                 usage();
                 return 1;
@@ -267,6 +270,11 @@ int main(int argc, char **argv) {
     }
 
     if (n > 0) u_write(1, buf, (unsigned long)n);
-    if (!no_nl) u_write(1, "\n", 1);
+    if (opt_z) {
+        char z = 0;
+        u_write(1, &z, 1);
+    } else if (!no_nl) {
+        u_write(1, "\n", 1);
+    }
     return 0;
 }

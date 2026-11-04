@@ -1915,6 +1915,13 @@ entries may use getdents `d_ino` on stat failure). Combinable with `-l` and
 other flags. No new `/bin` dent. Focused virtio login smoke covers `ls -i` +
 prior greens including split -d (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## realpath/readlink -z — landed
+
+`/bin/realpath -z` and `/bin/readlink -z` end each result with NUL
+(readlink `-z` wins over `-n`). Pairs with `find -print0` / `xargs -0`.
+No new `/bin` dent. Focused virtio login smoke covers `-z` + prior greens
+including ls -i (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1922,7 +1929,6 @@ prior greens including split -d (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `realpath -z` / `readlink -z` / `column`
-   polish / other util flags on existing `/bin` (`cp -p` waits on utimensat;
-   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS /
-   jbd alone.
+   deferred. Next thin polish: `column` polish / other util flags on existing
+   `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.

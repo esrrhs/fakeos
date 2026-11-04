@@ -1,9 +1,10 @@
 /* fakeos userland - realpath: physical path resolve (thin; mirrors shell).
- *   realpath PATH...
+ *   realpath [-z] PATH...
  * One or more operands; each resolved path printed on its own line (GNU
- * multi-arg). Walks components with readlink(2), collapsing . / .. like the
- * shell builtin. Exit 0 iff every PATH resolves. Compact argv for
- * EXEC_MAX_ARGC=8. External form for xargs/scripts that exec realpath.
+ * multi-arg). -z ends each result with NUL (pairs with xargs -0). Walks
+ * components with readlink(2), collapsing . / .. like the shell builtin.
+ * Exit 0 iff every PATH resolves. Compact argv for EXEC_MAX_ARGC=8.
+ * External form for xargs/scripts that exec realpath.
  */
 package user;
 
@@ -11,6 +12,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_getcwd(char *buf, unsigned long len);
 extern unsigned long strlen(const char *s);
+extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 
 /* Lexical join of absolute base + relative rel into out (cap bytes). */
@@ -215,21 +217,39 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
 
 int main(int argc, char **argv) {
     char buf[128];
-    int i;
+    int i = 1;
     int rc = 0;
+    int opt_z = 0;
 
-    if (argc < 2) {
-        u_write(2, "usage: realpath PATH...\n", 24);
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
+            i++;
+            continue;
+        }
+        break;
+    }
+    if (i >= argc) {
+        u_write(2, "usage: realpath [-z] PATH...\n", 29);
         return 1;
     }
-    for (i = 1; i < argc; i++) {
+    for (; i < argc; i++) {
         if (!urealpath(argv[i], buf, sizeof(buf))) {
             printf("realpath: %s: failed\n", argv[i]);
             rc = 1;
             continue;
         }
         u_write(1, buf, strlen(buf));
-        u_write(1, "\n", 1);
+        if (opt_z) {
+            char z = 0;
+            u_write(1, &z, 1);
+        } else {
+            u_write(1, "\n", 1);
+        }
     }
     return rc;
 }
