@@ -321,13 +321,24 @@ in the shell). `/bin/hostname` prints the `uname(2)` nodename field (no set).
 Focused virtio login smoke covers `expr` arith/length/cmp + `hostname` plus
 prior interactive greens (smp 1/2).
 
+
+## /bin/echo — landed
+
+Thin external `echo [-neE] [ARGS...]` mirroring the shell builtin: `-n`
+suppresses the trailing newline, `-e` enables backslash escapes
+(`\n`/`\t`/`\r`/`\\`/`\c`/octal; `\c` stops and implies `-n`), `-E`
+forces literal (default). Sticky clusters (`-ne`) accepted. Lets
+`xargs echo` / `/bin/echo` paths work without relying on the shell builtin.
+Focused virtio login smoke covers `/bin/echo -n/-e/-E/-ne/\c`,
+`xargs /bin/echo`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin `/bin/echo` (mirror shell -n/-e for xargs),
-   other POSIX coreutils / kernel bits after README scan (higher value than
-   deep jbd). Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless
-   a clear bite-sized fix.
+4. More daily-driver gaps: thin external `/bin/sleep` (if missing beyond
+   shell builtin), `truncate`, `dirname` polish, or other POSIX after README
+   scan (higher value than deep jbd). Avoid deep jbd / Ext2-redirect duplex
+   races / CFS nesting unless a clear bite-sized fix.

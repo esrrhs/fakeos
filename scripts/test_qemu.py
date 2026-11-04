@@ -421,6 +421,7 @@ def main():
         "[FS] published /bin/dd (",
         "[FS] published /bin/expr (",
         "[FS] published /bin/hostname (",
+        "[FS] published /bin/echo (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

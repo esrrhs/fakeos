@@ -181,7 +181,7 @@ $(BUILD_DIR)/ap_tramp_blob.o: arch/x86_64/ap_tramp_blob.asm $(BUILD_DIR)/ap_tram
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
-USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test uniq sort yes od xargs cmp dd expr hostname kbuild ldfake dumpbin
+USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test uniq sort yes od xargs cmp dd expr hostname echo kbuild ldfake dumpbin
 USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
