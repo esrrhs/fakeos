@@ -1325,6 +1325,16 @@ Verbose form also reports shell keywords. Keyword set is thin reserved words
 (`if`/`for`/`[[`/…). Focused virtio login smoke covers `-t` cases + prior
 greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell export/readonly -p — landed
+
+Thin `export -p` / `readonly -p` portable list forms (no new `/bin` dent).
+Bare `export`/`readonly` already printed `export NAME=val` /
+`readonly NAME=val`; `-p` is now accepted (glued `-np` ok with export `-n`).
+`-p` with no names lists; with names, still sets/marks as before. Inventory
+skipped shell printf (larger), `cd -L/-P` (cwd already physical), and
+`printenv` (env binary already aliases). Focused virtio login smoke covers
+`-p` lists + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1332,6 +1342,7 @@ greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (skip large
-   `getopts` / here-doc / trap unless bite-sized; `ulimit` still needs
-   kernel rlimit). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `cd -L/-P` accept flags, shell printf mirror,
+   or other small `/bin`/shell bites (skip large `getopts` / here-doc / trap
+   unless bite-sized; `ulimit` still needs kernel rlimit). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.

@@ -2839,9 +2839,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2851,12 +2851,14 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "export")) {
-        /* export              -> list exported
+        /* export              -> list exported (same as export -p)
+         * export -p           -> portable list form
          * export NAME=val     -> set + mark exported
          * export NAME         -> mark exported (must already be set)
          * export -n NAME...   -> clear export attribute (keep value) */
         int ai = 1;
         int unexport = 0;
+        int pflag = 0;
         if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
             const char *o = tokens[1] + 1;
             int j;
@@ -2864,8 +2866,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 for (j = 0; o[j] != 0; j++) {
                     if (o[j] == 'n') {
                         unexport = 1;
+                    } else if (o[j] == 'p') {
+                        pflag = 1;
                     } else {
-                        puts("usage: export [-n] [NAME[=VALUE]...]");
+                        puts("usage: export [-np] [NAME[=VALUE]...]");
                         return 1;
                     }
                 }
@@ -2875,9 +2879,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         if (tokens[ai] == 0) {
             int i;
             if (unexport) {
-                puts("usage: export [-n] [NAME[=VALUE]...]");
+                puts("usage: export [-np] [NAME[=VALUE]...]");
                 return 1;
             }
+            (void)pflag;
             for (i = 0; i < MAX_ENV; i++) {
                 if (!sh_envs[i].used || !sh_envs[i].exported) continue;
                 printf("export %s=%s\n", sh_envs[i].name, sh_envs[i].val);
@@ -2894,7 +2899,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     /* export -n rejects NAME=val form */
                     for (k = 0; tokens[ai][k] != 0; k++) {
                         if (tokens[ai][k] == '=') {
-                            puts("usage: export [-n] [NAME[=VALUE]...]");
+                            puts("usage: export [-np] [NAME[=VALUE]...]");
                             return 1;
                         }
                     }
@@ -3003,13 +3008,31 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "readonly")) {
-        /* readonly              -> list readonly
+        /* readonly              -> list readonly (same as readonly -p)
+         * readonly -p           -> portable list form
          * readonly NAME=val     -> set + mark readonly
          * readonly NAME         -> mark (create empty if missing) */
         int ai = 1;
         int bad = 0;
+        int pflag = 0;
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
+            const char *o = tokens[1] + 1;
+            int j;
+            if (!(o[0] == '-' && o[1] == 0)) {
+                for (j = 0; o[j] != 0; j++) {
+                    if (o[j] == 'p') {
+                        pflag = 1;
+                    } else {
+                        puts("usage: readonly [-p] [NAME[=VALUE]...]");
+                        return 1;
+                    }
+                }
+                ai = 2;
+            }
+        }
         if (tokens[ai] == 0) {
             int i;
+            (void)pflag;
             for (i = 0; i < MAX_ENV; i++) {
                 if (!sh_envs[i].used || !sh_envs[i].readonly) continue;
                 printf("readonly %s=%s\n", sh_envs[i].name, sh_envs[i].val);
@@ -5797,7 +5820,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
