@@ -23,6 +23,7 @@ global u_chdir
 global u_mkdir
 global u_getcwd
 global u_getdents
+global u_rename
 global u_unlink
 global u_rmdir
 global u_pipe
@@ -128,6 +129,9 @@ USYSC1 u_getcwd, 79
 
 ; long u_getdents(long fd, void *buf, unsigned long len)
 USYSC1 u_getdents, 217
+
+; long u_rename(const char *oldpath, const char *newpath)
+USYSC1 u_rename, 82
 
 ; long u_unlink(const char *path)
 USYSC1 u_unlink, 87

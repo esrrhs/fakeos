@@ -141,7 +141,7 @@ flowchart TD
 - [x] **VirtIO-blk 遗留/过渡驱动（轮询）**：`drivers/virtio_blk.c` 对接 `virtio-blk-pci,disable-modern=on` 的 I/O BAR 遗留寄存器与 4096 对齐 virtqueue。已按设备只读 `QueueNum`（QEMU 10 常为 1024）分配 vring，队列 DMA 读写可用；不再误写只读 QueueNum / 错误钳到 256。
 - [x] **ATA PIO 主盘驱动**：`drivers/ata.c` 支持 IDENTIFY / READ / WRITE / FLUSH（28-bit LBA），对接 QEMU `-drive ...,if=ide`。
 - [x] **统一块层**：`drivers/blk.c` 先探测 VirtIO（含 1 扇区冒烟），失败则回退 ATA；Ext2 只依赖 `blk_read/write/flush`。
-- [x] **最小 Ext2**：`fs/ext2.c` 支持挂载、路径查找、open/read/write/lseek、create、mkdir、getdents、unlink（普通文件）、sync；块大小 1024/2048/4096，直接块 + 一/二/三重间接。
+- [x] **最小 Ext2**：`fs/ext2.c` 支持挂载、路径查找、open/read/write/lseek、create、mkdir、getdents、unlink（普通文件）、rmdir、rename、ftruncate、sync；块大小 1024/2048/4096，直接块 + 一/二/三重间接。
 - [x] **VFS 集成**：绝对路径 `/mnt...` 分流到 Ext2；进程 cwd 可进入 `/mnt`；退出时正确关闭 Ext2 句柄。
 - [x] **宿主工具**：`tools/mkext2.py` 生成最小 Ext2 镜像（≥4MiB 为多 block group）；`make disk` / `make qemu-disk`。
 - [x] **自测与持久化冒烟**：启动时写入 `/mnt/m6pass.txt` 并回读；跨两次 QEMU 引导文件仍在；用户态 `/bin/cp`、`/bin/rm` 可把 Ramfs 文件拷到 `/mnt` 并持久化。
@@ -178,7 +178,7 @@ flowchart TD
 - [x] **shell history / `!!` + readline**：环形 32 条；`history`/`!!`；TTY CSI A/B 历史、Left/Right、Home/End、Ctrl-A/E/U。
 - [x] **auth crypt stub**：`/etc/passwd` 支持 `$fake$salt$hash`（FNV-1a）；libc `crypt`/`crypt_check`；默认 root 口令 `root`。
 - [x] **fakecc M5 tip pin 文档**：`docs/ldfake-order3-diagnosis.md` + Makefile/`m5_stage.sh` 明确要求 restage 钉在 `2c1f4525`。
-- [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags 作 ordered-write 恢复标记；脏挂载或 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
+- [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags 作 ordered-write 恢复标记；脏挂载或 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc`/`rename` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
 - [x] **SIGTSTP / Ctrl-Z 作业停止**：`TCB_STOPPED` + `wait4(WUNTRACED)`；TTY ISIG 在 UART/PS2 输入路径拦截 Ctrl-C/Z（wait4 阻塞时也可投递）；shell `jobs`/`fg`/`bg` 续跑 `SIGCONT`。
 - [x] **fsync(2)**：nr 74；Ext2 fd 触发卷级 sync（与 journal-lite 标记配对）。
 - [x] **进程组 / 会话**：`setpgid`/`getpgid`/`setsid`/`getsid`；`kill(0/-pgid)` 广播；TTY Ctrl-C/Z 投递到前台 **pgid**；shell 管道共用一组以便整组停止；`wait4(WCONTINUED)`。
@@ -201,6 +201,7 @@ flowchart TD
 - [x] **futex(2) basics**：`FUTEX_WAIT`/`FUTEX_WAKE`（+PRIVATE）；`sched_wakeup_n`；跨 fork `MAP_SHARED` 自测 `[U][PASS] futex WAIT/WAKE`。
 - [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后 `cli;hlt` 停泊（尚未加入调度器）。`make qemu-smp`（`-smp 2`）。
 - [x] **Ext2 ftruncate(2)**：grow（sparse）/shrink（保留前缀并释放尾块）/zero；自测 `[EXT2] [PASS] ftruncate grow/shrink/zero`。
+- [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。
 
 

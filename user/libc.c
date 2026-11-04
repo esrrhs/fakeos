@@ -978,6 +978,19 @@ int shm_unlink(const char *name) {
     return r < 0 ? -1 : 0;
 }
 
+
+/* ---- rename(2) ----------------------------------------------------------- */
+extern long u_rename(const char *oldpath, const char *newpath);
+
+int rename(const char *oldpath, const char *newpath) {
+    long r;
+    if (oldpath == 0 || newpath == 0) {
+        return -1;
+    }
+    r = u_rename(oldpath, newpath);
+    return (int)r;
+}
+
 /* ---- futex(2) basics ---------------------------------------------------- */
 extern long u_futex(volatile unsigned int *uaddr, int op, unsigned int val,
                     void *timeout, volatile unsigned int *uaddr2,

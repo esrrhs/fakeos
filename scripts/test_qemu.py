@@ -306,6 +306,7 @@ def main():
         "[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB",
         "[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin",
         "[EXT2] [PASS] ftruncate grow/shrink/zero",
+        "[EXT2] [PASS] rename same-dir/cross-dir",
         "[EXT2] journal-lite ordered markers online (not a full journal)",
         # AHCI probe log (QEMU may or may not expose 01.06)
         re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
@@ -391,7 +392,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: pthread_mutex + futex + Ext2 ftruncate + AP trampoline online!",
+        "[SUCCESS] fakeos: Ext2 rename + pthread_mutex + futex + AP trampoline online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

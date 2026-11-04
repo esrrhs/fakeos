@@ -501,6 +501,114 @@ u32 fs_unlink(const char *path) {
     return 1;
 }
 
+/* rename(2) within Ramfs: move a directory entry. Replaces an existing
+ * regular file or empty directory at newpath. Directories update parent. */
+u32 fs_rename(const char *oldpath, const char *newpath) {
+    char olast[NAME_LEN];
+    char nlast[NAME_LEN];
+    u32 olast_n = 0;
+    u32 nlast_n = 0;
+    u32 oparent;
+    u32 nparent;
+    u32 old_ino;
+    u32 dest;
+    u32 slot;
+    u32 k;
+
+    oparent = walk_parent(oldpath, olast, &olast_n, 0);
+    nparent = walk_parent(newpath, nlast, &nlast_n, 0);
+    if (oparent == 0 || nparent == 0 || olast_n == 0 || nlast_n == 0) {
+        return 0;
+    }
+    if (inodes[oparent].type != INO_DIR || inodes[nparent].type != INO_DIR) {
+        return 0;
+    }
+    if (olast_n == 1 && olast[0] == '.') return 0;
+    if (olast_n == 2 && olast[0] == '.' && olast[1] == '.') return 0;
+    if (nlast_n == 1 && nlast[0] == '.') return 0;
+    if (nlast_n == 2 && nlast[0] == '.' && nlast[1] == '.') return 0;
+
+    if (oparent == nparent && olast_n == nlast_n) {
+        u32 same = 1;
+        for (k = 0; k < olast_n; k++) {
+            if (olast[k] != nlast[k]) { same = 0; break; }
+        }
+        if (same) return 1;
+    }
+
+    old_ino = dir_find(oparent, olast, olast_n);
+    if (old_ino == 0) return 0;
+    if (old_ino == ROOT_INO || old_ino == CONSOLE_INO) return 0;
+
+    if (inodes[old_ino].type == INO_DIR) {
+        u32 cur = nparent;
+        u32 guard = 0;
+        if (nparent == old_ino) return 0;
+        while (cur != ROOT_INO && cur != 0 && guard < 64) {
+            if (cur == old_ino) return 0;
+            cur = inodes[cur].parent;
+            guard++;
+        }
+    }
+
+    dest = dir_find(nparent, nlast, nlast_n);
+    if (dest != 0) {
+        if (dest == old_ino) return 1;
+        if (inodes[old_ino].type == INO_DIR) {
+            if (inodes[dest].type != INO_DIR || inodes[dest].ndent != 0) {
+                return 0;
+            }
+            if (inode_is_open(dest)) return 0;
+            /* remove empty dest dir entry */
+            for (slot = 0; slot < inodes[nparent].ndent; slot++) {
+                if (inodes[nparent].dents[slot].ino == dest) break;
+            }
+            if (slot >= inodes[nparent].ndent) return 0;
+            for (k = slot; k + 1 < inodes[nparent].ndent; k++) {
+                inodes[nparent].dents[k] = inodes[nparent].dents[k + 1];
+            }
+            inodes[nparent].ndent--;
+            inodes[dest].type = INO_FREE;
+            inodes[dest].parent = 0;
+            inodes[dest].ndent = 0;
+        } else {
+            if (inodes[dest].type == INO_DIR) return 0;
+            /* unlink dest file name; free inode if not open */
+            for (slot = 0; slot < inodes[nparent].ndent; slot++) {
+                if (inodes[nparent].dents[slot].ino == dest) break;
+            }
+            if (slot >= inodes[nparent].ndent) return 0;
+            for (k = slot; k + 1 < inodes[nparent].ndent; k++) {
+                inodes[nparent].dents[k] = inodes[nparent].dents[k + 1];
+            }
+            inodes[nparent].ndent--;
+            if (!inode_is_open(dest)) {
+                inodes[dest].type = INO_FREE;
+                inodes[dest].parent = 0;
+                inodes[dest].ndent = 0;
+            }
+        }
+    }
+
+    if (!dir_add(nparent, nlast, nlast_n, old_ino)) return 0;
+
+    /* Remove old directory entry. */
+    for (slot = 0; slot < inodes[oparent].ndent; slot++) {
+        if (inodes[oparent].dents[slot].ino == old_ino
+            && name_eq(inodes[oparent].dents[slot].name, olast, olast_n)
+            && inodes[oparent].dents[slot].name[olast_n] == 0) {
+            break;
+        }
+    }
+    if (slot >= inodes[oparent].ndent) return 0;
+    for (k = slot; k + 1 < inodes[oparent].ndent; k++) {
+        inodes[oparent].dents[k] = inodes[oparent].dents[k + 1];
+    }
+    inodes[oparent].ndent--;
+    inodes[old_ino].parent = nparent;
+    return 1;
+}
+
 /* ---------------------------------------------------------------------------
  * Open file table
  * ------------------------------------------------------------------------- */

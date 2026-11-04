@@ -32,6 +32,7 @@ extern u64 sys_read_fd(u64 fd, u64 buf, u64 len);
 extern u64 sys_write_fd(u64 fd, u64 buf, u64 len);
 extern u64 sys_lseek(u64 fd, u64 off, u64 whence);
 extern u64 sys_mkdir(u64 upath);
+extern u64 sys_rename(u64 uold, u64 unew);
 extern u64 sys_unlink(u64 upath);
 extern u64 sys_rmdir(u64 upath);
 extern u64 sys_dup2(u64 oldfd, u64 newfd);
@@ -134,6 +135,7 @@ enum {
     SC_EXIT  = 60,
     SC_WAIT4 = 61,
     SC_RMDIR = 84,
+    SC_RENAME = 82,
     SC_UNLINK = 87,
     SC_EXIT_GROUP = 231,
     SC_SYNC = 162,
@@ -312,6 +314,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_FUTEX) {
         return sys_futex(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
+    }
+    if (f->rax == SC_RENAME) {
+        return sys_rename(f->rdi, f->rsi);
     }
     if (f->rax == SC_UNLINK) {
         return sys_unlink(f->rdi);

@@ -585,6 +585,25 @@ u64 sys_unlink(u64 upath) {
     return fs.fs_unlink(path) ? 0 : (u64)(-1);
 }
 
+u64 sys_rename(u64 uold, u64 unew) {
+    char oldp[PATH_KMAX];
+    char newp[PATH_KMAX];
+    u32 o_ext2;
+    u32 n_ext2;
+    if (!copy_user_path(oldp, uold) || !copy_user_path(newp, unew)) {
+        return (u64)(-1);
+    }
+    o_ext2 = fs.ext2_is_mnt_path(oldp);
+    n_ext2 = fs.ext2_is_mnt_path(newp);
+    if (o_ext2 != n_ext2) {
+        return (u64)(-1);              /* EXDEV: no cross-fs rename yet */
+    }
+    if (o_ext2) {
+        return fs.ext2_mounted() && fs.ext2_rename(oldp, newp) ? 0 : (u64)(-1);
+    }
+    return fs.fs_rename(oldp, newp) ? 0 : (u64)(-1);
+}
+
 u64 sys_rmdir(u64 upath) {
     char path[PATH_KMAX];
     if (!copy_user_path(path, upath)) {

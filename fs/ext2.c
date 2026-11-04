@@ -13,11 +13,12 @@ extern void kprintf(const char *fmt, ...);
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
  *
  * Mount, path lookup, open/read/write/lseek, create, mkdir, getdents,
- * unlink (regular files), sync. Block size 1024/2048/4096. Multi block
- * group (BGDT indexed). Direct + single-/double-/triple-indirect maps.
- * Hardening: free-count bookkeeping in SB/BGDT, s_state dirty-on-mount /
- * clean-on-sync. Journal-lite: ordered-write recovery markers in unused SB
- * space (magic/gen/flags); dirty or META_PENDING mount recounts free bits.
+ * unlink (regular files), rmdir, rename, ftruncate, sync. Block size
+ * 1024/2048/4096. Multi block group (BGDT indexed). Direct + single-/
+ * double-/triple-indirect maps. Hardening: free-count bookkeeping in
+ * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered-
+ * write recovery markers in unused SB space (magic/gen/flags); dirty or
+ * META_PENDING mount recounts free bits.
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -1662,6 +1663,173 @@ u32 ext2_rmdir(const char *path) {
     return 1;
 }
 
+
+/* Update the ".." entry of dir_ino to point at new_parent. */
+static u32 dir_set_dotdot(u32 dir_ino, u32 new_parent) {
+    u32 phys;
+    if (!inode_read(dir_ino, ino_raw)) return 0;
+    phys = rd32(ino_raw + I_BLOCK);
+    if (phys == 0) return 0;
+    if (!bread(phys, blk_buf)) return 0;
+    /* Layout from mkdir: "." at 0, ".." at 12. */
+    wr32(blk_buf + 12, new_parent);
+    return bwrite(phys, blk_buf);
+}
+
+/* True if `cur` is `ancestor` or lies under it (walk ".."). */
+static u32 ino_under(u32 cur, u32 ancestor) {
+    u32 guard = 0;
+    while (cur != 0 && guard < 128) {
+        u32 nxt;
+        if (cur == ancestor) return 1;
+        if (cur == EXT2_ROOT_INO) return 0;
+        if (!dir_find(cur, "..", 2, &nxt)) return 0;
+        cur = nxt;
+        guard++;
+    }
+    return 0;
+}
+
+/* Free a non-directory inode that is no longer linked (replace-on-rename). */
+static u32 inode_dispose_file(u32 victim) {
+    u32 b;
+    if (!inode_read(victim, ino_raw)) return 0;
+    inode_free_all_blocks(ino_raw);
+    for (b = 0; b < 128; b++) ino_raw[b] = 0;
+    if (!inode_write(victim, ino_raw)) return 0;
+    free_inode_bit(victim);
+    return 1;
+}
+
+/* rename(2): same-volume Ext2 move. Regular files and directories.
+ * Replaces an existing regular file or empty directory at newpath.
+ * Cross-directory directory moves update ".." and parent link counts. */
+u32 ext2_rename(const char *oldpath, const char *newpath) {
+    const char *orel;
+    const char *nrel;
+    char olast[NAME_MAX + 1];
+    char nlast[NAME_MAX + 1];
+    u32 olast_n;
+    u32 nlast_n;
+    u32 oparent;
+    u32 nparent;
+    u32 old_ino;
+    u32 new_ino;
+    u32 mode;
+    u32 is_dir;
+    u8 ftype;
+    u32 dest_exists = 0;
+    u32 dest_ino = 0;
+
+    if (!sb.mounted) return 0;
+    orel = persist_rel(oldpath);
+    nrel = persist_rel(newpath);
+    if (orel == 0 || nrel == 0) return 0;
+    if (orel[0] == 0 || nrel[0] == 0) return 0; /* refuse volume root */
+
+    oparent = walk_parent(orel, olast, &olast_n);
+    nparent = walk_parent(nrel, nlast, &nlast_n);
+    if (oparent == 0 || nparent == 0 || olast_n == 0 || nlast_n == 0) return 0;
+    if (olast_n == 1 && olast[0] == '.') return 0;
+    if (olast_n == 2 && olast[0] == '.' && olast[1] == '.') return 0;
+    if (nlast_n == 1 && nlast[0] == '.') return 0;
+    if (nlast_n == 2 && nlast[0] == '.' && nlast[1] == '.') return 0;
+
+    /* Same directory entry: no-op success. */
+    if (oparent == nparent && olast_n == nlast_n) {
+        u32 i;
+        u32 same = 1;
+        for (i = 0; i < olast_n; i++) {
+            if (olast[i] != nlast[i]) { same = 0; break; }
+        }
+        if (same) return 1;
+    }
+
+    if (!dir_find(oparent, olast, olast_n, &old_ino)) return 0;
+    if (!inode_read(old_ino, ino_raw)) return 0;
+    mode = rd16(ino_raw + I_MODE);
+    is_dir = ((mode & EXT2_S_IFMT) == EXT2_S_IFDIR) ? 1 : 0;
+    if ((mode & EXT2_S_IFMT) != EXT2_S_IFDIR
+        && (mode & EXT2_S_IFMT) != EXT2_S_IFREG) {
+        return 0;
+    }
+    ftype = is_dir ? (u8)EXT2_FT_DIR : (u8)EXT2_FT_REG;
+
+    if (is_dir) {
+        /* Cannot move a directory into itself or a descendant. */
+        if (nparent == old_ino || ino_under(nparent, old_ino)) return 0;
+    }
+
+    if (dir_find(nparent, nlast, nlast_n, &new_ino)) {
+        u32 dmode;
+        dest_exists = 1;
+        dest_ino = new_ino;
+        if (dest_ino == old_ino) return 1; /* hard-link alias / same file */
+        if (!inode_read(dest_ino, ino_raw)) return 0;
+        dmode = rd16(ino_raw + I_MODE);
+        if (is_dir) {
+            if ((dmode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
+            if (!dir_is_empty(dest_ino)) return 0;
+        } else {
+            if ((dmode & EXT2_S_IFMT) == EXT2_S_IFDIR) return 0;
+        }
+    }
+
+    jl_begin();
+
+    if (dest_exists) {
+        u32 junk;
+        if (!dir_remove(nparent, nlast, nlast_n, &junk)) { jl_commit(); return 0; }
+        if (is_dir) {
+            u32 phys;
+            if (!inode_read(dest_ino, ino_raw)) { jl_commit(); return 0; }
+            phys = rd32(ino_raw + I_BLOCK);
+            if (phys) free_block_bit(phys);
+            {
+                u32 z;
+                for (z = 0; z < 128; z++) ino_raw[z] = 0;
+            }
+            if (!inode_write(dest_ino, ino_raw)) { jl_commit(); return 0; }
+            free_inode_bit(dest_ino);
+            /* Drop the extra ".." link from nparent that empty dest held. */
+            if (inode_read(nparent, ino_raw)) {
+                u16 links = rd16(ino_raw + I_LINKS);
+                if (links > 1) {
+                    wr16(ino_raw + I_LINKS, (u16)(links - 1));
+                    inode_write(nparent, ino_raw);
+                }
+            }
+        } else {
+            if (!inode_dispose_file(dest_ino)) { jl_commit(); return 0; }
+        }
+    }
+
+    if (!dir_add(nparent, nlast, nlast_n, old_ino, ftype)) { jl_commit(); return 0; }
+    {
+        u32 junk;
+        if (!dir_remove(oparent, olast, olast_n, &junk)) { jl_commit(); return 0; }
+    }
+
+    if (is_dir && oparent != nparent) {
+        if (!dir_set_dotdot(old_ino, nparent)) { jl_commit(); return 0; }
+        /* Parent link counts: ".." moves from oparent to nparent. */
+        if (inode_read(oparent, ino_raw)) {
+            u16 links = rd16(ino_raw + I_LINKS);
+            if (links > 1) {
+                wr16(ino_raw + I_LINKS, (u16)(links - 1));
+                inode_write(oparent, ino_raw);
+            }
+        }
+        if (inode_read(nparent, ino_raw)) {
+            wr16(ino_raw + I_LINKS, (u16)(rd16(ino_raw + I_LINKS) + 1));
+            inode_write(nparent, ino_raw);
+        }
+    }
+
+    jl_commit();
+    return 1;
+}
+
 u32 ext2_ftruncate(u32 fh, u64 length) {
     u32 s;
     u8 raw[128];
@@ -1955,4 +2123,63 @@ void ext2_selftest(void) {
         drivers.blk_flush();
         kprintf("[EXT2] [PASS] ftruncate grow/shrink/zero\n");
     }
+
+    /* rename(2): same-dir + cross-dir file move; content preserved. */
+    {
+        u32 rfh;
+        char rbuf[16];
+        u32 k;
+        rfh = ext2_open("/mnt/ren_src.txt", O_CREAT | O_RDWR | O_TRUNC);
+        if (rfh == 0) {
+            kprintf("[EXT2] [FAIL] rename open src\n");
+            return;
+        }
+        for (k = 0; k < 6; k++) rbuf[k] = (char)('R' + k);
+        if (ext2_write(rfh, rbuf, 6) != 6) {
+            kprintf("[EXT2] [FAIL] rename seed write\n");
+            ext2_close(rfh);
+            return;
+        }
+        ext2_close(rfh);
+        if (!ext2_rename("/mnt/ren_src.txt", "/mnt/ren_dst.txt")) {
+            kprintf("[EXT2] [FAIL] rename same-dir\n");
+            return;
+        }
+        if (ext2_open("/mnt/ren_src.txt", O_RDONLY) != 0) {
+            kprintf("[EXT2] [FAIL] rename old name still present\n");
+            return;
+        }
+        if (!ext2_mkdir("/mnt/ren_dir")) {
+            kprintf("[EXT2] [FAIL] rename mkdir\n");
+            return;
+        }
+        if (!ext2_rename("/mnt/ren_dst.txt", "/mnt/ren_dir/moved.txt")) {
+            kprintf("[EXT2] [FAIL] rename cross-dir\n");
+            return;
+        }
+        rfh = ext2_open("/mnt/ren_dir/moved.txt", O_RDONLY);
+        if (rfh == 0) {
+            kprintf("[EXT2] [FAIL] rename open moved\n");
+            return;
+        }
+        for (k = 0; k < 16; k++) rbuf[k] = 0;
+        if (ext2_read(rfh, rbuf, 16) != 6
+            || rbuf[0] != 'R' || rbuf[1] != 'S' || rbuf[5] != 'W') {
+            kprintf("[EXT2] [FAIL] rename content\n");
+            ext2_close(rfh);
+            return;
+        }
+        ext2_close(rfh);
+        if (!ext2_unlink("/mnt/ren_dir/moved.txt")) {
+            kprintf("[EXT2] [FAIL] rename cleanup unlink\n");
+            return;
+        }
+        if (!ext2_rmdir("/mnt/ren_dir")) {
+            kprintf("[EXT2] [FAIL] rename cleanup rmdir\n");
+            return;
+        }
+        drivers.blk_flush();
+        kprintf("[EXT2] [PASS] rename same-dir/cross-dir\n");
+    }
 }
+
