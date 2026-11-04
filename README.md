@@ -255,7 +255,7 @@ flowchart TD
 - [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir [-p] DIR...`（空目录；`-p` 清空父分量；shell-mirror 同步）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
 - [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
-- [x] **/bin/find + /bin/du**：薄树遍历；`find [PATH...] [-name GLOB] [-type f|d] [-print]`（basename `*`/`?` glob；`lstat`；默认 `.`）；`du [-a][-s][-h] [FILE...]` 表观大小（默认 1024B 单位；`-h` 人类可读 K/M/G）。virtio login smoke（smp 1/2）。
+- [x] **/bin/find + /bin/du**：薄树遍历；`find [PATH...] [-name GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]`（basename `*`/`?` glob；`lstat`；起点深度 0；默认 `.`）；`du [-a][-s][-h] [FILE...]` 表观大小（默认 1024B 单位；`-h` 人类可读 K/M/G）。virtio login smoke（smp 1/2）。
 - [x] **/bin/shuf + head/tail -c**：`shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]` Fisher-Yates 行乱序（clock+pid 种子）；`head`/`tail` 增加 `-c N`/`-cN` 字节模式（`tail -c` 可 seek 走 lseek+fstat，否则字节环）。virtio login smoke（smp 1/2）。
 - [x] **wc -L + dirname multi-arg**：`wc` 增加 `-L`/`-lwcL` 最长行字节长度（默认仍为行/词/字节）；`dirname PATH...` 支持多操作数逐行输出（GNU 多参）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/diff**：薄行级比较（`diff [-uq] FILE1 FILE2`；默认 classic a/c/d；`-u` unified；`-q` brief；退出 0/1/2；`cmp` 已覆盖字节比较）。virtio login smoke（smp 1/2）。

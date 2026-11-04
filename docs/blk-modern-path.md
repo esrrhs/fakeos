@@ -869,15 +869,26 @@ still reaches leaves; does not descend through symlink directories; entry cap
 64/dir. Focused virtio login smoke covers builtin + `/bin/chmod -R` on Ramfs
 trees plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
 
+## find -maxdepth/-mindepth — landed
+
+Thin tree-depth polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+`/bin/find` gains `-maxdepth N` / `-mindepth N` (start points are depth 0;
+GNU-ish: maxdepth gates descent, mindepth gates emit; AND with existing
+`-name`/`-type`/`-print`). Focused virtio login smoke covers depth filters on
+Ramfs trees plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`chmod -R` + `cal -y` + …): prefer
-   small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
+3. More daily-driver gaps after inventory (`find -maxdepth` + `chmod -R` + …):
+   prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
    `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only if
    `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex /
-   multi-nc SMP races and CFS/jbd alone unless a clear bite-sized fix. Other
-   thin polish if still missing after inventory (prefer not already-landed
-   find/od/dd/tee/fold/paste/strings/uniq/cut/base64).
+   multi-nc SMP races and CFS/jbd alone. Other thin polish: shell `set -e/-u`,
+   job/fg/bg polish, `test`/`expr` more ops, `dd conv=`/`sync=`, `grep -E`
+   thin, `od` gaps — dig carefully; many listed utils already covered.

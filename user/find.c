@@ -1,7 +1,8 @@
 /* fakeos userland - find: walk trees and print matching paths (thin).
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
- * Primaries (AND): -name GLOB (basename *,? only), -type f|d, -print.
+ * Primaries (AND): -name GLOB (basename *,? only), -type f|d, -print,
+ *   -maxdepth N, -mindepth N (start points are depth 0; GNU-ish).
  * Uses lstat(2). No -o/parens/actions beyond print. Depth-first.
  */
 package user;
@@ -30,13 +31,16 @@ enum {
     NAME_LEN = 30,
     MAX_NAMES = 128,
     MAX_PATHS = 8,
-    GLOB_CAP = 64
+    GLOB_CAP = 64,
+    DEPTH_UNLIM = 0x7FFFFFFF
 };
 
 static int want_name;
 static char name_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int do_print = 1;
+static int max_depth = DEPTH_UNLIM;
+static int min_depth = 0;
 static int err_rc;
 
 static unsigned int load_u32(const char *p) {
@@ -131,12 +135,27 @@ static int is_primary(const char *a) {
     if (strcmp(a, "-name") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
+    if (strcmp(a, "-maxdepth") == 0) return 1;
+    if (strcmp(a, "-mindepth") == 0) return 1;
     return 0;
 }
 
-static void walk(const char *path);
+static int parse_depth(const char *s, int *out) {
+    int v = 0;
+    int i = 0;
+    if (s == 0 || s[0] == 0) return 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    if (i == 0 || s[i] != 0) return 0;
+    *out = v;
+    return 1;
+}
 
-static void walk_dir(const char *path) {
+static void walk(const char *path, int depth);
+
+static void walk_dir(const char *path, int depth) {
     char dent[DENT_BUF];
     char child[PATH_CAP];
     char names[MAX_NAMES][NAME_LEN];
@@ -181,11 +200,11 @@ static void walk_dir(const char *path) {
     for (i = 0; i < nnames; i++) {
         join_path(child, PATH_CAP, path, names[i]);
         if (child[0] == 0) continue;
-        walk(child);
+        walk(child, depth + 1);
     }
 }
 
-static void walk(const char *path) {
+static void walk(const char *path, int depth) {
     char st[ST_SIZE_BYTES];
     unsigned int mode;
 
@@ -195,8 +214,8 @@ static void walk(const char *path) {
         return;
     }
     mode = load_u32(st + ST_MODE);
-    if (match_preds(path, mode)) emit(path);
-    if (is_dir_mode(mode)) walk_dir(path);
+    if (depth >= min_depth && match_preds(path, mode)) emit(path);
+    if (is_dir_mode(mode) && depth < max_depth) walk_dir(path, depth);
 }
 
 int main(int argc, char **argv) {
@@ -249,11 +268,27 @@ int main(int argc, char **argv) {
             ai++;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name GLOB] [-type f|d] [-print]\n", 56);
+        if (strcmp(argv[ai], "-maxdepth") == 0) {
+            if (ai + 1 >= argc || !parse_depth(argv[ai + 1], &max_depth)) {
+                u_write(2, "find: -maxdepth needs N\n", 24);
+                return 1;
+            }
+            ai += 2;
+            continue;
+        }
+        if (strcmp(argv[ai], "-mindepth") == 0) {
+            if (ai + 1 >= argc || !parse_depth(argv[ai + 1], &min_depth)) {
+                u_write(2, "find: -mindepth needs N\n", 24);
+                return 1;
+            }
+            ai += 2;
+            continue;
+        }
+        u_write(2, "usage: find [PATH...] [-name GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]\n", 84);
         return 1;
     }
 
     err_rc = 0;
-    for (i = 0; i < npaths; i++) walk(paths[i]);
+    for (i = 0; i < npaths; i++) walk(paths[i], 0);
     return err_rc;
 }
