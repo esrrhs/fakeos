@@ -74,6 +74,8 @@ extern char user_yes_start;
 extern char user_yes_end;
 extern char user_od_start;
 extern char user_od_end;
+extern char user_xargs_start;
+extern char user_xargs_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -161,6 +163,7 @@ void rootfs_publish(void) {
     publish_one("/bin/sort", (u64)(&user_sort_start), (u64)(&user_sort_end));
     publish_one("/bin/yes", (u64)(&user_yes_start), (u64)(&user_yes_end));
     publish_one("/bin/od", (u64)(&user_od_start), (u64)(&user_od_end));
+    publish_one("/bin/xargs", (u64)(&user_xargs_start), (u64)(&user_xargs_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
     publish_one("/bin/dumpbin", (u64)(&user_dumpbin_start), (u64)(&user_dumpbin_end));

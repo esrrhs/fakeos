@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo ($?/$VAR), cd, pwd, mkdir[-p], rmdir, ln[-s], readlink,
+ * Builtins: echo [-neE] ($?/$VAR), cd, pwd, mkdir[-p], rmdir, ln[-s], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -1050,10 +1050,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir[-p], rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo $NAME / $?; envp -> children");
-        puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od (default PATH=/bin:/usr/bin:.)");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
     }
@@ -1427,17 +1427,77 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             rc = 0;
         }
     } else if (eq(tokens[0], "echo")) {
-        for (i = 1; tokens[i] != 0; i++) {
-            if (i > 1) {
-                u_write(1, " ", 1);
+        /* echo [-neE] [ARGS...] — -n no newline, -e escapes, -E literal (default). */
+        int nonew = 0;
+        int do_esc = 0;
+        int ai2 = 1;
+        int first = 1;
+        int stop = 0;
+        while (tokens[ai2] != 0 && tokens[ai2][0] == '-' && tokens[ai2][1] != 0) {
+            const char *p = tokens[ai2] + 1;
+            int ok = 1;
+            int j;
+            for (j = 0; p[j] != 0; j++) {
+                if (p[j] == 'n') nonew = 1;
+                else if (p[j] == 'e') do_esc = 1;
+                else if (p[j] == 'E') do_esc = 0;
+                else {
+                    ok = 0;
+                    break;
+                }
             }
-            if (eq(tokens[i], "$?")) {
-                printf("%d", (int)rc_in);
+            if (!ok) break;
+            ai2++;
+        }
+        for (; tokens[ai2] != 0 && !stop; ai2++) {
+            if (!first) u_write(1, " ", 1);
+            first = 0;
+            if (!do_esc) {
+                u_write(1, tokens[ai2], strlen(tokens[ai2]));
             } else {
-                u_write(1, tokens[i], strlen(tokens[i]));
+                const char *s = tokens[ai2];
+                char outb[256];
+                int on = 0;
+                while (*s != 0 && on + 1 < 256) {
+                    if (*s != '\\') {
+                        outb[on++] = *s++;
+                        continue;
+                    }
+                    s++;
+                    if (*s == 0) {
+                        outb[on++] = '\\';
+                        break;
+                    }
+                    if (*s == 'c') {
+                        stop = 1;
+                        nonew = 1;
+                        s++;
+                        break;
+                    } else if (*s == 'n') { outb[on++] = '\n'; s++; }
+                    else if (*s == 't') { outb[on++] = '\t'; s++; }
+                    else if (*s == 'r') { outb[on++] = '\r'; s++; }
+                    else if (*s == 'a') { outb[on++] = '\a'; s++; }
+                    else if (*s == 'b') { outb[on++] = '\b'; s++; }
+                    else if (*s == 'f') { outb[on++] = '\f'; s++; }
+                    else if (*s == 'v') { outb[on++] = '\v'; s++; }
+                    else if (*s == '\\') { outb[on++] = '\\'; s++; }
+                    else if (*s >= '0' && *s <= '7') {
+                        int v = 0;
+                        int k = 0;
+                        while (k < 3 && s[k] >= '0' && s[k] <= '7') {
+                            v = (v << 3) + (s[k] - '0');
+                            k++;
+                        }
+                        outb[on++] = (char)v;
+                        s += k;
+                    } else {
+                        outb[on++] = *s++;
+                    }
+                }
+                if (on > 0) u_write(1, outb, (unsigned long)on);
             }
         }
-        u_write(1, "\n", 1);
+        if (!nonew) u_write(1, "\n", 1);
         rc = 0;
     } else if (eq(tokens[0], "pid")) {
         printf("%d\n", (int)u_getpid());

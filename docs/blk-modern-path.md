@@ -260,6 +260,17 @@ args joined by spaces) until a write fails (pipe close). `od [-A n|o|x|d]
 `-An`/`-tx1` sticky forms accepted). Focused virtio login smoke covers
 `yes | head`, `od -An -tx1 -N`, plus prior interactive greens (smp 1/2).
 
+## shell echo -n/-e + /bin/xargs — landed
+
+Shell builtin `echo [-neE] [ARGS...]`: `-n` suppresses the trailing newline,
+`-e` enables backslash escapes (`\n`/`\t`/`\r`/`\\`/`\c`/octal; `\c`
+stops output and implies `-n`), `-E` forces literal (default). Leading sticky
+flag clusters (`-ne`) accepted; first non-flag operand ends option parse.
+Thin `/bin/xargs [-n N] [-r] [COMMAND [ARGS...]]` whitespace-splits stdin into
+batches (default COMMAND prints args; no `/bin/echo` required). Batches honor
+`execve` `EXEC_MAX_ARGC=8`. `-r` skips empty stdin. Focused virtio login smoke
+covers `echo -n/-e`, `xargs`/`-n`/`-r`, plus prior interactive greens (smp 1/2).
+
 ## shell mkdir -p + /bin/rm -r — landed
 
 FS polish for daily-driver trees. Shell builtin `mkdir [-p] DIR...` creates
