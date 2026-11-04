@@ -962,21 +962,39 @@ covers `[abc]` / `[a-z]` / `[^0-9]` / leading `]` / `-Ei` class / class+`*`
 / `|` inside class / Ext2 / prior greens (smp 1/2). Ramfs `/bin` dents
 ~106/128. Jobs/`fg`/`bg` already present — left alone.
 
+## /bin/sed thin — landed
+
+Thin new `/bin/sed` (one new Ramfs `/bin` dent; no kernel work). Inventory:
+still no `statfs(2)` (thin `df` deferred — Ramfs has no block accounting, so
+statfs+df not clearly bite-sized) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+Jobs/`fg`/`bg` already present — left alone. Shell `$(( ))` / for/while and
+`stty`/`reset`/`tput`/`watch` deferred (winsize ioctl absent for tput
+cols/lines).
+
+`sed [-n] SCRIPT [FILE...]`: semicolon-separated commands, no addresses —
+`s/PAT/REPL/[g]` fixed-string substitute (any delimiter; `\`/`\n`/`\t`
+escapes), `d` (delete/suppress print), `p` (print), `q` (quit after line).
+`-n` quiet. stdin if no FILE. No regex, no hold space. Compact argv for
+`EXEC_MAX_ARGC=8`. Focused virtio login smoke covers `s///` / `s///g` /
+alt delim / `-n`+`p` / `d` / `q` / pipe+file / Ext2 / prior greens (smp 1/2).
+Ramfs `/bin` dents ~107/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`grep -E`/`[]` + `dd conv=` +
-   `od -N/-j` + `od -t u1/d1`/`*` + …): prefer small coherent chunks; thin
+3. More daily-driver gaps after inventory (`/bin/sed` + `grep -E`/`[]` +
+   `dd conv=` + `od -t u1/d1`/`*` + …): prefer small coherent chunks; thin
    `df` **only if** `statfs(2)` is clearly bite-sized (Ramfs needs invented
    capacity + Ext2 `sb.blocks_count`/`free_blocks`/`block_size`), or
    `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only
    if `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex
    / multi-nc SMP races and CFS/jbd alone. Other thin polish after inventory:
-   job/fg/bg only if a clear gap remains; `/bin/sed` thin if absent and small
-   enough; shell `$(( ))` / for/while if thin gaps; `/bin/stty` thin,
-   `/bin/reset`, `/bin/tput cols/lines`, `/bin/watch`; skip `dirname -z`.
-   `/bin/tee -a`, `/bin/head`, `/bin/tr`, `/bin/cut`, `/bin/printf` `%x`/`%o`,
-   `/bin/date` FORMAT, `/bin/dirname` multi, `/bin/realpath`, `/bin/true`
-   already present.
+   job/fg/bg only if a clear gap remains; shell `$(( ))` / for/while if thin
+   gaps; `/bin/stty` thin, `/bin/reset`, `/bin/tput cols/lines` (needs
+   `TIOCGWINSZ`), `/bin/watch`; skip `dirname -z`. `/bin/sed`, `/bin/tee -a`,
+   `/bin/head`, `/bin/tr`, `/bin/cut`, `/bin/printf` `%x`/`%o`, `/bin/date`
+   FORMAT, `/bin/dirname` multi, `/bin/realpath`, `/bin/true` already present.

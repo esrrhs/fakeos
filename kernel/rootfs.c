@@ -46,6 +46,8 @@ extern char user_tail_start;
 extern char user_tail_end;
 extern char user_grep_start;
 extern char user_grep_end;
+extern char user_sed_start;
+extern char user_sed_end;
 extern char user_printf_start;
 extern char user_printf_end;
 extern char user_tee_start;
@@ -343,6 +345,7 @@ void rootfs_publish(void) {
     publish_one("/bin/getent", (u64)(&user_getent_start), (u64)(&user_getent_end));
     publish_one("/bin/tail", (u64)(&user_tail_start), (u64)(&user_tail_end));
     publish_one("/bin/grep", (u64)(&user_grep_start), (u64)(&user_grep_end));
+    publish_one("/bin/sed", (u64)(&user_sed_start), (u64)(&user_sed_end));
     publish_one("/bin/printf", (u64)(&user_printf_start), (u64)(&user_printf_end));
     publish_one("/bin/tee", (u64)(&user_tee_start), (u64)(&user_tee_end));
     publish_one("/bin/basename", (u64)(&user_basename_start), (u64)(&user_basename_end));

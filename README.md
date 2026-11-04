@@ -278,6 +278,7 @@ flowchart TD
 - [x] **dd conv= + od -N/-j polish**：`dd` 增加 `conv=LIST`（逗号分隔：`notrunc` 保留 of= 尾部、`sync` 短读补 NUL 至 bs、`fsync` 关闭前 `fsync(2)`）；`od` 增加粘连 `-NCOUNT` 与 `-j SKIP`/`-jSKIP`（优先 `lseek`，否则读丢弃；地址含 skip）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **grep -E thin ERE**：`grep -E`/`-E` 粘连启用薄扩展正则子集：`|` `.` `*` `+` `?` `()` `^` `$` 与 `\` 转义；默认仍定串；`-F` 强制定串（覆盖 `-E`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **grep -E [] classes**：`-E` 增加薄 `[]` 字符类（ranges、首 `^` 取反、首 `]`/`-` 字面、类内 `\` 转义下一字符；无 `[:class:]`/`{}`）。`find_alt`/`()` 跳过类。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **/bin/sed thin**：`sed [-n] SCRIPT [FILE...]` 薄流编辑：`s/PAT/REPL/[g]` 定串替换（任意分隔符；`\n`/`\t`/`\\`）、`d`/`p`/`q`；分号串联；无正则/地址/保持空间。新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **chown :GID + mkdir -m + install -t**：`chown`/`sh` 支持组专属 `:GID`（uid=(u32)-1；既有 `UID[:GID]` 不变）；`mkdir [-p] [-m MODE|-mMODE]` 创建后 chmod（`-p` 仅最终分量；shell-mirror）；`install -t DIR|-tDIR` GNU 目标目录形（可与 `-m` 组合；粘连保 EXEC_MAX_ARGC=8）。无新 /bin dent。virtio login smoke（smp 1/2）。
