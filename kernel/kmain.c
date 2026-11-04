@@ -144,6 +144,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Milestone 6: PCI VirtIO-blk (legacy/transitional) + Ext2 at /mnt.
     // Graceful when QEMU was started without a disk: boot still succeeds.
     drivers.blk_init();
+    drivers.ahci_selftest();
     if (fs.ext2_mount()) {
         fs.ext2_selftest();
         /* Persistent workspace; /home is an Ext2 path alias for /mnt/home. */
@@ -191,7 +192,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");

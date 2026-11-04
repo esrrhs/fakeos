@@ -197,6 +197,7 @@ flowchart TD
 - [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
+- [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
 - [x] **SMP MADT + AP park**：`arch/smp.c` MADT 发现 + `ap_tramp`；默认 `-smp 1` 不拉 AP；`-smp 2` 时 AP long-mode 后停泊，经 `sched_smp_start` 进入 per-CPU idle。
 - [x] **futex(2) basics**：`FUTEX_WAIT`/`FUTEX_WAKE`（+PRIVATE）；`sched_wakeup_n`；跨 fork `MAP_SHARED` 自测 `[U][PASS] futex WAIT/WAKE`。
 - [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后停泊至 `sched_smp_start`。`make qemu-smp`（`-smp 2`）。

@@ -31,11 +31,11 @@ extern u32 sched_is_active(void);
  * with PCI class 01.06 ABAR (BAR5). DMA via HHDM + low physical frames.
  * Completion: MSI/MSI-X (vector 42) or INTx with sched_sleep; poll fallback.
  *
- * NCQ-lite (coherent with sync blk API): when CAP.SNCQ and IDENTIFY NCQ are
- * set, issue READ/WRITE FPDMA QUEUED with SACT+CI on a free slot. Public
- * read/write still serialize on one shared bounce buffer (one outstanding),
- * so multi-slot is foundation for later async I/O rather than parallel DMA.
- * See docs/blk-modern-path.md.
+ * Async NCQ (first smokeable bite): when CAP.SNCQ and IDENTIFY NCQ are set,
+ * large read/write transfers pipeline up to ASYNC_DEPTH FPDMA commands with
+ * per-slot bounce buffers (multi-outstanding). Public blk API stays sync and
+ * serializes one transfer at a time via `busy`. Non-NCQ falls back to one
+ * outstanding DMA EXT. See docs/blk-modern-path.md.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -91,7 +91,7 @@ enum {
     FIS_REG_H2D     = 0x27,
     CFL_H2D         = 5,
 
-    /* Arena: CL(1KiB) + FIS(256) + CT*32(8KiB) + IDENT(512) + bounce(8KiB) */
+    /* Arena: CL(1KiB) + FIS(256) + CT*32(8KiB) + IDENT(512) + bounce*ASYNC */
     ARENA_ORDER     = 4,             /* 16 pages = 64 KiB */
     N_SLOTS         = 32,
     CT_SIZE         = 256,
@@ -101,6 +101,8 @@ enum {
     IDENT_OFF       = 1024 + 256 + 32 * 256,
     BOUNCE_OFF      = 1024 + 256 + 32 * 256 + 512,
     BOUNCE_MAX_SEC  = 16,
+    BOUNCE_SLOT_BYTES = 16 * 512,    /* BOUNCE_MAX_SEC * SECTOR_SIZE */
+    ASYNC_DEPTH     = 4,             /* per-slot bounce windows */
 
     POLL_SPINS      = 5000000,
 
@@ -108,7 +110,10 @@ enum {
     PCI_INTERRUPT_LINE = 0x3C,
 
     PxIE_MASK       = 0x07C0007Fu,
-    GHC_IE          = 0x00000002u
+    GHC_IE          = 0x00000002u,
+
+    /* Selftest: R/W last TEST_SECS of the disk (save/restore). */
+    AHCI_TEST_SECS  = 64
 };
 
 static const u64 AHCI_WAIT_CHAN = 0x4148434900000000ULL;
@@ -123,11 +128,19 @@ struct ahci {
     u32 irq_armed;
     u32 ncq;                         /* FPDMA path armed */
     u32 nslots;                      /* 1..32 from CAP.NCS */
-    u32 busy;                        /* bounce-buffer serialize */
+    u32 depth;                       /* active async window (1..ASYNC_DEPTH) */
+    u32 busy;                        /* public API serialize */
+    u32 inflight;                    /* current outstanding cmds */
+    u32 peak_inflight;               /* high-water for selftest/log */
     u8  pci_irq;
 };
 
 static struct ahci ah;
+
+/* Per-HW-slot bookkeeping for one pipelined transfer (indices < ASYNC_DEPTH). */
+static u32 slot_nsec[ASYNC_DEPTH];
+static u32 slot_off[ASYNC_DEPTH];
+static u8  slot_cmd[ASYNC_DEPTH];
 
 static volatile u8 *hhdm8(u64 phys) {
     return (volatile u8 *)(HHDM_BASE + phys);
@@ -148,6 +161,10 @@ static volatile u32 *port_reg(u32 off) {
 
 static u64 ct_phys_for(u32 slot) {
     return ah.arena_phys + CT_BASE + (u64)slot * (u64)CT_SIZE;
+}
+
+static u64 bounce_phys_for(u32 slot) {
+    return ah.arena_phys + BOUNCE_OFF + (u64)slot * (u64)BOUNCE_SLOT_BYTES;
 }
 
 static void ahci_stop_port(void) {
@@ -186,25 +203,41 @@ static u32 ahci_start_port(void) {
     return 1;
 }
 
+static u32 ahci_slot_busy(u32 slot) {
+    u32 bit = 1u << slot;
+    if ((*port_reg(PxCI) & bit) != 0) {
+        return 1;
+    }
+    if (ah.ncq && (*port_reg(PxSACT) & bit) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static u32 ahci_check_fatal(u8 ata_cmd) {
+    u32 tfd = *port_reg(PxTFD);
+    u32 is = *port_reg(PxIS);
+    if ((tfd & 0x01) != 0) {
+        kprintf("[AHCI] issue ERR cmd=0x%x TFD=0x%x IS=0x%x\n",
+                (u64)ata_cmd, (u64)tfd, (u64)is);
+        *port_reg(PxIS) = 0xFFFFFFFFu;
+        *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+        return 1;
+    }
+    if ((is & 0x40000000u) != 0) {
+        kprintf("[AHCI] TFES cmd=0x%x IS=0x%x\n", (u64)ata_cmd, (u64)is);
+        *port_reg(PxIS) = 0xFFFFFFFFu;
+        *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+        return 1;
+    }
+    return 0;
+}
+
 /* Wait for slot bit to clear in CI (and SACT when NCQ). */
 static u32 ahci_wait_slot(u8 ata_cmd, u32 slot) {
     u32 spins = 0;
-    u32 bit = 1u << slot;
-    while (((*port_reg(PxCI) & bit) != 0)
-           || (ah.ncq && (*port_reg(PxSACT) & bit) != 0)) {
-        u32 tfd = *port_reg(PxTFD);
-        u32 is = *port_reg(PxIS);
-        if ((tfd & 0x01) != 0) {
-            kprintf("[AHCI] issue ERR cmd=0x%x TFD=0x%x IS=0x%x\n",
-                    (u64)ata_cmd, (u64)tfd, (u64)is);
-            *port_reg(PxIS) = 0xFFFFFFFFu;
-            *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
-            return 0;
-        }
-        if ((is & 0x40000000u) != 0) {
-            kprintf("[AHCI] TFES cmd=0x%x IS=0x%x\n", (u64)ata_cmd, (u64)is);
-            *port_reg(PxIS) = 0xFFFFFFFFu;
-            *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+    while (ahci_slot_busy(slot)) {
+        if (ahci_check_fatal(ata_cmd)) {
             return 0;
         }
         spins++;
@@ -224,6 +257,52 @@ static u32 ahci_wait_slot(u8 ata_cmd, u32 slot) {
     *port_reg(PxIS) = 0xFFFFFFFFu;
     *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
     return 1;
+}
+
+/* Wait until any bit in active_mask completes; return that slot index. */
+static u32 ahci_wait_any(u32 active_mask, u32 *oslot) {
+    u32 spins = 0;
+    u32 i;
+    u8 probe_cmd = (u8)ATA_CMD_READ_FPDMA;
+    if (active_mask == 0) {
+        return 0;
+    }
+    for (i = 0; i < ASYNC_DEPTH; i++) {
+        if (((active_mask >> i) & 1u) != 0) {
+            probe_cmd = slot_cmd[i];
+            break;
+        }
+    }
+    while (1) {
+        for (i = 0; i < ASYNC_DEPTH; i++) {
+            if (((active_mask >> i) & 1u) == 0) {
+                continue;
+            }
+            if (!ahci_slot_busy(i)) {
+                *oslot = i;
+                *port_reg(PxIS) = 0xFFFFFFFFu;
+                *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+                return 1;
+            }
+        }
+        if (ahci_check_fatal(probe_cmd)) {
+            return 0;
+        }
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            arch.inb(0x80);
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            kprintf("[AHCI] timeout-any mask=0x%x CI=0x%x SACT=0x%x\n",
+                    (u64)active_mask, (u64)(*port_reg(PxCI)),
+                    (u64)(*port_reg(PxSACT)));
+            return 0;
+        }
+    }
+    return 0;
 }
 
 u32 ahci_irq(void) {
@@ -246,9 +325,12 @@ u32 ahci_irq(void) {
 static u32 ahci_pick_slot(void) {
     u32 busy = *port_reg(PxCI) | *port_reg(PxSACT);
     u32 i;
-    u32 lim = ah.nslots != 0 ? ah.nslots : 1;
+    u32 lim = ah.depth != 0 ? ah.depth : 1;
     if (lim > N_SLOTS) {
         lim = N_SLOTS;
+    }
+    if (lim > ASYNC_DEPTH) {
+        lim = ASYNC_DEPTH;
     }
     for (i = 0; i < lim; i++) {
         if (((busy >> i) & 1u) == 0) {
@@ -258,8 +340,19 @@ static u32 ahci_pick_slot(void) {
     return 0xFFFFFFFFu;
 }
 
-/* Build H2D FIS + PRDT on `slot` and ring CI (and SACT for NCQ). */
-static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
+static u32 ahci_popcount(u32 mask) {
+    u32 n = 0;
+    while (mask != 0) {
+        n = n + (mask & 1u);
+        mask = mask >> 1;
+    }
+    return n;
+}
+
+/* Program H2D FIS + PRDT on `slot` and ring CI (and SACT for NCQ). No wait.
+ * If force_slot != 0xFFFFFFFF, use that slot (must be free). */
+static u32 ahci_submit(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write,
+                       u32 force_slot, u32 *oslot) {
     u64 cl_phys;
     u64 ct_phys;
     u64 fis_phys;
@@ -276,10 +369,18 @@ static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
         return 0;
     }
 
-    slot = ahci_pick_slot();
-    if (slot == 0xFFFFFFFFu) {
-        kprintf("[AHCI] no free command slot\n");
-        return 0;
+    if (force_slot != 0xFFFFFFFFu) {
+        slot = force_slot;
+        if (ahci_slot_busy(slot)) {
+            kprintf("[AHCI] forced slot %u busy\n", (u64)slot);
+            return 0;
+        }
+    } else {
+        slot = ahci_pick_slot();
+        if (slot == 0xFFFFFFFFu) {
+            kprintf("[AHCI] no free command slot\n");
+            return 0;
+        }
     }
 
     use_ncq = ah.ncq
@@ -351,10 +452,63 @@ static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
     }
     *port_reg(PxCI) = 1u << slot;
 
-    if (!ahci_wait_slot(cmd, slot)) {
-        return 0;
+    ah.inflight = ah.inflight + 1;
+    if (ah.inflight > ah.peak_inflight) {
+        ah.peak_inflight = ah.inflight;
+    }
+
+    if (oslot != 0) {
+        *oslot = slot;
+    }
+    if (slot < ASYNC_DEPTH) {
+        slot_cmd[slot] = cmd;
     }
     return 1;
+}
+
+/* Submit + wait (IDENTIFY / non-pipelined / flush helpers). */
+static u32 ahci_issue(u8 ata_cmd, u64 lba, u16 count, u64 buf_phys, u32 write) {
+    u32 slot = 0;
+    u8 cmd;
+    if (!ahci_submit(ata_cmd, lba, count, buf_phys, write, 0xFFFFFFFFu, &slot)) {
+        return 0;
+    }
+    cmd = ata_cmd;
+    if (slot < ASYNC_DEPTH) {
+        cmd = slot_cmd[slot];
+    }
+    if (!ahci_wait_slot(cmd, slot)) {
+        if (ah.inflight > 0) {
+            ah.inflight = ah.inflight - 1;
+        }
+        return 0;
+    }
+    if (ah.inflight > 0) {
+        ah.inflight = ah.inflight - 1;
+    }
+    return 1;
+}
+
+/* Drain every outstanding command (best-effort). */
+static void ahci_drain(void) {
+    u32 spins = 0;
+    while ((*port_reg(PxCI) | (ah.ncq ? *port_reg(PxSACT) : 0)) != 0) {
+        if (ahci_check_fatal((u8)ATA_CMD_READ_FPDMA)) {
+            break;
+        }
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            break;
+        }
+    }
+    ah.inflight = 0;
+    *port_reg(PxIS) = 0xFFFFFFFFu;
+    *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
 }
 
 u32 ahci_present_p(void) {
@@ -365,72 +519,124 @@ u64 ahci_capacity(void) {
     return ah.capacity;
 }
 
-u32 ahci_read(u64 sector, void *kbuf, u32 count) {
-    u8 *dst = (u8 *)kbuf;
-    u32 done = 0;
+/* Pipelined NCQ transfer (or serial DMA when depth==1 / !ncq). */
+static u32 ahci_xfer(u64 sector, void *kbuf, u32 count, u32 write) {
+    u8 *buf = (u8 *)kbuf;
+    u32 submitted = 0;
+    u32 completed = 0;
+    u32 active = 0;
+    u32 depth;
+
     if (!ah.present || count == 0) {
         return 0;
     }
     if (sector + (u64)count > ah.capacity) {
         return 0;
     }
-    while (done < count) {
-        u32 n = count - done;
-        u64 bounce = ah.arena_phys + BOUNCE_OFF;
-        u32 b;
-        if (n > BOUNCE_MAX_SEC) {
-            n = BOUNCE_MAX_SEC;
+
+    while (ah.busy) {
+        cpu_pause();
+    }
+    ah.busy = 1;
+
+    depth = ah.ncq ? ah.depth : 1;
+    if (depth < 1) {
+        depth = 1;
+    }
+
+    while (completed < count) {
+        /* Fill the async window. */
+        while (submitted < count && ahci_popcount(active) < depth) {
+            u32 n = count - submitted;
+            u32 slot = 0;
+            u64 bounce;
+            u32 b;
+            if (n > BOUNCE_MAX_SEC) {
+                n = BOUNCE_MAX_SEC;
+            }
+            /* Pre-pick: need a free slot before filling bounce for writes. */
+            {
+                u32 busybits = *port_reg(PxCI) | *port_reg(PxSACT);
+                u32 i;
+                u32 found = 0xFFFFFFFFu;
+                u32 lim = depth;
+                if (lim > ASYNC_DEPTH) {
+                    lim = ASYNC_DEPTH;
+                }
+                for (i = 0; i < lim; i++) {
+                    if (((busybits >> i) & 1u) == 0
+                        && ((active >> i) & 1u) == 0) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found == 0xFFFFFFFFu) {
+                    break;
+                }
+                slot = found;
+            }
+            bounce = bounce_phys_for(slot);
+            if (write) {
+                for (b = 0; b < n * SECTOR_SIZE; b++) {
+                    hhdm8(bounce)[b] = buf[(u64)submitted * SECTOR_SIZE + b];
+                }
+            }
+            if (!ahci_submit((u8)(write ? ATA_CMD_WRITE_DMA_EXT
+                                        : ATA_CMD_READ_DMA_EXT),
+                             sector + (u64)submitted, (u16)n, bounce, write,
+                             slot, &slot)) {
+                ahci_drain();
+                ah.busy = 0;
+                return 0;
+            }
+            slot_nsec[slot] = n;
+            slot_off[slot] = submitted;
+            active = active | (1u << slot);
+            submitted = submitted + n;
         }
-        while (ah.busy) {
-            cpu_pause();
-        }
-        ah.busy = 1;
-        if (!ahci_issue((u8)ATA_CMD_READ_DMA_EXT, sector + (u64)done, (u16)n,
-                        bounce, 0)) {
+
+        if (active == 0) {
             ah.busy = 0;
             return 0;
         }
-        for (b = 0; b < n * SECTOR_SIZE; b++) {
-            dst[(u64)done * SECTOR_SIZE + b] = hhdm8(bounce)[b];
+
+        {
+            u32 done_slot = 0;
+            u32 n;
+            u32 off;
+            u32 b;
+            u64 bounce;
+            if (!ahci_wait_any(active, &done_slot)) {
+                ahci_drain();
+                ah.busy = 0;
+                return 0;
+            }
+            n = slot_nsec[done_slot];
+            off = slot_off[done_slot];
+            bounce = bounce_phys_for(done_slot);
+            if (!write) {
+                for (b = 0; b < n * SECTOR_SIZE; b++) {
+                    buf[(u64)off * SECTOR_SIZE + b] = hhdm8(bounce)[b];
+                }
+            }
+            active = active & ~(1u << done_slot);
+            if (ah.inflight > 0) {
+                ah.inflight = ah.inflight - 1;
+            }
+            completed = completed + n;
         }
-        ah.busy = 0;
-        done += n;
     }
+
+    ah.busy = 0;
     return 1;
 }
 
+u32 ahci_read(u64 sector, void *kbuf, u32 count) {
+    return ahci_xfer(sector, kbuf, count, 0);
+}
+
 u32 ahci_write(u64 sector, const void *kbuf, u32 count) {
-    const u8 *src = (const u8 *)kbuf;
-    u32 done = 0;
-    if (!ah.present || count == 0) {
-        return 0;
-    }
-    if (sector + (u64)count > ah.capacity) {
-        return 0;
-    }
-    while (done < count) {
-        u32 n = count - done;
-        u64 bounce = ah.arena_phys + BOUNCE_OFF;
-        u32 b;
-        if (n > BOUNCE_MAX_SEC) {
-            n = BOUNCE_MAX_SEC;
-        }
-        for (b = 0; b < n * SECTOR_SIZE; b++) {
-            hhdm8(bounce)[b] = src[(u64)done * SECTOR_SIZE + b];
-        }
-        while (ah.busy) {
-            cpu_pause();
-        }
-        ah.busy = 1;
-        if (!ahci_issue((u8)ATA_CMD_WRITE_DMA_EXT, sector + (u64)done, (u16)n,
-                        bounce, 1)) {
-            ah.busy = 0;
-            return 0;
-        }
-        ah.busy = 0;
-        done += n;
-    }
-    return 1;
+    return ahci_xfer(sector, (void *)kbuf, count, 1);
 }
 
 u32 ahci_flush(void) {
@@ -438,6 +644,11 @@ u32 ahci_flush(void) {
     if (!ah.present) {
         return 0;
     }
+    while (ah.busy) {
+        cpu_pause();
+    }
+    ah.busy = 1;
+    ahci_drain();
     bounce = ah.arena_phys + IDENT_OFF;
     {
         u64 cl_phys = ah.arena_phys + CL_OFF;
@@ -445,10 +656,6 @@ u32 ahci_flush(void) {
         u64 fis_phys = ct_phys;
         u64 prdt_phys = ct_phys + 0x80;
         u32 i;
-        while (ah.busy) {
-            cpu_pause();
-        }
-        ah.busy = 1;
         *port_reg(PxIS) = 0xFFFFFFFFu;
         for (i = 0; i < 256; i++) {
             hhdm8(ct_phys)[i] = 0;
@@ -477,6 +684,107 @@ u32 ahci_flush(void) {
     return 1;
 }
 
+/* Save/restore tail sectors; prove multi-outstanding NCQ depth >= 2. */
+void ahci_selftest(void) {
+    u64 lba;
+    u32 secs = AHCI_TEST_SECS;
+    u64 save_phys;
+    u64 pat_phys;
+    u8 *save;
+    u8 *pat;
+    u32 i;
+    u32 ok;
+    u32 peak;
+
+    if (!ah.present) {
+        return;
+    }
+    if (!ah.ncq || ah.depth < 2) {
+        kprintf("[AHCI] async NCQ selftest skipped (ncq=%u depth=%u)\n",
+                (u64)ah.ncq, (u64)ah.depth);
+        return;
+    }
+    if (ah.capacity < (u64)secs + 8) {
+        kprintf("[AHCI] async NCQ selftest skipped (tiny disk)\n");
+        return;
+    }
+
+    /* Two order-3 blocks: 32 KiB each covers 64 sectors. */
+    save_phys = mem.pmm_alloc_pages(3);
+    pat_phys = mem.pmm_alloc_pages(3);
+    if (save_phys == 0 || pat_phys == 0) {
+        kprintf("[AHCI] [FAIL] async NCQ selftest alloc\n");
+        return;
+    }
+    save = (u8 *)(void *)hhdm8(save_phys);
+    pat = (u8 *)(void *)hhdm8(pat_phys);
+    lba = ah.capacity - (u64)secs;
+
+    ah.peak_inflight = 0;
+    if (!ahci_read(lba, save, secs)) {
+        kprintf("[AHCI] [FAIL] async NCQ save-read\n");
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        pat[i] = (u8)(0xA5 ^ (u8)i ^ (u8)(i >> 8));
+    }
+
+    ah.peak_inflight = 0;
+    if (!ahci_write(lba, pat, secs)) {
+        kprintf("[AHCI] [FAIL] async NCQ multi-write\n");
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    peak = ah.peak_inflight;
+
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        pat[i] = 0;
+    }
+    if (!ahci_read(lba, pat, secs)) {
+        kprintf("[AHCI] [FAIL] async NCQ multi-read\n");
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+
+    ok = 1;
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        u8 expect = (u8)(0xA5 ^ (u8)i ^ (u8)(i >> 8));
+        if (pat[i] != expect) {
+            ok = 0;
+            break;
+        }
+    }
+
+    if (!ahci_write(lba, save, secs)) {
+        kprintf("[AHCI] [FAIL] async NCQ restore-write\n");
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+
+    mem.pmm_free_pages(save_phys, 3);
+    mem.pmm_free_pages(pat_phys, 3);
+
+    if (!ok) {
+        kprintf("[AHCI] [FAIL] async NCQ data mismatch\n");
+        return;
+    }
+    if (peak < 2) {
+        kprintf("[AHCI] [FAIL] async NCQ peak_inflight=%u (want >=2)\n",
+                (u64)peak);
+        return;
+    }
+    kprintf("[AHCI] [PASS] async NCQ multi-outstanding (peak=%u depth=%u secs=%u)\n",
+            (u64)peak, (u64)ah.depth, (u64)secs);
+}
+
 void ahci_init(void) {
     u8 bus = 0;
     u8 slot = 0;
@@ -503,7 +811,10 @@ void ahci_init(void) {
     ah.irq_armed = 0;
     ah.ncq = 0;
     ah.nslots = 1;
+    ah.depth = 1;
     ah.busy = 0;
+    ah.inflight = 0;
+    ah.peak_inflight = 0;
     ah.pci_irq = 0;
 
     if (!pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
@@ -538,6 +849,7 @@ void ahci_init(void) {
         ncs = 1;
     }
     ah.nslots = ncs;
+    ah.depth = 1;
     kprintf("[AHCI] HBA CAP=0x%x VS=0x%x PI=0x%x NCS=%u at %u:%u.%u ABAR=0x%x\n",
             (u64)cap, (u64)vs, (u64)pi, (u64)ncs,
             (u64)bus, (u64)slot, (u64)func, (u64)abar);
@@ -610,6 +922,13 @@ void ahci_init(void) {
     /* CAP.SNCQ + IDENTIFY word 76 bit 8 (NCQ supported). */
     if ((cap & CAP_SNCQ) != 0 && (id[76] & 0x0100) != 0) {
         ah.ncq = 1;
+        ah.depth = ASYNC_DEPTH;
+        if (ah.depth > ah.nslots) {
+            ah.depth = ah.nslots;
+        }
+        if (ah.depth < 1) {
+            ah.depth = 1;
+        }
     }
 
     *port_reg(PxIS) = 0xFFFFFFFFu;
@@ -639,8 +958,13 @@ void ahci_init(void) {
     }
 
     ah.present = 1;
-    kprintf("[AHCI] port %u ready: capacity=%u sectors (%u KiB)%s%s\n",
+    kprintf("[AHCI] port %u ready: capacity=%u sectors (%u KiB)%s%s%s\n",
             (u64)ah.port, ah.capacity, ah.capacity / 2,
             ah.irq_armed ? " [IRQ]" : " [poll]",
-            ah.ncq ? " [NCQ]" : "");
+            ah.ncq ? " [NCQ]" : "",
+            ah.ncq ? " [async]" : "");
+    if (ah.ncq) {
+        kprintf("[AHCI] async NCQ depth=%u bounce=%u secs/slot\n",
+                (u64)ah.depth, (u64)BOUNCE_MAX_SEC);
+    }
 }
