@@ -653,14 +653,24 @@ byte ring for stdin. No kernel work. Focused virtio login smoke covers shuf
 range/file/ `-n`/`-e`, head/tail `-c`, prior greens (smp 1/2). Ramfs `/bin`
 dents 101/128.
 
-## Suggested next steps
+## wc -L + dirname multi-arg — landed
 
+Thin POSIX polish (no new `/bin` dent; no kernel work). Inventory: no
+`statfs(2)` yet, so thin `df` deferred. `wc` gains `-L` (and glued `-lwcL`)
+for max line length in bytes (unterminated final line counts); default with
+no flags remains lines/words/bytes. `dirname PATH...` accepts multiple
+operands and prints one dirname per line (GNU multi-arg; single-path
+behavior unchanged). Focused virtio login smoke covers `wc -L`/`-lL`,
+`dirname` multi, Ext2 file, prior greens (smp 1/2). Ramfs `/bin` dents
+101/128.
+
+## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`shuf` + head/tail `-c` + `find`/`du`
-   + `mv` recursive + `cp -r` + … already present): prefer small coherent
-   chunks such as thin `df` (needs `statfs` if the syscall already exists),
-   or other missing thin POSIX. Avoid deep jbd / Ext2-redirect duplex races /
-   CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`wc -L` + `dirname` multi + `shuf`
+   + head/tail `-c` + `find`/`du` + …): prefer small coherent chunks such as
+   thin `df` **only if** `statfs(2)` is added, or other missing thin POSIX
+   (e.g. `touch -c`, `/bin/kill`, thin `diff`). Avoid deep jbd /
+   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
