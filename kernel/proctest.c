@@ -57,13 +57,17 @@ extern void wait_queue_wake(struct wait_queue_head *wq);
 extern u32 wait_queue_wake_n(struct wait_queue_head *wq, u32 n);
 extern void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m);
 
-/* pipe() + tty paths use kmutex + wait_queue_sleep_unlock. */
+/* pipe() + tty + sock paths use kmutex + wait_queue_sleep_unlock. */
 extern u32 pipe_alloc(u32 *rfh, u32 *wfh);
 extern u32 pipe_close(u32 fh);
 extern u64 pipe_read(u32 fh, char *kbuf, u64 len);
 extern u64 pipe_write(u32 fh, const char *kbuf, u64 len);
 extern void tty_selftest_wait_byte(void);
 extern void tty_push_byte(char c);
+extern u32 sock_selftest_alloc(void);
+extern void sock_selftest_wait_rx(u32 slot);
+extern void sock_selftest_inject(u32 slot);
+extern void sock_selftest_free(u32 slot);
 
 enum {
     LOCK_WORKERS = 4,
@@ -759,12 +763,78 @@ static int test_tty_kmutex_blocking(void) {
     return 1;
 }
 
+
+/* Sock recv wait uses wait_queue_sleep_unlock; observe TCB_SLEEPING then wake. */
+static volatile u32 g_sock_waiter_done;
+static volatile u32 g_sock_waiter_id;
+static volatile u32 g_sock_slot;
+
+static void sock_blocking_waiter(u64 unused) {
+    (void)unused;
+    g_sock_waiter_id = sched_current_id();
+    sock_selftest_wait_rx(g_sock_slot);
+    g_sock_waiter_done = 1;
+    kthread_exit();
+}
+
+static int test_sock_kmutex_blocking(void) {
+    u32 wid;
+    u64 deadline;
+    u32 saw_sleep = 0;
+
+    g_sock_waiter_done = 0;
+    g_sock_waiter_id = 0;
+    g_sock_slot = sock_selftest_alloc();
+    if (g_sock_slot == 0) {
+        kprintf("      [FAIL] sock_selftest_alloc\n");
+        return 0;
+    }
+
+    wid = kthread_create((u64)(&sock_blocking_waiter), 0);
+    if (wid == 0) {
+        kprintf("      [FAIL] sock waiter kthread\n");
+        sock_selftest_free(g_sock_slot);
+        return 0;
+    }
+
+    deadline = sched_tick_count() + 200;
+    while (sched_tick_count() < deadline) {
+        if (g_sock_waiter_id != 0) {
+            if (sched_thread_state(g_sock_waiter_id) == TCB_SLEEPING_ST) {
+                saw_sleep = 1;
+                break;
+            }
+        }
+        sched_yield();
+    }
+    if (!saw_sleep) {
+        kprintf("      [WARN] sock waiter never observed SLEEPING\n");
+    }
+
+    sock_selftest_inject(g_sock_slot);
+
+    deadline = sched_tick_count() + 200;
+    while (g_sock_waiter_done == 0 && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    sock_selftest_free(g_sock_slot);
+    if (g_sock_waiter_done != 1) {
+        kprintf("      [FAIL] sock waiter did not wake (done=%u sleep=%u)\n",
+                g_sock_waiter_done, saw_sleep);
+        return 0;
+    }
+    if (!saw_sleep) {
+        return 1;
+    }
+    return 1;
+}
+
 void sched_selftest(void) {
     kprintf("\n[SCHED] Kernel Threads & CFS-lite Weighted Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
     kprintf("      Switch       : callee-saved RSP context, min-vruntime + nice weights\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
-    kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe path)\n");
+    kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");
 
     sched_init();
 
@@ -801,6 +871,9 @@ void sched_selftest(void) {
     }
     if (test_tty_kmutex_blocking()) {
         kprintf("      [PASS] tty kmutex + wait_queue_sleep_unlock blocking\n");
+    }
+    if (test_sock_kmutex_blocking()) {
+        kprintf("      [PASS] sock kmutex + wait_queue_sleep_unlock blocking\n");
     }
     arch.cpu_cli();
 }

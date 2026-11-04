@@ -345,6 +345,7 @@ def main():
         "[PASS] wait_queue wake_n(1) then wake-all",
         "[PASS] pipe kmutex + wait_queue_sleep_unlock blocking",
         "[PASS] tty kmutex + wait_queue_sleep_unlock blocking",
+        "[PASS] sock kmutex + wait_queue_sleep_unlock blocking",
         # Stage 4: VFS + Ramfs kernel self-test
         "[PASS] VFS path resolution",
         "[PASS] Ramfs file create/read/write/seek",
@@ -409,7 +410,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: tty+pipe kmutex/waitq + sleeping locks + CLEARTID join + Ext2 journal ordered + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!",
+        "[SUCCESS] fakeos: sock+tty+pipe kmutex/waitq + sleeping locks + CLEARTID join + Ext2 journal ordered + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

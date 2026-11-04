@@ -14,14 +14,31 @@ extern void virtio_net_mac(u8 *out);
 extern u32 virtio_net_tx(const void *frame, u32 len);
 extern u32 virtio_net_rx(void *frame, u32 maxlen);
 extern void sched_yield(void);
-extern void sched_sleep(u64 chan);
-extern void sched_wakeup(u64 chan);
 extern void select_kick(void);
 extern u64 sched_tick_count(void);
 extern u64 sched_current_as_h(void);
 extern u32 sched_fd_alloc(void);
 extern void sched_fd_set(u32 idx, u32 fh);
 extern u32 sched_fd_get(u32 idx);
+extern u32 sched_should_eintr(void);
+extern void cpu_cli(void);
+extern void cpu_sti(void);
+
+struct kmutex {
+    u32 locked;
+    u32 owner;
+};
+
+struct wait_queue_head {
+    u32 pad;
+};
+
+extern void kmutex_init(struct kmutex *m);
+extern void kmutex_lock(struct kmutex *m);
+extern void kmutex_unlock(struct kmutex *m);
+extern void wait_queue_init(struct wait_queue_head *wq);
+extern void wait_queue_wake(struct wait_queue_head *wq);
+extern void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m);
 
 /* ---------------------------------------------------------------------------
  * Minimal L2/L3 + BSD-ish UDP/TCP sockets.
@@ -32,6 +49,10 @@ extern u32 sched_fd_get(u32 idx);
  * ICMP echo (sys_ping); UDP socket/bind/connect/sendto/recvfrom;
  * TCP 3-way handshake, listen/accept, and byte-stream send/recv
  * (loopback fully exercised; SYN/data retransmit via 100Hz timer).
+ *
+ * Blocking: per-sock kmutex + wait_queue_head (same pattern as pipe/tty).
+ * recv/accept/connect use wait_queue_sleep_unlock; RX/state paths wake via
+ * wait_queue_wake without taking the mutex (IRQ-safe: net_poll from ISR).
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -148,6 +169,8 @@ struct sock {
     u8  rexmit_flags;
     u16 rexmit_len;
     u8  rexmit_buf[TCP_MAX_PAYLOAD];
+    struct kmutex lock;
+    struct wait_queue_head wait;
 };
 
 static u8  local_mac[6];
@@ -423,6 +446,20 @@ static struct sock *sock_from_fh(u32 fh) {
     return &socks[s];
 }
 
+/* Wake sleepers on this sock; IRQ-safe (no kmutex). */
+static void sock_wake(struct sock *sk) {
+    if (sk == 0) {
+        return;
+    }
+    wait_queue_wake(&sk->wait);
+    select_kick();
+}
+
+static void sock_locks_init(struct sock *sk) {
+    kmutex_init(&sk->lock);
+    wait_queue_init(&sk->wait);
+}
+
 void sock_retain(u32 fh) {
     struct sock *sk = sock_from_fh(fh);
     if (sk) {
@@ -461,7 +498,7 @@ u32 sock_close(u32 fh) {
     sk->rx_tail = 0;
     sk->s_count = 0;
     sk->tcp_state = TCPS_CLOSED;
-    sched_wakeup((u64)sk); select_kick();
+    sock_wake(sk);
     return 1;
 }
 
@@ -474,6 +511,7 @@ static u32 sock_alloc_slot(void) {
             socks[i].rexmit_due = 0;
             socks[i].rexmit_len = 0;
             socks[i].refs = 1;
+            sock_locks_init(&socks[i]);
             return i;
         }
     }
@@ -552,7 +590,7 @@ static void sock_enqueue(struct sock *sk, u32 src_ip, u16 src_port,
         sk->rx_tail = 0;
     }
     sk->rx_count++;
-    sched_wakeup((u64)sk); select_kick();
+    sock_wake(sk);
 }
 
 /* Parse DHCP options; fill offer_* globals. msgtype 2=OFFER, 5=ACK. */
@@ -940,7 +978,7 @@ static void stream_push(struct sock *sk, const u8 *data, u16 plen) {
         sk->s_count++;
     }
     if (plen > 0) {
-        sched_wakeup((u64)sk); select_kick();
+        sock_wake(sk);
     }
 }
 
@@ -968,7 +1006,7 @@ static void accept_enqueue(struct sock *listener, u32 child_slot) {
         listener->accept_tail = 0;
     }
     listener->accept_count++;
-    sched_wakeup((u64)listener); select_kick();
+    sock_wake(listener);
 }
 
 static u32 accept_dequeue(struct sock *listener) {
@@ -1102,11 +1140,11 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
             tcp_clear_rexmit(sk);
             tcp_tx_seg(sk->local_port, src_ip, sport,
                        sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
-            sched_wakeup((u64)sk); select_kick();
+            sock_wake(sk);
         } else if (flags & TCPF_RST) {
             sk->tcp_state = TCPS_CLOSED;
             tcp_clear_rexmit(sk);
-            sched_wakeup((u64)sk); select_kick();
+            sock_wake(sk);
         }
         return;
     }
@@ -1140,7 +1178,7 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
         sk->tcp_state = TCPS_CLOSED;
         sk->peer_fin = 1;
         tcp_clear_rexmit(sk);
-        sched_wakeup((u64)sk); select_kick();
+        sock_wake(sk);
         return;
     }
 
@@ -1173,14 +1211,14 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
             } else if (sk->tcp_state == TCPS_FIN_WAIT) {
                 sk->tcp_state = TCPS_CLOSED;
             }
-            sched_wakeup((u64)sk); select_kick();
+            sock_wake(sk);
         }
     }
 
     if ((flags & TCPF_ACK) && sk->tcp_state == TCPS_LAST_ACK) {
         if (ack == sk->snd_nxt) {
             sk->tcp_state = TCPS_CLOSED;
-            sched_wakeup((u64)sk); select_kick();
+            sock_wake(sk);
         }
     }
 }
@@ -1456,7 +1494,6 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
     struct sock *sk;
     u32 ip;
     u16 port;
-    u32 spins;
     sk = sock_from_fh(fh);
     if (!sk) {
         return (u64)(-1);
@@ -1496,24 +1533,58 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
     }
     sk->snd_nxt = sk->iss + 1;
     tcp_arm_rexmit(sk, sk->iss, TCPF_SYN, 0, 0);
-    for (spins = 0; spins < 2000000; spins++) {
-        net_poll();
-        if (sk->tcp_state == TCPS_ESTABLISHED) {
-            sk->connected = 1;
-            tcp_clear_rexmit(sk);
-            return 0;
-        }
-        if (sk->tcp_state == TCPS_CLOSED) {
-            tcp_clear_rexmit(sk);
-            return (u64)(-1);
-        }
-        if ((spins & 255) == 0) {
-            sched_yield();
+    {
+        u64 deadline = sched_tick_count() + 500; /* ~5s @ 100Hz */
+        kmutex_lock(&sk->lock);
+        for (;;) {
+            cpu_cli();
+            if (sk->tcp_state == TCPS_ESTABLISHED) {
+                cpu_sti();
+                sk->connected = 1;
+                tcp_clear_rexmit(sk);
+                kmutex_unlock(&sk->lock);
+                return 0;
+            }
+            if (sk->tcp_state == TCPS_CLOSED || !sk->used) {
+                cpu_sti();
+                tcp_clear_rexmit(sk);
+                kmutex_unlock(&sk->lock);
+                return (u64)(-1);
+            }
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
+            net_poll();
+            kmutex_lock(&sk->lock);
+            cpu_cli();
+            if (sk->tcp_state == TCPS_ESTABLISHED) {
+                cpu_sti();
+                sk->connected = 1;
+                tcp_clear_rexmit(sk);
+                kmutex_unlock(&sk->lock);
+                return 0;
+            }
+            if (sk->tcp_state == TCPS_CLOSED || !sk->used) {
+                cpu_sti();
+                tcp_clear_rexmit(sk);
+                kmutex_unlock(&sk->lock);
+                return (u64)(-1);
+            }
+            if (sched_tick_count() >= deadline) {
+                cpu_sti();
+                tcp_clear_rexmit(sk);
+                sk->tcp_state = TCPS_CLOSED;
+                kmutex_unlock(&sk->lock);
+                return (u64)(-1);
+            }
+            wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+            if (sched_should_eintr()) {
+                tcp_clear_rexmit(sk);
+                sk->tcp_state = TCPS_CLOSED;
+                kmutex_unlock(&sk->lock);
+                return (u64)(-4);
+            }
         }
     }
-    tcp_clear_rexmit(sk);
-    sk->tcp_state = TCPS_CLOSED;
-    return (u64)(-1);
 }
 
 u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
@@ -1615,7 +1686,8 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
     struct udp_pkt *pkt;
     u32 i;
     u16 n;
-    u32 spins;
+    u32 src_ip;
+    u16 src_port;
     (void)flags;
     sk = sock_from_fh(fh);
     if (!sk || as == 0) {
@@ -1627,35 +1699,49 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
         if (!sk->bound) {
             return (u64)(-1);
         }
-        spins = 0;
-        while (sk->s_count == 0) {
-            if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED) {
-                return 0;             /* EOF */
-            }
-            net_poll();
+        kmutex_lock(&sk->lock);
+        for (;;) {
+            cpu_cli();
             if (sk->s_count > 0) {
+                cpu_sti();
                 break;
             }
-            if ((spins & 63) == 0) {
-                sched_sleep((u64)sk);
-            } else {
-                sched_yield();
+            if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED || !sk->used) {
+                cpu_sti();
+                kmutex_unlock(&sk->lock);
+                return sk->used ? 0 : (u64)(-1);
             }
-            spins++;
-            if (spins > 4000000) {
-                return (u64)(-1);
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
+            net_poll();
+            kmutex_lock(&sk->lock);
+            cpu_cli();
+            if (sk->s_count > 0) {
+                cpu_sti();
+                break;
             }
-            if (!sk->used) {
-                return (u64)(-1);
+            if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED || !sk->used) {
+                cpu_sti();
+                kmutex_unlock(&sk->lock);
+                return sk->used ? 0 : (u64)(-1);
+            }
+            wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+            if (sched_should_eintr()) {
+                kmutex_unlock(&sk->lock);
+                return (u64)(-4);
             }
         }
         if (sk->s_count == 0 && sk->peer_fin) {
+            kmutex_unlock(&sk->lock);
             return 0;
         }
         if (len > TCP_MAX_PAYLOAD) {
             len = TCP_MAX_PAYLOAD;
         }
         got = stream_pop(sk, tbuf, (u32)len);
+        src_ip = sk->peer_ip;
+        src_port = sk->peer_port;
+        kmutex_unlock(&sk->lock);
         if (got > 0) {
             if (!mem.as_user_range_ok(as, ubuf, got)) {
                 return (u64)(-1);
@@ -1668,7 +1754,7 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
             }
         }
         if (uaddr != 0) {
-            if (!write_sockaddr_in(uaddr, ualen, sk->peer_ip, sk->peer_port)) {
+            if (!write_sockaddr_in(uaddr, ualen, src_ip, src_port)) {
                 return (u64)(-1);
             }
         }
@@ -1677,24 +1763,37 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
     if (sk->type != SOCK_DGRAM || !sk->bound) {
         return (u64)(-1);
     }
-    spins = 0;
-    while (sk->rx_count == 0) {
-        net_poll();
+    kmutex_lock(&sk->lock);
+    for (;;) {
+        cpu_cli();
         if (sk->rx_count > 0) {
+            cpu_sti();
             break;
         }
-        /* Yield so idle can run; also sleep on the sock channel. */
-        if ((spins & 63) == 0) {
-            sched_sleep((u64)sk);
-        } else {
-            sched_yield();
+        if (!sk->used) {
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
+            return (u64)(-1);
         }
-        spins++;
-        if (spins > 2000000) {
-            return (u64)(-1);         /* soft timeout */
+        cpu_sti();
+        kmutex_unlock(&sk->lock);
+        net_poll();
+        kmutex_lock(&sk->lock);
+        cpu_cli();
+        if (sk->rx_count > 0) {
+            cpu_sti();
+            break;
         }
         if (!sk->used) {
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
             return (u64)(-1);
+        }
+        /* Empty under CLI then atomic unlock+sleep (tty/pipe pattern). */
+        wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+        if (sched_should_eintr()) {
+            kmutex_unlock(&sk->lock);
+            return (u64)(-4);
         }
     }
     pkt = &sk->rxq[sk->rx_head];
@@ -1702,8 +1801,13 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
     if (len < n) {
         n = (u16)len;
     }
+    src_ip = pkt->src_ip;
+    src_port = pkt->src_port;
     if (n > 0) {
+        /* Copy out under the sock lock into a stack temp via direct user
+         * write after unlock would race dequeue; hold metadata, copy now. */
         if (!mem.as_user_range_ok(as, ubuf, n)) {
+            kmutex_unlock(&sk->lock);
             return (u64)(-1);
         }
         {
@@ -1713,16 +1817,17 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
             }
         }
     }
-    if (uaddr != 0) {
-        if (!write_sockaddr_in(uaddr, ualen, pkt->src_ip, pkt->src_port)) {
-            return (u64)(-1);
-        }
-    }
     sk->rx_head++;
     if (sk->rx_head >= SOCK_RXQ) {
         sk->rx_head = 0;
     }
     sk->rx_count--;
+    kmutex_unlock(&sk->lock);
+    if (uaddr != 0) {
+        if (!write_sockaddr_in(uaddr, ualen, src_ip, src_port)) {
+            return (u64)(-1);
+        }
+    }
     return (u64)n;
 }
 
@@ -1746,33 +1851,50 @@ u64 sys_accept(u64 fd, u64 uaddr, u64 ualen) {
     struct sock *sk = sock_from_fh(fh);
     u32 child_slot;
     u32 nfd;
-    u32 spins;
+    u32 peer_ip;
+    u16 peer_port;
     if (!sk || sk->type != SOCK_STREAM || sk->tcp_state != TCPS_LISTEN) {
         return (u64)(-1);
     }
-    spins = 0;
-    while (sk->accept_count == 0) {
-        net_poll();
+    kmutex_lock(&sk->lock);
+    for (;;) {
+        cpu_cli();
         if (sk->accept_count > 0) {
+            cpu_sti();
             break;
         }
-        if ((spins & 63) == 0) {
-            sched_sleep((u64)sk);
-        } else {
-            sched_yield();
-        }
-        spins++;
-        if (spins > 4000000) {
+        if (!sk->used) {
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
             return (u64)(-1);
+        }
+        cpu_sti();
+        kmutex_unlock(&sk->lock);
+        net_poll();
+        kmutex_lock(&sk->lock);
+        cpu_cli();
+        if (sk->accept_count > 0) {
+            cpu_sti();
+            break;
         }
         if (!sk->used) {
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
             return (u64)(-1);
+        }
+        wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+        if (sched_should_eintr()) {
+            kmutex_unlock(&sk->lock);
+            return (u64)(-4);
         }
     }
     child_slot = accept_dequeue(sk);
+    kmutex_unlock(&sk->lock);
     if (child_slot == 0 || !socks[child_slot].used) {
         return (u64)(-1);
     }
+    peer_ip = socks[child_slot].peer_ip;
+    peer_port = socks[child_slot].peer_port;
     nfd = sched_fd_alloc();
     if (nfd == FD_BAD) {
         socks[child_slot].used = 0;
@@ -1780,9 +1902,7 @@ u64 sys_accept(u64 fd, u64 uaddr, u64 ualen) {
     }
     sched_fd_set(nfd, FH_SOCK_BASE | child_slot);
     if (uaddr != 0) {
-        if (!write_sockaddr_in(uaddr, ualen,
-                               socks[child_slot].peer_ip,
-                               socks[child_slot].peer_port)) {
+        if (!write_sockaddr_in(uaddr, ualen, peer_ip, peer_port)) {
             /* still return the fd; address copy is best-effort */
         }
     }
@@ -1969,6 +2089,60 @@ u64 sys_getsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen_u) {
     *(volatile u32 *)optval = val;
     *(volatile u32 *)optlen_u = 4;
     return 0;
+}
+
+/* Self-test hooks: block on sock wait_queue until a datagram is injected. */
+u32 sock_selftest_alloc(void) {
+    u32 s = sock_alloc_slot();
+    if (s == 0) {
+        return 0;
+    }
+    socks[s].type = SOCK_DGRAM;
+    socks[s].local_ip = 0;
+    socks[s].local_port = 65000;
+    socks[s].bound = 1;
+    return s;
+}
+
+void sock_selftest_wait_rx(u32 slot) {
+    struct sock *sk;
+    if (slot == 0 || slot >= MAX_SOCKS) {
+        return;
+    }
+    sk = &socks[slot];
+    if (!sk->used) {
+        return;
+    }
+    kmutex_lock(&sk->lock);
+    cpu_cli();
+    for (;;) {
+        if (sk->rx_count > 0 || !sk->used) {
+            cpu_sti();
+            kmutex_unlock(&sk->lock);
+            return;
+        }
+        wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+        cpu_cli();
+    }
+}
+
+void sock_selftest_inject(u32 slot) {
+    u8 b[1];
+    if (slot == 0 || slot >= MAX_SOCKS || !socks[slot].used) {
+        return;
+    }
+    b[0] = (u8)('S');
+    sock_enqueue(&socks[slot], LOOPBACK_IP, 1, b, 1);
+}
+
+void sock_selftest_free(u32 slot) {
+    if (slot == 0 || slot >= MAX_SOCKS) {
+        return;
+    }
+    socks[slot].used = 0;
+    socks[slot].refs = 0;
+    socks[slot].rx_count = 0;
+    sock_wake(&socks[slot]);
 }
 
 void net_udp_selftest(void) {

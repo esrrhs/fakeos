@@ -216,6 +216,7 @@ flowchart TD
 - [x] **睡眠锁完备化（kmutex/ksem/wait_queue）**：在既有 channel sleep 上补齐 owner/`trylock`、计数信号量与类型化 waitqueue；`sched_selftest` 验证睡眠而非忙等。
 - [x] **pipe 走 kmutex + wait_queue**：每 pipe 一把 `kmutex` + 读/写 `wait_queue_head`；`wait_queue_sleep_unlock` 在 run-lock 下原子放锁并睡眠，避免 unlock-then-sleep 丢唤醒；表分配另有 `pipes_table_lock`；自测 `[PASS] pipe kmutex + wait_queue_sleep_unlock blocking`（写端填满环后进入 `TCB_SLEEPING`）。
 - [x] **TTY 走 kmutex + wait_queue**：控制台读与 pipe 同型——`tty_lock` + `tty_wait`；空环在 CLI 下检查后 `wait_queue_sleep_unlock`；UART/PS2 摄入路径 `wait_queue_wake`；自测 `[PASS] tty kmutex + wait_queue_sleep_unlock blocking`（waiter 进入 `TCB_SLEEPING`，`tty_push_byte` 唤醒）。
+- [x] **socket 走 kmutex + wait_queue**：每 sock 一把 `kmutex` + `wait_queue_head`；`recv`/`accept`/`connect` 阻塞走 `wait_queue_sleep_unlock`（空检查在 CLI 下，与 tty 同）；RX/状态路径（含 ISR `net_poll`）只 `wait_queue_wake` 不取锁；自测 `[PASS] sock kmutex + wait_queue_sleep_unlock blocking`。
 
 
 
