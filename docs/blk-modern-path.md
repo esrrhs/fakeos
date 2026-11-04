@@ -2132,6 +2132,12 @@ virtio login smoke covers `-di` + prior greens (smp 1/2).
 instead of creating them. Existing files still get `ftruncate`. `-c` may
 precede `-s`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## csplit -s — landed
+
+`/bin/csplit -s` suppresses printing each created piece path (GNU
+`--quiet`/`--silent`). Default still prints one path per piece. Keeps
+`-f`/`-n`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2140,6 +2146,5 @@ precede `-s`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `csplit -s`, `ls -h`, `od` leftovers if any; `cp -p` waits on utimensat;
-   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS /
-   jbd alone.
+   `ls -h`, `od` leftovers if any; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

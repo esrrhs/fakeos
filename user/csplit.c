@@ -1,8 +1,9 @@
 /* fakeos userland - csplit: split a file by line numbers (thin POSIX subset).
- * Forms: csplit [-f PREFIX|-fPREFIX] [-n DIGITS|-nDIGITS] FILE LINE...
+ * Forms: csplit [-s] [-f PREFIX|-fPREFIX] [-n DIGITS|-nDIGITS] FILE LINE...
  * LINE is 1-based; each LINE starts a new piece before that line. Remainder
  * is the last piece. PREFIX default "xx", DIGITS default 2 (xx00, xx01, ...).
- * FILE "-" reads stdin. Glued -f/-n keep argv under EXEC_MAX_ARGC=8.
+ * Without -s, each created piece path is printed (one per line). -s is silent
+ * (GNU --quiet). FILE "-" reads stdin. Glued -f/-n keep EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -27,11 +28,12 @@ enum {
 
 static const char *prefix = "xx";
 static int digits = 2;
+static int opt_s; /* -s: suppress piece-path prints */
 static long breaks[LINE_ARGS_MAX];
 static int nbreaks;
 
 static void usage(void) {
-    u_write(2, "usage: csplit [-f PREFIX] [-n DIGITS] FILE LINE...\n", 51);
+    u_write(2, "usage: csplit [-s] [-f PREFIX] [-n DIGITS] FILE LINE...\n", 56);
 }
 
 static int is_digits(const char *s) {
@@ -72,8 +74,8 @@ static long open_piece(int idx) {
         u_write(2, "csplit: open failed\n", 20);
         return -1;
     }
-    /* Print created path like GNU csplit (one per line) for smokeability. */
-    {
+    /* Print created path (one per line) unless -s / --quiet. */
+    if (!opt_s) {
         unsigned long n = 0;
         while (path[n]) n++;
         u_write(1, path, n);
@@ -127,6 +129,7 @@ int main(int argc, char **argv) {
     const char *file = 0;
     long fd;
 
+    opt_s = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         const char *a = argv[i];
         if (strcmp(a, "--") == 0) {
@@ -134,6 +137,11 @@ int main(int argc, char **argv) {
             break;
         }
         if (strcmp(a, "-") == 0) break;
+        if (strcmp(a, "-s") == 0) {
+            opt_s = 1;
+            i++;
+            continue;
+        }
         if (strcmp(a, "-f") == 0) {
             if (i + 1 >= argc) { usage(); return 1; }
             prefix = argv[i + 1];
