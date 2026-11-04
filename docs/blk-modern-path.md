@@ -81,11 +81,12 @@ Ext2 reads on-disk mode/size/nlink; pipes → `S_IFIFO`, sockets → `S_IFSOCK`.
 `AT_EMPTY_PATH`. `ls -l` uses `fstatat(dirfd, name)` for mode/size. Init smoke:
 `[U][PASS] stat/fstat/newfstatat`.
 
-## /proc/self/{status,maps,cmdline} — landed
+## /proc/self/{status,maps,cmdline,environ} — landed
 
-Synthetic Ramfs nodes beside existing `environ`. Open snapshots live content:
+Synthetic Ramfs nodes. Open snapshots live content:
 `status` (Name/Pid/PPid/Threads/VmSize), `maps` (VMA lines + `[stack]`/`[heap]`),
-`cmdline` (NUL-separated argv from exec/pid1). Init smoke:
+`cmdline` (NUL-separated argv from exec/pid1), `environ` (NUL-separated
+`NAME=val` from execve envp; empty envp seeds `FAKECC_PKG=/src`). Init smoke:
 `[U][PASS] /proc/self status/maps/cmdline`.
 
 ## getppid / uname / nanosleep / clock_gettime — landed
@@ -127,16 +128,21 @@ Builtin `realpath`; `ls -l` shows `name -> target` via readlink. Init smoke:
 
 ## shell env / export / unset / which — landed
 
-Shell-local environment table (default `PATH=/bin:/usr/bin:.`, `HOME=/home`,
-`USER=root`). Builtins: `env`, `export NAME=val`, `unset NAME`, `which CMD`
-(PATH lookup or `shell builtin`). Whole-token `$NAME` / `$?` expansion before
-run; bare `cd` uses `$HOME`. `resolve_cmd` reads `PATH` from the table.
-execve still takes an empty envp (kernel rejects non-empty). Focused virtio
-login smoke covers env/which alongside login/`uname`/`ls -l`/`/proc/self`.
+Shell environment table (default `PATH=/bin:/usr/bin:.`, `HOME=/home`,
+`USER=root`, `FAKECC_PKG=/src`). Builtins: `env`, `export NAME=val`,
+`unset NAME`, `which CMD` (PATH lookup or `shell builtin`). Whole-token
+`$NAME` / `$?` expansion before run; bare `cd` uses `$HOME`.
+
+## execve envp + live /proc/self/environ — landed
+
+Kernel accepts up to 8 envp strings (128B each), builds SysV stack envp, and
+stores NUL-separated `NAME=val` in the TCB for `/proc/self/environ` (snapshot
+on open). Empty/NULL envp seeds `FAKECC_PKG=/src` so kbuild/fakecc keep working.
+Shell passes its env table through `execve`. Focused virtio login smoke covers
+`export` + `cat /proc/self/environ` alongside login/`uname`/`ls -l`/`udptest`.
 
 ## Suggested next steps
 
-1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-2. Deep jbd — avoid unless needed.
-3. Optional shell polish: tab completion, timestamps / multi-column `ls`.
-4. Real execve envp + `/proc/self/environ` live update — only if apps need it.
+1. Optional shell polish: tab completion, timestamps / multi-column `ls`.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Deep jbd — avoid unless needed.

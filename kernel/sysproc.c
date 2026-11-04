@@ -410,12 +410,13 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
 }
 
 /* ---------------------------------------------------------------------------
- * /proc/self/{status,maps,cmdline} generators (snapshotted by ramfs on open)
+ * /proc/self/{status,maps,cmdline,environ} generators (snapshotted on open)
  * ------------------------------------------------------------------------- */
 
 extern u32 sched_current_ppid(void);
 extern u32 sched_current_threads(void);
 extern u64 sched_cmdline_copy(char *buf, u64 cap);
+extern u64 sched_environ_copy(char *buf, u64 cap);
 extern void sched_set_cmdline(const char *data, u64 n);
 extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
 extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
@@ -494,4 +495,8 @@ u64 procfs_gen_maps(char *buf, u64 cap) {
 
 u64 procfs_gen_cmdline(char *buf, u64 cap) {
     return sched_cmdline_copy(buf, cap);
+}
+
+u64 procfs_gen_environ(char *buf, u64 cap) {
+    return sched_environ_copy(buf, cap);
 }

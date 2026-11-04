@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; fakeos userland - C runtime entry. The kernel builds an SysV initial stack:
-;   RSP -> argc, argv pointers..., NULL, NULL (empty envp)
+;   RSP -> argc, argv..., NULL, envp..., NULL
 ; main() follows the hosted convention and its return value becomes exit code.
 ; ==============================================================================
 

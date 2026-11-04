@@ -107,6 +107,8 @@ struct tcb {
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
     char cmdline[128]; /* /proc/self/cmdline: NUL-separated argv bytes    */
     u32 cmdline_len;   /* bytes of cmdline that are meaningful            */
+    char environ[256]; /* /proc/self/environ: NUL-separated NAME=val      */
+    u32 environ_len;   /* bytes of environ that are meaningful            */
 };
 
 /* Sleeping locks: wait channel is the object's own address.
@@ -1941,6 +1943,8 @@ void sched_init(void) {
         threads[i].clear_child_tid = 0;
         threads[i].cmdline[0] = 0;
         threads[i].cmdline_len = 0;
+        threads[i].environ[0] = 0;
+        threads[i].environ_len = 0;
         threads[i].pid = 0;
         threads[i].tid = 0;
         threads[i].ppid = 0;
@@ -2173,6 +2177,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].fs_base = 0;
     threads[i].cmdline[0] = 0;
     threads[i].cmdline_len = 0;
+    threads[i].environ[0] = 0;
+    threads[i].environ_len = 0;
     threads[i].pid = pid;
     threads[i].tid = pid;              /* leader: tid == pid */
     threads[i].ppid = 0;
@@ -2256,6 +2262,10 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
             threads[i].cmdline[c] = threads[sched_cur()].cmdline[c];
         }
         threads[i].cmdline_len = threads[sched_cur()].cmdline_len;
+        for (c = 0; c < 256; c++) {
+            threads[i].environ[c] = threads[sched_cur()].environ[c];
+        }
+        threads[i].environ_len = threads[sched_cur()].environ_len;
     }
     threads[i].pid = child_pid;
     threads[i].tid = child_pid;        /* new process leader */
@@ -2354,6 +2364,10 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
             threads[i].cmdline[c] = threads[sched_cur()].cmdline[c];
         }
         threads[i].cmdline_len = threads[sched_cur()].cmdline_len;
+        for (c = 0; c < 256; c++) {
+            threads[i].environ[c] = threads[sched_cur()].environ[c];
+        }
+        threads[i].environ_len = threads[sched_cur()].environ_len;
     }
     threads[i].pid = threads[sched_cur()].pid;
     threads[i].tid = child_tid;
@@ -3212,6 +3226,94 @@ u64 sched_cmdline_copy(char *buf, u64 cap) {
     }
     for (i = 0; i < n; i++) {
         buf[i] = threads[self].cmdline[i];
+    }
+    return n;
+}
+
+/* Write environ into one TCB slot (and siblings sharing its pid). */
+static void environ_store(u32 self, const char *data, u64 n) {
+    u32 pid;
+    u64 i;
+    u32 t;
+    if (self >= MAX_THREADS) {
+        return;
+    }
+    if (n > 255) {
+        n = 255;
+    }
+    for (i = 0; i < n; i++) {
+        threads[self].environ[i] = data[i];
+    }
+    threads[self].environ[n] = 0;
+    threads[self].environ_len = (u32)n;
+    pid = threads[self].pid;
+    for (t = 0; t < MAX_THREADS; t++) {
+        if (t == self) {
+            continue;
+        }
+        if (threads[t].state != TCB_FREE && threads[t].pid == pid
+            && threads[t].is_user) {
+            for (i = 0; i <= n; i++) {
+                threads[t].environ[i] = threads[self].environ[i];
+            }
+            threads[t].environ_len = (u32)n;
+        }
+    }
+}
+
+void sched_set_environ(const char *data, u64 n) {
+    environ_store(sched_cur(), data, n);
+}
+
+void sched_set_environ_tcb(u32 tid, const char *data, u64 n) {
+    environ_store(tid, data, n);
+}
+
+/* Default for empty envp: keep fakecc getenv(/proc/self/environ) working. */
+void sched_set_environ_default(void) {
+    static const char defenv[] = {
+        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c'
+    };
+    sched_set_environ(defenv, 15);
+}
+
+void sched_set_environ_tcb_default(u32 tid) {
+    static const char defenv[] = {
+        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c'
+    };
+    sched_set_environ_tcb(tid, defenv, 15);
+}
+
+/* Build environ from flat exec envbuf (EXEC_ARG_SLOT = 128). */
+void sched_set_environ_envp(u32 envc, const char *envbuf) {
+    char tmp[256];
+    u64 at = 0;
+    u32 i;
+    for (i = 0; i < envc && at < 255; i++) {
+        const char *s = envbuf + (u64)i * 128;
+        u64 k = 0;
+        while (s[k] != 0 && at < 255) {
+            tmp[at++] = s[k++];
+        }
+        if (i + 1 < envc && at < 255) {
+            tmp[at++] = 0;           /* separator between NAME=val */
+        }
+    }
+    sched_set_environ(tmp, at);
+}
+
+u64 sched_environ_copy(char *buf, u64 cap) {
+    u32 self = sched_cur();
+    u64 n = threads[self].environ_len;
+    u64 i;
+    if (buf == 0 || cap == 0) {
+        return 0;
+    }
+    if (n > cap) {
+        n = cap;
+    }
+    for (i = 0; i < n; i++) {
+        buf[i] = threads[self].environ[i];
     }
     return n;
 }

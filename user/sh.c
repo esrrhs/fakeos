@@ -1,8 +1,9 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo ($?/$VAR), cd, pwd, mkdir, rmdir, ln -s, readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
- * Prompt shows cwd (~ for home). Shell-local env drives PATH lookup
- * (execve envp still empty). Redirects, pipelines, &&/||, & jobs. */
+ * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
+ * is passed through execve envp (live /proc/self/environ). Redirects,
+ * pipelines, &&/||, & jobs. */
 package user;
 
 typedef unsigned long u64;
@@ -556,7 +557,7 @@ static void print_prompt(void) {
     printf("fakeos:%s$ ", cwd);
 }
 
-/* Shell-local environment (not passed through execve yet). */
+/* Shell environment: builtins + passed through execve envp (cap 8). */
 struct sh_env {
     int used;
     char name[ENV_NAME];
@@ -564,6 +565,8 @@ struct sh_env {
 };
 
 static struct sh_env sh_envs[MAX_ENV];
+static char sh_env_flat[8][128];
+static char *sh_envp[9];
 
 static int env_name_ok(const char *s) {
     int i;
@@ -650,6 +653,32 @@ static void sh_env_init(void) {
     sh_setenv("PATH", "/bin:/usr/bin:.");
     sh_setenv("HOME", "/home");
     sh_setenv("USER", "root");
+    sh_setenv("FAKECC_PKG", "/src");
+}
+
+/* Build a NULL-terminated envp from the table (at most 8 entries). */
+static char **sh_build_envp(void) {
+    int n = 0;
+    int i;
+    for (i = 0; i < MAX_ENV && n < 8; i++) {
+        int k;
+        int nl;
+        int vl;
+        if (!sh_envs[i].used) continue;
+        nl = 0;
+        while (sh_envs[i].name[nl] != 0) nl++;
+        vl = 0;
+        while (sh_envs[i].val[vl] != 0) vl++;
+        if (nl + 1 + vl >= 128) continue;
+        for (k = 0; k < nl; k++) sh_env_flat[n][k] = sh_envs[i].name[k];
+        sh_env_flat[n][nl] = '=';
+        for (k = 0; k < vl; k++) sh_env_flat[n][nl + 1 + k] = sh_envs[i].val[k];
+        sh_env_flat[n][nl + 1 + vl] = 0;
+        sh_envp[n] = sh_env_flat[n];
+        n++;
+    }
+    sh_envp[n] = 0;
+    return sh_envp;
 }
 
 /* Expand whole-token $? / $NAME (no ${} / mid-string). Writes into out. */
@@ -849,7 +878,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; echo $NAME / $?; PATH drives lookup");
+        puts("env: export NAME=val / unset NAME / which CMD; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
@@ -1191,7 +1220,7 @@ static void child_run_stage(char **argv, int stdin_fd, int stdout_fd,
         u_exit(1);
     }
     target = resolve_cmd(argv, path);
-    if (u_execve(target, argv, 0) < 0) {
+    if (u_execve(target, argv, sh_build_envp()) < 0) {
         printf("sh: %s: command not found\n", argv[0]);
         u_exit(127);
     }
@@ -1267,7 +1296,7 @@ static long run_pipeline(char **tokens, long rc_in) {
                                    &saved_out) < 0) {
                     u_exit(1);
                 }
-                if (u_execve(target, stages[0], 0) < 0) {
+                if (u_execve(target, stages[0], sh_build_envp()) < 0) {
                     printf("sh: %s: command not found\n", stages[0][0]);
                     u_exit(127);
                 }
@@ -1488,7 +1517,7 @@ int main(int argc, char **argv) {
     }
 
     sh_env_init();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/which, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

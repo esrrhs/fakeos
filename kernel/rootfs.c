@@ -44,8 +44,10 @@ extern char user_dumpbin_start;
 extern char user_dumpbin_end;
 extern char motd_start;
 extern char motd_end;
+/* Kept so user/environ.txt stays in the image (default FAKECC_PKG text). */
 extern char environ_start;
 extern char environ_end;
+static volatile u64 environ_blob_anchor;
 extern char resolv_conf_start;
 extern char resolv_conf_end;
 extern char hosts_file_start;
@@ -106,11 +108,16 @@ void rootfs_publish(void) {
     publish_one("/etc/resolv.conf", (u64)(&resolv_conf_start), (u64)(&resolv_conf_end));
     publish_one("/etc/hosts", (u64)(&hosts_file_start), (u64)(&hosts_file_end));
     publish_one("/etc/passwd", (u64)(&passwd_file_start), (u64)(&passwd_file_end));
-    /* fakecc reads its package search path from /proc/self/environ (its
-     * getenv opens this exact path); point it at the in-OS source root so
-     * `cd /src && fakecc ...` resolves the kernel packages. */
-    publish_one("/proc/self/environ",
-                (u64)(&environ_start), (u64)(&environ_end));
+    /* /proc/self/{status,maps,cmdline,environ} are live synthetic nodes.
+     * Empty envp still seeds FAKECC_PKG=/src in the TCB so fakecc getenv
+     * via /proc/self/environ keeps working for kbuild. */
+    environ_blob_anchor = (u64)(&environ_start) ^ (u64)(&environ_end);
+    if (!fs.fs_mkdir("/proc")) {
+        kprintf("[FS] FAILED to publish /proc\n");
+    }
+    if (!fs.fs_mkdir("/proc/self")) {
+        kprintf("[FS] FAILED to publish /proc/self\n");
+    }
 
     /* Writable scratch directory for compiler outputs. */
     if (!fs.fs_mkdir("/tmp")) {
@@ -129,9 +136,9 @@ void rootfs_publish(void) {
         kprintf("[FS] published /dev/null /dev/zero /dev/tty\n");
     }
     if (!fs.fs_publish_procfs()) {
-        kprintf("[FS] FAILED to publish /proc/self/{status,maps,cmdline}\n");
+        kprintf("[FS] FAILED to publish /proc/self/{status,maps,cmdline,environ}\n");
     } else {
-        kprintf("[FS] published /proc/self/status maps cmdline\n");
+        kprintf("[FS] published /proc/self/status maps cmdline environ\n");
     }
 
     for (i = 0; i < m5_blob_count; i++) {

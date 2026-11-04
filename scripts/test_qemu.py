@@ -224,8 +224,9 @@ def main():
         "readlink /tmp/motdlink",         # readlink builtin
         "realpath /tmp/motdlink",         # physical resolve builtin
         "ls -l /tmp",                     # show l type + -> target
-        "export FOO=bar",                 # shell-local env
+        "export FOO=bar",                 # shell env -> execve envp
         "echo $FOO",
+        "cat /proc/self/environ",         # child sees FOO=bar + FAKECC_PKG
         "which ls",
         "which cd",
         "env",
@@ -429,7 +430,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, PATH/quotes, kill; persist under /home",
+        "fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -489,6 +490,8 @@ def main():
         ("ls -l symlink arrow", "motdlink -> /etc/motd" in norm),
         ("getcwd physical init", "[U][PASS] getcwd physical" in out),
         ("shell echo $FOO", "\nbar\n" in norm or "echo $FOO\nbar\n" in norm),
+        ("execve envp FOO in child environ", "FOO=bar" in out),
+        ("execve envp FAKECC_PKG live", "FAKECC_PKG=/src" in out),
         ("shell which ls", "/bin/ls" in norm),
         ("shell which cd builtin", "cd: shell builtin" in norm),
         ("shell env PATH", "PATH=/bin:/usr/bin:." in norm),
@@ -500,7 +503,7 @@ def main():
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
         ("multiple shell prompts",
-         norm.count("fakeos:~$") + norm.count("fakeos:/") >= 18),
+         norm.count("fakeos:~$") + norm.count("fakeos:/") >= 19),
         ("userland ping replied", "reply from 10.0.2.2" in norm),
         ("userland udptest loopback", "UDP loopback OK" in norm),
     ]

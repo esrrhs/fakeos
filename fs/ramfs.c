@@ -16,6 +16,7 @@ extern void kprintf(const char *fmt, ...);
 extern u64 procfs_gen_status(char *buf, u64 cap);
 extern u64 procfs_gen_maps(char *buf, u64 cap);
 extern u64 procfs_gen_cmdline(char *buf, u64 cap);
+extern u64 procfs_gen_environ(char *buf, u64 cap);
 
 /* ---------------------------------------------------------------------------
  * Minimal in-memory VFS + Ramfs
@@ -44,8 +45,10 @@ enum {
     INO_PROC_MAPS    = 7,          /* /proc/self/maps */
     INO_PROC_CMDLINE = 8,          /* /proc/self/cmdline */
     INO_SYMLINK = 9,               /* symbolic link; target in buf/size */
+    INO_PROC_ENVIRON = 10,         /* /proc/self/environ (live per-process) */
 
     ROOT_INO    = 1,
+    PROC_ENVIRON_INO = 57,
     PROC_STATUS_INO  = 58,
     PROC_MAPS_INO    = 59,
     PROC_CMDLINE_INO = 60,
@@ -123,7 +126,7 @@ static struct open_file opens[MAX_OPEN_FILES];
 
 static u32 inode_is_proc(u32 type) {
     return type == INO_PROC_STATUS || type == INO_PROC_MAPS
-        || type == INO_PROC_CMDLINE;
+        || type == INO_PROC_CMDLINE || type == INO_PROC_ENVIRON;
 }
 
 /* ---------------------------------------------------------------------------
@@ -460,13 +463,15 @@ void fs_init(void) {
     inodes[ZERO_INO].type = INO_ZERO;
     inodes[ZERO_INO].parent = ZERO_INO;
 
-    /* Fixed /proc/self/{status,maps,cmdline}; linked in fs_publish_procfs. */
+    /* Fixed /proc/self/{status,maps,cmdline,environ}; linked in fs_publish_procfs. */
     inodes[PROC_STATUS_INO].type = INO_PROC_STATUS;
     inodes[PROC_STATUS_INO].parent = PROC_STATUS_INO;
     inodes[PROC_MAPS_INO].type = INO_PROC_MAPS;
     inodes[PROC_MAPS_INO].parent = PROC_MAPS_INO;
     inodes[PROC_CMDLINE_INO].type = INO_PROC_CMDLINE;
     inodes[PROC_CMDLINE_INO].parent = PROC_CMDLINE_INO;
+    inodes[PROC_ENVIRON_INO].type = INO_PROC_ENVIRON;
+    inodes[PROC_ENVIRON_INO].parent = PROC_ENVIRON_INO;
 
     opens[CONSOLE_FH].used = 1;
     opens[CONSOLE_FH].ino = CONSOLE_INO;
@@ -498,8 +503,8 @@ u32 fs_publish_chrdevs(void) {
     return 1;
 }
 
-/* Link synthetic /proc/self/{status,maps,cmdline}. /proc/self must already
- * exist (environ publish creates it). Returns 1 on success. */
+/* Link synthetic /proc/self/{status,maps,cmdline,environ}. /proc/self must
+ * already exist (rootfs mkdir). Returns 1 on success. */
 u32 fs_publish_procfs(void) {
     u32 self = walk_lookup("/proc/self");
     if (self == 0 || inodes[self].type != INO_DIR) {
@@ -508,6 +513,7 @@ u32 fs_publish_procfs(void) {
     inodes[PROC_STATUS_INO].parent = self;
     inodes[PROC_MAPS_INO].parent = self;
     inodes[PROC_CMDLINE_INO].parent = self;
+    inodes[PROC_ENVIRON_INO].parent = self;
     if (!dir_add(self, "status", 6, PROC_STATUS_INO)) {
         return 0;
     }
@@ -515,6 +521,9 @@ u32 fs_publish_procfs(void) {
         return 0;
     }
     if (!dir_add(self, "cmdline", 7, PROC_CMDLINE_INO)) {
+        return 0;
+    }
+    if (!dir_add(self, "environ", 7, PROC_ENVIRON_INO)) {
         return 0;
     }
     return 1;
@@ -763,7 +772,7 @@ u32 fs_unlink(const char *path) {
     /* Never unlink fixed character devices. */
     if (target == CONSOLE_INO || target == NULL_INO || target == ZERO_INO
         || target == PROC_STATUS_INO || target == PROC_MAPS_INO
-        || target == PROC_CMDLINE_INO
+        || target == PROC_CMDLINE_INO || target == PROC_ENVIRON_INO
         || inodes[target].type == INO_CONSOLE
         || inodes[target].type == INO_NULL
         || inodes[target].type == INO_ZERO
@@ -1038,8 +1047,10 @@ u32 fs_file_open(const char *path, u32 flags) {
                 n = procfs_gen_status(buf, PROC_SNAP_CAP);
             } else if (inodes[ino].type == INO_PROC_MAPS) {
                 n = procfs_gen_maps(buf, PROC_SNAP_CAP);
-            } else {
+            } else if (inodes[ino].type == INO_PROC_CMDLINE) {
                 n = procfs_gen_cmdline(buf, PROC_SNAP_CAP);
+            } else {
+                n = procfs_gen_environ(buf, PROC_SNAP_CAP);
             }
             opens[fh].snap = buf;
             opens[fh].snap_len = n;

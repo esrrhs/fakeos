@@ -23,6 +23,9 @@ extern void kthread_exit(void);
 extern u64 sched_tick_count(void);
 extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
 extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
+extern void sched_set_environ_envp(u32 envc, const char *envbuf);
+extern void sched_set_environ_default(void);
+extern void sched_set_environ_tcb_default(u32 tid);
 extern u64 sched_user_tick_count(void);
 extern u64 sched_current_as_h(void);
 extern void sched_replace_as(u64 new_as_h);
@@ -50,7 +53,8 @@ enum {
     ELF_MAX_SEGSZ    = 0x01000000,      /* 16 MiB per segment           */
 
     EXEC_MAX_ARGC    = 8,
-    EXEC_ARG_SLOT    = 128,             /* fixed per-arg kernel slot  */
+    EXEC_MAX_ENVC    = 8,               /* envp cap (same slot size)  */
+    EXEC_ARG_SLOT    = 128,             /* fixed per-arg/env kernel slot */
     EXEC_PATH_MAX    = 128,
     EXEC_INO_FILE    = 1                /* fs INO_FILE (enum not exported) */
 };
@@ -157,16 +161,19 @@ static u64 load_elf_into(u64 as_h, u64 blob, u64 size) {
  *   RSP -> argc
  *          argv[0] .. argv[argc-1]
  *          NULL            (argv terminator)
- *          NULL            (envp terminator; environment is always empty)
+ *          envp[0] .. envp[envc-1]
+ *          NULL            (envp terminator)
  *
  * Strings live above the pointer block. RSP is 16-byte aligned at _start.
- * argv strings arrive in a flat kernel buffer of EXEC_MAX_ARGC fixed slots.
+ * argv/envp strings arrive in flat kernel buffers of fixed EXEC_ARG_SLOT slots.
  * ------------------------------------------------------------------------- */
 
-static u64 build_user_stack(u64 as_h, u32 argc, const char *argbuf) {
+static u64 build_user_stack(u64 as_h, u32 argc, const char *argbuf,
+                            u32 envc, const char *envbuf) {
     u64 sp = UPROC_STACK_TOP;
-    u64 strptr[EXEC_MAX_ARGC];
-    u64 block[EXEC_MAX_ARGC + 3];
+    u64 argptr[EXEC_MAX_ARGC];
+    u64 envptr[EXEC_MAX_ENVC];
+    u64 block[EXEC_MAX_ARGC + EXEC_MAX_ENVC + 3];
     u64 total;
     u32 i;
 
@@ -180,10 +187,22 @@ static u64 build_user_stack(u64 as_h, u32 argc, const char *argbuf) {
         if (!mem.as_copy_in_h(as_h, sp, s, n + 1)) {
             return 0;
         }
-        strptr[i] = sp;
+        argptr[i] = sp;
+    }
+    for (i = 0; i < envc; i++) {
+        const char *s = envbuf + (u64)i * EXEC_ARG_SLOT;
+        u32 n = 0;
+        while (s[n] != 0 && n < EXEC_ARG_SLOT - 1) {
+            n++;
+        }
+        sp -= (n + 1);
+        if (!mem.as_copy_in_h(as_h, sp, s, n + 1)) {
+            return 0;
+        }
+        envptr[i] = sp;
     }
 
-    total = 8 * ((u64)argc + 3);
+    total = 8 * ((u64)argc + (u64)envc + 3);
     sp &= ~15ULL;
     if ((sp - total) & 15) {
         sp -= 8;
@@ -192,10 +211,13 @@ static u64 build_user_stack(u64 as_h, u32 argc, const char *argbuf) {
 
     block[0] = argc;
     for (i = 0; i < argc; i++) {
-        block[1 + i] = strptr[i];
+        block[1 + i] = argptr[i];
     }
     block[1 + argc] = 0;
-    block[2 + argc] = 0;
+    for (i = 0; i < envc; i++) {
+        block[2 + argc + i] = envptr[i];
+    }
+    block[2 + argc + envc] = 0;
     if (!mem.as_copy_in_h(as_h, sp, (const char *)block, total)) {
         return 0;
     }
@@ -206,6 +228,7 @@ static u64 build_user_stack(u64 as_h, u32 argc, const char *argbuf) {
  * + demand-paged stack VMA + argv frame. Returns 1 on success and fills the
  * entry VA, initial RSP and address-space handle. */
 u32 proc_build_image(u64 kbuf, u64 size, u32 argc, const char *argbuf,
+                     u32 envc, const char *envbuf,
                      u64 *out_entry, u64 *out_sp, u64 *out_as_h) {
     u64 as_h = mem.as_create();
     u64 entry;
@@ -223,7 +246,7 @@ u32 proc_build_image(u64 kbuf, u64 size, u32 argc, const char *argbuf,
         mem.as_destroy_h(as_h);
         return 0;
     }
-    sp = build_user_stack(as_h, argc, argbuf);
+    sp = build_user_stack(as_h, argc, argbuf, envc, envbuf);
     if (sp == 0) {
         mem.as_destroy_h(as_h);
         return 0;
@@ -323,28 +346,57 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
         }
     }
 
-    /* Environment is not supported: envp must be NULL or an empty vector. */
-    if (envp_u != 0) {
-        u64 e0 = 0;
-        if (!read_user_u64(as, envp_u, &e0) || e0 != 0) {
+    /* Parse envp the same way as argv (NULL or empty => envc=0). */
+    {
+        char envbuf[EXEC_MAX_ENVC * EXEC_ARG_SLOT];
+        u32 envc = 0;
+        if (envp_u != 0) {
+            for (i = 0; i <= EXEC_MAX_ENVC; i++) {
+                u64 slot_uva = envp_u + (u64)i * 8;
+                u64 p = 0;
+                char *dst;
+                if (slot_uva < envp_u) {
+                    return (u64)(-1);
+                }
+                if (!read_user_u64(as, slot_uva, &p)) {
+                    return (u64)(-1);
+                }
+                if (p == 0) {
+                    break;
+                }
+                if (i == EXEC_MAX_ENVC) {
+                    return (u64)(-1);
+                }
+                dst = envbuf + (u64)envc * EXEC_ARG_SLOT;
+                if (!copy_user_cstring(dst, p, EXEC_ARG_SLOT - 1)) {
+                    return (u64)(-1);
+                }
+                envc++;
+            }
+        }
+
+        ino = fs.fs_lookup(path);
+        if (fs.fs_ino_kind(ino) != EXEC_INO_FILE) {
             return (u64)(-1);
         }
-    }
+        kva = fs.fs_ino_data(ino);
+        size = fs.fs_ino_size(ino);
+        if (kva == 0 || size == 0) {
+            return (u64)(-1);
+        }
 
-    ino = fs.fs_lookup(path);
-    if (fs.fs_ino_kind(ino) != EXEC_INO_FILE) {
-        return (u64)(-1);
+        if (!proc_build_image(kva, size, argc, argbuf, envc, envbuf,
+                              &entry, &sp, &new_as)) {
+            return (u64)(-1);
+        }
+        sched_set_cmdline_argv(argc, argbuf);
+        if (envc == 0) {
+            /* Preserve FAKECC_PKG for kbuild/fakecc when callers pass NULL. */
+            sched_set_environ_default();
+        } else {
+            sched_set_environ_envp(envc, envbuf);
+        }
     }
-    kva = fs.fs_ino_data(ino);
-    size = fs.fs_ino_size(ino);
-    if (kva == 0 || size == 0) {
-        return (u64)(-1);
-    }
-
-    if (!proc_build_image(kva, size, argc, argbuf, &entry, &sp, &new_as)) {
-        return (u64)(-1);
-    }
-    sched_set_cmdline_argv(argc, argbuf);
 
     /* Commit: switch TCB + CR3 to the new space, then drop the old one. Kernel
      * stacks and this frame live in the shared higher half and survive. */
@@ -442,7 +494,8 @@ void uproc_selftest(void) {
     kva = fs.fs_ino_data(ino);
     size = fs.fs_ino_size(ino);
     if (fs.fs_ino_kind(ino) != EXEC_INO_FILE
-        || !proc_build_image(kva, size, 1, init_argbuf, &entry, &user_rsp, &as_h)) {
+        || !proc_build_image(kva, size, 1, init_argbuf, 0, 0,
+                                &entry, &user_rsp, &as_h)) {
         kprintf("      [FAIL] could not load /bin/init from Ramfs\n");
         uproc_done = 1;
         return;
@@ -458,6 +511,7 @@ void uproc_selftest(void) {
             return;
         }
         sched_set_cmdline_tcb(slot, init_argbuf, 9);
+        sched_set_environ_tcb_default(slot);
     }
     kprintf("      Started pid %u from /bin/init (entry %p, stack top %p)\n",
             (u64)pid, entry, (u64)UPROC_STACK_TOP);
