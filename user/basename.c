@@ -1,8 +1,16 @@
-/* fakeos userland - basename: strip directory and optional suffix. */
+/* fakeos userland - basename: strip directory and optional suffix (thin GNU).
+ *   basename PATH [SUFFIX]
+ *   basename -a PATH...
+ *   basename -s SUFFIX PATH...
+ * Traditional form keeps optional SUFFIX as the second operand. -a prints
+ * one basename per PATH (no suffix). -s applies SUFFIX to every PATH.
+ * Compact argv for EXEC_MAX_ARGC=8. Buffer 256.
+ */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
+extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 
 static void strip_trailing_slashes(char *s) {
@@ -38,25 +46,18 @@ static void strip_suffix(char *name, const char *suf) {
     name[nl - sl] = 0;
 }
 
-int main(int argc, char **argv) {
+static int basename_one(const char *path, const char *suf) {
     char buf[256];
     char *base;
-    const char *suf = 0;
     unsigned long i;
     unsigned long n;
 
-    if (argc < 2 || argc > 3) {
-        u_write(2, "usage: basename PATH [SUFFIX]\n", 30);
-        return 1;
-    }
-    if (argc == 3) suf = argv[2];
-
-    n = strlen(argv[1]);
+    n = strlen(path);
     if (n >= sizeof(buf)) {
         u_write(2, "basename: path too long\n", 24);
         return 1;
     }
-    for (i = 0; i <= n; i++) buf[i] = argv[1][i];
+    for (i = 0; i <= n; i++) buf[i] = path[i];
 
     if (buf[0] == 0) {
         u_write(1, ".\n", 2);
@@ -71,4 +72,67 @@ int main(int argc, char **argv) {
     strip_suffix(base, suf);
     printf("%s\n", base);
     return 0;
+}
+
+static void usage(void) {
+    u_write(2, "usage: basename PATH [SUFFIX]\n", 30);
+    u_write(2, "       basename -a PATH...\n", 27);
+    u_write(2, "       basename -s SUFFIX PATH...\n", 34);
+}
+
+int main(int argc, char **argv) {
+    int i;
+    int rc = 0;
+    int multi = 0;
+    const char *suf = 0;
+
+    if (argc < 2) {
+        usage();
+        return 1;
+    }
+
+    i = 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-a") == 0) {
+            multi = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 >= argc) {
+                usage();
+                return 1;
+            }
+            suf = argv[i + 1];
+            multi = 1;
+            i += 2;
+            continue;
+        }
+        /* unknown dash option — treat as a path operand */
+        break;
+    }
+
+    if (i >= argc) {
+        usage();
+        return 1;
+    }
+
+    if (!multi) {
+        /* Traditional: basename PATH [SUFFIX] */
+        if (argc - i > 2) {
+            usage();
+            return 1;
+        }
+        if (argc - i == 2) suf = argv[i + 1];
+        return basename_one(argv[i], suf);
+    }
+
+    for (; i < argc; i++) {
+        if (basename_one(argv[i], suf) != 0) rc = 1;
+    }
+    return rc;
 }

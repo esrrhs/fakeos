@@ -1,7 +1,9 @@
 /* fakeos userland - head: print the first N lines or bytes of files.
- *   head [-n N|-N] [-c N|-cN] [FILE...]
+ *   head [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]
  * Default: first 10 lines. -c selects byte mode (mutually exclusive with -n
- * in practice: last of -n/-c wins). stdin if no FILE; "-" is stdin.
+ * in practice: last of -n/-c wins). -q never headers; -v always headers;
+ * default headers when more than one FILE. stdin if no FILE; "-" is stdin.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -61,15 +63,19 @@ static int is_digits(const char *s) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: head [-n N|-N] [-c N|-cN] [FILE...]\n", 44);
+    u_write(2, "usage: head [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]\n", 51);
 }
 
 int main(int argc, char **argv) {
     long limit = 10;
     int byte_mode = 0;
+    int quiet = 0;
+    int verbose = 0;
     int i = 1;
     int rc = 0;
     int files = 0;
+    int nfiles;
+    int fi;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
@@ -96,6 +102,18 @@ int main(int argc, char **argv) {
             i += 2;
             continue;
         }
+        if (strcmp(argv[i], "-q") == 0) {
+            quiet = 1;
+            verbose = 0;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-v") == 0) {
+            verbose = 1;
+            quiet = 0;
+            i++;
+            continue;
+        }
         if (argv[i][0] == '-' && argv[i][1] == 'c' && is_digits(argv[i] + 2)) {
             limit = strtol_dec(argv[i] + 2);
             byte_mode = 1;
@@ -115,33 +133,40 @@ int main(int argc, char **argv) {
     if (i >= argc) {
         return byte_mode ? head_bytes(0, limit) : head_lines(0, limit);
     }
-    for (; i < argc; i++) {
+
+    nfiles = argc - i;
+    for (fi = i; fi < argc; fi++) {
         long fd;
-        if (strcmp(argv[i], "-") == 0) {
-            if (byte_mode) {
-                if (head_bytes(0, limit) != 0) rc = 1;
-            } else {
-                if (head_lines(0, limit) != 0) rc = 1;
+        const char *name = argv[fi];
+        int show_hdr;
+
+        if (strcmp(name, "-") == 0) {
+            fd = 0;
+            name = "standard input";
+        } else {
+            fd = u_open(argv[fi], 0, 0);
+            if (fd < 0) {
+                printf("head: %s: no such file\n", argv[fi]);
+                rc = 1;
+                continue;
             }
-            files++;
-            continue;
         }
-        fd = u_open(argv[i], 0, 0);
-        if (fd < 0) {
-            printf("head: %s: no such file\n", argv[i]);
-            rc = 1;
-            continue;
+
+        show_hdr = 0;
+        if (!quiet) {
+            if (verbose || nfiles > 1) show_hdr = 1;
         }
-        if (files > 0 || i + 1 < argc) {
+        if (show_hdr) {
             if (files > 0) u_write(1, "\n", 1);
-            printf("==> %s <==\n", argv[i]);
+            printf("==> %s <==\n", name);
         }
+
         if (byte_mode) {
             if (head_bytes(fd, limit) != 0) rc = 1;
         } else {
             if (head_lines(fd, limit) != 0) rc = 1;
         }
-        u_close(fd);
+        if (fd != 0) u_close(fd);
         files++;
     }
     return rc;

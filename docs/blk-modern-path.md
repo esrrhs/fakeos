@@ -685,12 +685,23 @@ error; `-` stdin at most once. LCS over loaded lines (MAX_LINES=1024). No
 kernel work. Focused virtio login smoke covers identical/`-q`/classic/`-u` on
 Ramfs+Ext2 plus prior greens (smp 1/2). Ramfs `/bin` dents 103/128.
 
+
+## basename multi-arg + head -q/-v — landed
+
+Thin POSIX/GNU polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred). `basename` gains `-a PATH...` and `-s SUFFIX PATH...` (traditional
+`PATH [SUFFIX]` unchanged). `head` gains `-q` (never headers) / `-v` (always
+headers); default still headers when more than one FILE. Focused virtio login
+smoke covers basename `-a`/`-s`, head `-q`/`-v`, Ext2, prior greens (smp 1/2).
+Ramfs `/bin` dents 103/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`diff` + `touch -c` + `/bin/kill` +
+3. More daily-driver gaps after inventory (`basename` multi + head `-q`/`-v` + `diff` + `touch -c` + `/bin/kill` +
    `wc -L` + `dirname` multi + `shuf` + head/tail `-c` + `find`/`du` + …):
    prefer small coherent chunks such as thin `df` **only if** `statfs(2)` is
    added, or `touch -r`/`-d` if utimens arrive, or other missing thin POSIX.
