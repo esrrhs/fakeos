@@ -42,6 +42,7 @@ extern u64 sys_lseek(u64 fd, u64 off, u64 whence);
 extern u64 sys_mkdir(u64 upath);
 extern u64 sys_rename(u64 uold, u64 unew);
 extern u64 sys_unlink(u64 upath);
+extern u64 sys_link(u64 uold, u64 unew);
 extern u64 sys_symlink(u64 utarget, u64 ulinkpath);
 extern u64 sys_readlink(u64 upath, u64 ubuf, u64 bufsiz);
 extern u64 sys_rmdir(u64 upath);
@@ -185,6 +186,7 @@ enum {
     SC_RMDIR = 84,
     SC_RENAME = 82,
     SC_UNLINK = 87,
+    SC_LINK = 86,
     SC_EXIT_GROUP = 231,
     SC_SYNC = 162,
     SC_FSYNC = 74,
@@ -520,6 +522,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_UNLINK) {
         return sys_unlink(f->rdi);
+    }
+    if (f->rax == SC_LINK) {
+        return sys_link(f->rdi, f->rsi);
     }
     if (f->rax == SC_SYMLINK) {
         return sys_symlink(f->rdi, f->rsi);

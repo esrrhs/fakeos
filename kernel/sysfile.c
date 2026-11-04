@@ -1117,6 +1117,25 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
     }
 }
 
+u64 sys_link(u64 uold, u64 unew) {
+    char oldp[PATH_KMAX];
+    char newp[PATH_KMAX];
+    u32 o_ext2;
+    u32 n_ext2;
+    if (!copy_user_path(oldp, uold) || !copy_user_path(newp, unew)) {
+        return (u64)(-1);
+    }
+    o_ext2 = fs.ext2_is_mnt_path(oldp);
+    n_ext2 = fs.ext2_is_mnt_path(newp);
+    if (o_ext2 != n_ext2) {
+        return (u64)(-1);              /* EXDEV */
+    }
+    if (o_ext2) {
+        return fs.ext2_mounted() && fs.ext2_link(oldp, newp) ? 0 : (u64)(-1);
+    }
+    return fs.fs_link(oldp, newp) ? 0 : (u64)(-1);
+}
+
 u64 sys_symlink(u64 utarget, u64 ulinkpath) {
     char target[PATH_KMAX];
     char linkpath[PATH_KMAX];

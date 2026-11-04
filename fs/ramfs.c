@@ -104,6 +104,7 @@ struct inode {
     u32 type;
     u32 parent;
     u32 ndent;
+    u32 nlink;                     /* hard-link count (files/symlinks; dirs use ndent+2) */
     u32 ro;                        /* static incbin-backed file */
     u32 mode;                      /* Linux S_IF* | permission bits */
     u32 uid;                       /* owner (default 0) */
@@ -206,6 +207,7 @@ static u32 alloc_ino(u32 type, u32 parent) {
             inodes[i].type = type;
             inodes[i].parent = parent;
             inodes[i].ndent = 0;
+            inodes[i].nlink = 1;         /* dirs ignore; files/symlinks start at 1 */
             inodes[i].ro = 0;
             inodes[i].mode = default_mode_for_type(type);
             inodes[i].uid = sched_current_euid();
@@ -466,6 +468,7 @@ void fs_init(void) {
         inodes[i].type = INO_FREE;
         inodes[i].parent = 0;
         inodes[i].ndent = 0;
+        inodes[i].nlink = 0;
         inodes[i].ro = 0;
         inodes[i].mode = 0;
         inodes[i].uid = 0;
@@ -706,6 +709,53 @@ u64 fs_readlink(const char *path, char *kbuf, u64 bufsiz) {
     return n;
 }
 
+/* link(2): hard-link oldpath's final inode at newpath (nofollow oldpath).
+ * Directories and fixed/special nodes are refused. Returns 1 on success. */
+u32 fs_link(const char *oldpath, const char *newpath) {
+    char last[NAME_LEN];
+    u32 last_n = 0;
+    u32 parent;
+    u32 old_ino;
+    if (oldpath == 0 || newpath == 0) {
+        return 0;
+    }
+    old_ino = walk_lookup_nofollow(oldpath);
+    if (old_ino == 0) {
+        return 0;
+    }
+    if (inodes[old_ino].type == INO_DIR) {
+        return 0;                    /* no directory hard links */
+    }
+    if (old_ino == CONSOLE_INO || old_ino == NULL_INO || old_ino == ZERO_INO
+        || old_ino == PROC_STATUS_INO || old_ino == PROC_MAPS_INO
+        || old_ino == PROC_CMDLINE_INO || old_ino == PROC_ENVIRON_INO
+        || inodes[old_ino].type == INO_CONSOLE
+        || inodes[old_ino].type == INO_NULL
+        || inodes[old_ino].type == INO_ZERO
+        || inode_is_proc(inodes[old_ino].type)) {
+        return 0;
+    }
+    if (inodes[old_ino].type != INO_FILE
+        && inodes[old_ino].type != INO_SYMLINK) {
+        return 0;
+    }
+    parent = walk_parent(newpath, last, &last_n, 0);
+    if (parent == 0 || last_n == 0) {
+        return 0;
+    }
+    if (dir_find(parent, last, last_n) != 0) {
+        return 0;                    /* EEXIST */
+    }
+    if (!dir_add(parent, last, last_n, old_ino)) {
+        return 0;
+    }
+    if (inodes[old_ino].nlink == 0) {
+        inodes[old_ino].nlink = 1;
+    }
+    inodes[old_ino].nlink++;
+    return 1;
+}
+
 /* Create a dynamic writable file (fail if the name already exists). */
 u32 fs_create(const char *path) {
     char last[NAME_LEN];
@@ -830,8 +880,11 @@ u32 fs_unlink(const char *path) {
         || inode_is_proc(inodes[target].type)) {
         return 0;
     }
+    /* Match by name so same-dir hard links remove the right dent. */
     for (slot = 0; slot < d->ndent; slot++) {
-        if (d->dents[slot].ino == target) {
+        if (d->dents[slot].ino == target
+            && name_eq(d->dents[slot].name, last, last_n)
+            && d->dents[slot].name[last_n] == 0) {
             break;
         }
     }
@@ -844,7 +897,11 @@ u32 fs_unlink(const char *path) {
     }
     d->ndent--;
 
-    if (!inode_is_open(target)) {
+    if (inodes[target].nlink > 0) {
+        inodes[target].nlink--;
+    }
+    /* Free only when the last name is gone and nothing still has it open. */
+    if (inodes[target].nlink == 0 && !inode_is_open(target)) {
         if (inodes[target].buf != 0 && !inodes[target].ro) {
             mem.kfree(inodes[target].buf);
             inodes[target].buf = 0;
@@ -854,6 +911,7 @@ u32 fs_unlink(const char *path) {
         inodes[target].type = INO_FREE;
         inodes[target].parent = 0;
         inodes[target].ndent = 0;
+        inodes[target].nlink = 0;
     }
     return 1;
 }
@@ -934,19 +992,33 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
             inodes[dest].ndent = 0;
         } else {
             if (inodes[dest].type == INO_DIR) return 0;
-            /* unlink dest file name; free inode if not open */
+            /* unlink dest file name; drop nlink / free if last and not open */
             for (slot = 0; slot < inodes[nparent].ndent; slot++) {
-                if (inodes[nparent].dents[slot].ino == dest) break;
+                if (inodes[nparent].dents[slot].ino == dest
+                    && name_eq(inodes[nparent].dents[slot].name, nlast, nlast_n)
+                    && inodes[nparent].dents[slot].name[nlast_n] == 0) {
+                    break;
+                }
             }
             if (slot >= inodes[nparent].ndent) return 0;
             for (k = slot; k + 1 < inodes[nparent].ndent; k++) {
                 inodes[nparent].dents[k] = inodes[nparent].dents[k + 1];
             }
             inodes[nparent].ndent--;
-            if (!inode_is_open(dest)) {
+            if (inodes[dest].nlink > 0) {
+                inodes[dest].nlink--;
+            }
+            if (inodes[dest].nlink == 0 && !inode_is_open(dest)) {
+                if (inodes[dest].buf != 0 && !inodes[dest].ro) {
+                    mem.kfree(inodes[dest].buf);
+                    inodes[dest].buf = 0;
+                    inodes[dest].cap = 0;
+                    inodes[dest].size = 0;
+                }
                 inodes[dest].type = INO_FREE;
                 inodes[dest].parent = 0;
                 inodes[dest].ndent = 0;
+                inodes[dest].nlink = 0;
             }
         }
     }
@@ -1562,7 +1634,7 @@ u32 fs_stat_ino(u32 ino, u32 *mode_out, u64 *size_out, u32 *rdev_out,
     }
     size = inodes[ino].size;
     rdev = 0;
-    nlink = 1;
+    nlink = inodes[ino].nlink ? inodes[ino].nlink : 1;
     mode = inodes[ino].mode;
     if (mode == 0) {
         mode = default_mode_for_type(t);

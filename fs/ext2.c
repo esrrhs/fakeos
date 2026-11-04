@@ -17,8 +17,8 @@ extern u32 sched_current_egid(void);
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
  *
  * Mount, path lookup, open/read/write/lseek, create, mkdir, symlink,
- * readlink, getdents, unlink (regular files), rmdir, rename, ftruncate,
- * sync. Block size
+ * link (hard), readlink, getdents, unlink (regular files), rmdir, rename,
+ * ftruncate, sync. Block size
  * 1024/2048/4096. Multi block group (BGDT indexed). Direct + single-/
  * double-/triple-indirect maps. Hardening: free-count bookkeeping in
  * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered/
@@ -2239,6 +2239,57 @@ u32 ext2_symlink(const char *target, const char *linkpath) {
     return 1;
 }
 
+/* link(2): hard-link oldpath (nofollow) at newpath on the same volume.
+ * Directories refused. Returns 1 on success. */
+u32 ext2_link(const char *oldpath, const char *newpath) {
+    const char *orel;
+    const char *nrel;
+    char last[NAME_MAX + 1];
+    u32 last_n;
+    u32 parent;
+    u32 old_ino;
+    u32 mode;
+    u8 ftype;
+    u16 links;
+    if (!sb.mounted || oldpath == 0 || newpath == 0) return 0;
+    orel = persist_rel(oldpath);
+    nrel = persist_rel(newpath);
+    if (orel == 0 || nrel == 0) return 0;
+    if (orel[0] == 0 || nrel[0] == 0) return 0;
+    old_ino = walk_rel_from_flags(EXT2_ROOT_INO, orel, 0, 0, 0);
+    if (old_ino == 0) return 0;
+    if (!inode_read(old_ino, ino_raw)) return 0;
+    mode = rd16(ino_raw + I_MODE);
+    if ((mode & EXT2_S_IFMT) == EXT2_S_IFDIR) return 0;
+    if ((mode & EXT2_S_IFMT) == EXT2_S_IFREG) {
+        ftype = (u8)EXT2_FT_REG;
+    } else if ((mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+        ftype = (u8)EXT2_FT_SYMLINK;
+    } else {
+        return 0;
+    }
+    if (walk_rel_from_flags(EXT2_ROOT_INO, nrel, 0, 0, 0) != 0) return 0;
+    parent = walk_parent(nrel, last, &last_n);
+    if (parent == 0 || last_n == 0) return 0;
+    jl_begin();
+    if (!inode_read(old_ino, ino_raw)) { jl_commit(); return 0; }
+    links = rd16(ino_raw + I_LINKS);
+    if (links == 0xFFFF) { jl_commit(); return 0; }
+    wr16(ino_raw + I_LINKS, (u16)(links + 1));
+    if (!inode_write(old_ino, ino_raw)) { jl_commit(); return 0; }
+    if (!dir_add(parent, last, last_n, old_ino, ftype)) {
+        /* Best-effort rollback of the link count. */
+        if (inode_read(old_ino, ino_raw)) {
+            wr16(ino_raw + I_LINKS, links);
+            inode_write(old_ino, ino_raw);
+        }
+        jl_commit();
+        return 0;
+    }
+    jl_commit();
+    return 1;
+}
+
 /* readlink(2): final component must be a symlink (nofollow). */
 u64 ext2_readlink(const char *path, char *kbuf, u64 bufsiz) {
     const char *rel;
@@ -2656,6 +2707,7 @@ u32 ext2_unlink(const char *path) {
     u32 victim;
     u32 mode;
     u32 b;
+    u16 links;
     if (!sb.mounted) return 0;
     rel = persist_rel(path);
     if (rel == 0 || rel[0] == 0) return 0;
@@ -2670,8 +2722,14 @@ u32 ext2_unlink(const char *path) {
     jl_begin();
     if (!dir_remove(parent, last, last_n, &victim)) { jl_commit(); return 0; }
     if (!inode_read(victim, ino_raw)) { jl_commit(); return 0; }
-    /* Fast symlinks store the target in i_block[]; do not free those bytes
-     * as block numbers. Slow symlinks (i_blocks != 0) free normally. */
+    links = rd16(ino_raw + I_LINKS);
+    if (links > 1) {
+        wr16(ino_raw + I_LINKS, (u16)(links - 1));
+        if (!inode_write(victim, ino_raw)) { jl_commit(); return 0; }
+        jl_commit();
+        return 1;
+    }
+    /* Last link: free data (skip fast-symlink i_block[] bytes) and inode. */
     if (!((mode & EXT2_S_IFMT) == EXT2_S_IFLNK && rd32(ino_raw + I_BLOCKS) == 0)) {
         inode_free_all_blocks(ino_raw);
     }
@@ -2753,12 +2811,29 @@ static u32 ino_under(u32 cur, u32 ancestor) {
 /* Free a non-directory inode that is no longer linked (replace-on-rename). */
 static u32 inode_dispose_file(u32 victim) {
     u32 b;
+    u32 mode;
     if (!inode_read(victim, ino_raw)) return 0;
-    inode_free_all_blocks(ino_raw);
+    mode = rd16(ino_raw + I_MODE);
+    /* Fast symlinks store the target in i_block[]; do not free as blocks. */
+    if (!((mode & EXT2_S_IFMT) == EXT2_S_IFLNK && rd32(ino_raw + I_BLOCKS) == 0)) {
+        inode_free_all_blocks(ino_raw);
+    }
     for (b = 0; b < 128; b++) ino_raw[b] = 0;
     if (!inode_write(victim, ino_raw)) return 0;
     free_inode_bit(victim);
     return 1;
+}
+
+/* Drop one hard link; free inode+data only when I_LINKS reaches 0. */
+static u32 inode_drop_link(u32 victim) {
+    u16 links;
+    if (!inode_read(victim, ino_raw)) return 0;
+    links = rd16(ino_raw + I_LINKS);
+    if (links > 1) {
+        wr16(ino_raw + I_LINKS, (u16)(links - 1));
+        return inode_write(victim, ino_raw);
+    }
+    return inode_dispose_file(victim);
 }
 
 /* rename(2): same-volume Ext2 move. Regular files and directories.
@@ -2860,7 +2935,7 @@ u32 ext2_rename(const char *oldpath, const char *newpath) {
                 }
             }
         } else {
-            if (!inode_dispose_file(dest_ino)) { jl_commit(); return 0; }
+            if (!inode_drop_link(dest_ino)) { jl_commit(); return 0; }
         }
     }
 

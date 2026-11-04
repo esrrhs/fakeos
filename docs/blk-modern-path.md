@@ -115,7 +115,7 @@ and (for open/stat/chdir) final symlinks with `SYMLOOP_MAX=8`; absolute Ext2
 targets are remapped through `/mnt`/`/home` `persist_rel`. `lstat` /
 `newfstatat(AT_SYMLINK_NOFOLLOW)` / `readlink` leave the final component.
 `nice(2)` moved to fakeos nr 503 (Linux x86-64 has no `nice`; 89 is readlink).
-Shell builtins: `ln -s`, `readlink`. `ls -l` uses NOFOLLOW and shows `l`.
+Shell builtins: `ln` / `ln -s`, `readlink`. `ls -l` uses NOFOLLOW and shows `l`.
 Init smoke: `[U][PASS] symlink/readlink` (Ramfs + Ext2 when mounted).
 
 ## getcwd physical + shell path prompt + ls -l -> — landed
@@ -233,11 +233,21 @@ SET2` translates and `tr -d SET` deletes (`a-z` ranges; `\n`/`\t`/`\r`/`\0`/
 `\\` escapes). Focused virtio login smoke covers both plus login/`uname`/
 `ls -l`/`udptest`/`id` (smp 1/2).
 
+## hard link(2) + shell ln — landed
+
+Linux nr `link(86)`. Ramfs tracks `inode.nlink` (files/symlinks); Ext2 bumps
+`i_links_count`. Same-FS only (`EXDEV` across Ramfs↔Ext2). Directories and
+special nodes refused; `oldpath` is resolved nofollow (hard-link a symlink
+inode like Linux). `unlink`/`rename`-replace drop one link and free only at
+zero. Shell builtin: `ln TARGET LINKPATH` (hard) and `ln -s` (symlink). Init
+smoke: `[U][PASS] hard link(2)` (Ramfs + Ext2 when mounted). Focused virtio
+login smoke covers `ln` hard + prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: hard `link(2)`, TTY Ctrl-L redraw, or other thin
-   coreutils / kernel POSIX after README scan.
+4. More daily-driver gaps: TTY Ctrl-L redraw, or other thin coreutils /
+   kernel POSIX after README scan.

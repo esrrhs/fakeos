@@ -221,6 +221,7 @@ def main():
         "ls /bin",          # getdents64, programs including kbuild/ldfake
         "ls -l /bin",       # fstatat mode/size listing
         "ln -s /etc/motd /tmp/motdlink",  # symlink builtin
+        "ln /etc/motd /tmp/motdhard",     # hard link builtin
         "readlink /tmp/motdlink",         # readlink builtin
         "realpath /tmp/motdlink",         # physical resolve builtin
         "ls -l /tmp",                     # show l type + -> target
@@ -430,6 +431,7 @@ def main():
         "[U][PASS] mprotect RO/RW",
         "[U][PASS] PROT_NONE + mmap addr hint",
         "[U][PASS] symlink/readlink",
+        "[U][PASS] hard link(2)",
         "[U][PASS] getcwd physical",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",

@@ -204,6 +204,7 @@ flowchart TD
 - [x] **/proc/self/{status,maps,cmdline,environ}**：动态节点（open 时快照）；`status`/`maps`/`cmdline`/`environ`；自测 `[U][PASS] /proc/self status/maps/cmdline`
 - [x] **getppid/uname/nanosleep/clock_gettime**：Linux nr 110/63/35/228；utsname 6×65；100 Hz tick 时间（无 RTC 时 REALTIME≈MONOTONIC）；shell `ppid`/`uname`/`sleep`；自测 `[U][PASS] getppid/uname/nanosleep/clock_gettime`
 - [x] **symlink/readlink**：Linux nr 88/89；Ramfs+Ext2；`lstat`/`AT_SYMLINK_NOFOLLOW`；shell `ln -s`/`readlink`；`nice` 改 fakeos nr 503；自测 `[U][PASS] symlink/readlink`
+- [x] **hard link(2) + shell ln**：Linux nr 86；Ramfs `nlink` + Ext2 `i_links_count`；同 FS；拒绝目录；`oldpath` nofollow；`unlink`/`rename` 按链接计数释放；shell `ln TARGET LINKPATH`（硬链）与 `ln -s`；自测 `[U][PASS] hard link(2)`；virtio login smoke（smp 1/2）。
 - [x] **getcwd physical + shell cwd prompt + ls -l ->**：`chdir` 存物理路径（`CWD_LEN=128`）；提示符显示 cwd（`~` 缩写 `/home`）；`realpath` builtin；`ls -l` 对符号链接显示 `name -> target`；自测 `[U][PASS] getcwd physical`
 - [x] **shell env/export/unset/which**：shell 环境表（默认 `PATH`/`HOME`/`USER`/`FAKECC_PKG=/src`）；`export`/`unset`/`env`/`which`；`$NAME`/`$?`；`cd` 走 `$HOME`。
 - [x] **execve envp + live /proc/self/environ**：内核解析最多 8 个 env 串写入 SysV 栈与 TCB；空 envp 仍种子 `FAKECC_PKG=/src`；shell 把环境表传入子进程。virtio login smoke（smp 1/2）。

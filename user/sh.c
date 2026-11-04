@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo ($?/$VAR), cd, pwd, mkdir, rmdir, ln -s, readlink,
+ * Builtins: echo ($?/$VAR), cd, pwd, mkdir, rmdir, ln[-s], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -34,6 +34,7 @@ extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_symlink(const char *target, const char *linkpath);
+extern long u_link(const char *oldpath, const char *newpath);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_unlink(const char *path);
 extern long u_getpid(void);
@@ -954,7 +955,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf (default PATH=/bin:/usr/bin:.)");
@@ -1382,13 +1383,22 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "ln")) {
-        /* ln -s TARGET LINKPATH */
-        if (tokens[1] == 0 || !eq(tokens[1], "-s") || tokens[2] == 0
-            || tokens[3] == 0) {
-            puts("sh: ln: usage: ln -s TARGET LINKPATH");
+        /* ln [-s] TARGET LINKPATH */
+        if (tokens[1] != 0 && eq(tokens[1], "-s")) {
+            if (tokens[2] == 0 || tokens[3] == 0 || tokens[4] != 0) {
+                puts("sh: ln: usage: ln [-s] TARGET LINKPATH");
+                rc = 1;
+            } else if (u_symlink(tokens[2], tokens[3]) != 0) {
+                puts("sh: ln: symlink failed");
+                rc = 1;
+            } else {
+                rc = 0;
+            }
+        } else if (tokens[1] == 0 || tokens[2] == 0 || tokens[3] != 0) {
+            puts("sh: ln: usage: ln [-s] TARGET LINKPATH");
             rc = 1;
-        } else if (u_symlink(tokens[2], tokens[3]) != 0) {
-            puts("sh: ln: symlink failed");
+        } else if (u_link(tokens[1], tokens[2]) != 0) {
+            puts("sh: ln: link failed");
             rc = 1;
         } else {
             rc = 0;

@@ -31,6 +31,7 @@ global u_getcwd
 global u_getdents
 global u_rename
 global u_unlink
+global u_link
 global u_symlink
 global u_readlink
 global u_rmdir
@@ -183,6 +184,9 @@ USYSC1 u_rename, 82
 
 ; long u_unlink(const char *path)
 USYSC1 u_unlink, 87
+
+; long u_link(const char *oldpath, const char *newpath) -- Linux nr 86
+USYSC1 u_link, 86
 
 ; long u_symlink(const char *target, const char *linkpath) -- Linux nr 88
 USYSC1 u_symlink, 88

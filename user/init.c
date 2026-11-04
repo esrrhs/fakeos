@@ -32,6 +32,7 @@ extern long u_getcwd(char *buf, unsigned long len);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
 extern long u_unlink(const char *path);
+extern long u_link(const char *oldpath, const char *newpath);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_lstat(const char *path, void *statbuf);
@@ -2035,6 +2036,140 @@ static void symlink_test(void) {
     puts("[U][PASS] symlink/readlink");
 }
 
+static void hardlink_test(void) {
+    char st_a[144];
+    char st_b[144];
+    char buf[32];
+    long fd;
+    long n;
+    unsigned long ino_a;
+    unsigned long ino_b;
+    unsigned long nlink;
+    unsigned long i;
+
+    u_unlink("/tmp/hl_a.txt");
+    u_unlink("/tmp/hl_b.txt");
+    u_unlink("/mnt/hl_a.txt");
+    u_unlink("/mnt/hl_b.txt");
+
+    fd = u_open("/tmp/hl_a.txt", 0x241, 0x1A4); /* WRONLY|CREAT|TRUNC */
+    if (fd < 0) {
+        puts("[U][FAIL] hardlink create");
+        return;
+    }
+    if (u_write(fd, "hardlink-payload", 16) != 16) {
+        puts("[U][FAIL] hardlink write");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    if (u_link("/tmp/hl_a.txt", "/tmp/hl_b.txt") != 0) {
+        puts("[U][FAIL] hardlink ramfs link");
+        return;
+    }
+    if (u_stat("/tmp/hl_a.txt", st_a) != 0 || u_stat("/tmp/hl_b.txt", st_b) != 0) {
+        puts("[U][FAIL] hardlink stat");
+        return;
+    }
+    ino_a = 0;
+    ino_b = 0;
+    nlink = 0;
+    for (i = 0; i < 8; i++) {
+        ino_a |= ((unsigned long)(unsigned char)st_a[8 + i]) << (8 * i);
+        ino_b |= ((unsigned long)(unsigned char)st_b[8 + i]) << (8 * i);
+        nlink |= ((unsigned long)(unsigned char)st_a[16 + i]) << (8 * i);
+    }
+    if (ino_a == 0 || ino_a != ino_b) {
+        puts("[U][FAIL] hardlink same inode");
+        return;
+    }
+    if (nlink < 2) {
+        puts("[U][FAIL] hardlink nlink");
+        return;
+    }
+
+    fd = u_open("/tmp/hl_b.txt", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] hardlink open alias");
+        return;
+    }
+    n = u_read(fd, buf, 32);
+    u_close(fd);
+    if (n != 16 || buf[0] != 'h' || buf[8] != '-' || buf[15] != 'd') {
+        puts("[U][FAIL] hardlink alias read");
+        return;
+    }
+
+    if (u_unlink("/tmp/hl_a.txt") != 0) {
+        puts("[U][FAIL] hardlink unlink one");
+        return;
+    }
+    fd = u_open("/tmp/hl_b.txt", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] hardlink survivor gone");
+        return;
+    }
+    n = u_read(fd, buf, 32);
+    u_close(fd);
+    if (n != 16) {
+        puts("[U][FAIL] hardlink survivor read");
+        return;
+    }
+    if (u_unlink("/tmp/hl_b.txt") != 0) {
+        puts("[U][FAIL] hardlink unlink last");
+        return;
+    }
+
+    /* Ext2 when mounted: link under /mnt. */
+    fd = u_open("/mnt/hl_a.txt", 0x241, 0x1A4);
+    if (fd >= 0) {
+        if (u_write(fd, "e2-hard", 7) != 7) {
+            puts("[U][FAIL] Ext2 hardlink write");
+            u_close(fd);
+            return;
+        }
+        u_close(fd);
+        if (u_link("/mnt/hl_a.txt", "/mnt/hl_b.txt") != 0) {
+            puts("[U][FAIL] Ext2 hardlink link");
+            return;
+        }
+        if (u_stat("/mnt/hl_a.txt", st_a) != 0 || u_stat("/mnt/hl_b.txt", st_b) != 0) {
+            puts("[U][FAIL] Ext2 hardlink stat");
+            return;
+        }
+        ino_a = 0;
+        ino_b = 0;
+        for (i = 0; i < 8; i++) {
+            ino_a |= ((unsigned long)(unsigned char)st_a[8 + i]) << (8 * i);
+            ino_b |= ((unsigned long)(unsigned char)st_b[8 + i]) << (8 * i);
+        }
+        if (ino_a == 0 || ino_a != ino_b) {
+            puts("[U][FAIL] Ext2 hardlink inode");
+            return;
+        }
+        if (u_unlink("/mnt/hl_a.txt") != 0) {
+            puts("[U][FAIL] Ext2 hardlink unlink one");
+            return;
+        }
+        fd = u_open("/mnt/hl_b.txt", 0, 0);
+        if (fd < 0) {
+            puts("[U][FAIL] Ext2 hardlink survivor");
+            return;
+        }
+        n = u_read(fd, buf, 8);
+        u_close(fd);
+        if (n != 7 || buf[0] != 'e' || buf[3] != 'h') {
+            puts("[U][FAIL] Ext2 hardlink read");
+            return;
+        }
+        u_unlink("/mnt/hl_b.txt");
+        puts("[U] Ext2 hardlink OK");
+    }
+
+    puts("[U][PASS] hard link(2)");
+}
+
 static void getcwd_test(void) {
     char buf[128];
     long n;
@@ -2152,6 +2287,7 @@ int main(int argc, char **argv) {
     owner_mtime_test();
     cred_setuid_groups_test();
     symlink_test();
+    hardlink_test();
     getcwd_test();
     dirent_test();
     bad_exec_test();
