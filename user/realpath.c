@@ -1,7 +1,9 @@
 /* fakeos userland - realpath: physical path resolve (thin; mirrors shell).
- *   realpath PATH
- * Walks components with readlink(2), collapsing . / .. like the shell
- * builtin. External form for xargs/scripts that exec realpath.
+ *   realpath PATH...
+ * One or more operands; each resolved path printed on its own line (GNU
+ * multi-arg). Walks components with readlink(2), collapsing . / .. like the
+ * shell builtin. Exit 0 iff every PATH resolves. Compact argv for
+ * EXEC_MAX_ARGC=8. External form for xargs/scripts that exec realpath.
  */
 package user;
 
@@ -9,6 +11,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_getcwd(char *buf, unsigned long len);
 extern unsigned long strlen(const char *s);
+extern void printf(const char *fmt, ...);
 
 /* Lexical join of absolute base + relative rel into out (cap bytes). */
 static int path_join(char *out, unsigned long cap, const char *base,
@@ -212,16 +215,21 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
 
 int main(int argc, char **argv) {
     char buf[128];
+    int i;
+    int rc = 0;
 
-    if (argc != 2) {
-        u_write(2, "usage: realpath PATH\n", 21);
+    if (argc < 2) {
+        u_write(2, "usage: realpath PATH...\n", 24);
         return 1;
     }
-    if (!urealpath(argv[1], buf, sizeof(buf))) {
-        u_write(2, "realpath: failed\n", 17);
-        return 1;
+    for (i = 1; i < argc; i++) {
+        if (!urealpath(argv[i], buf, sizeof(buf))) {
+            printf("realpath: %s: failed\n", argv[i]);
+            rc = 1;
+            continue;
+        }
+        u_write(1, buf, strlen(buf));
+        u_write(1, "\n", 1);
     }
-    u_write(1, buf, strlen(buf));
-    u_write(1, "\n", 1);
-    return 0;
+    return rc;
 }
