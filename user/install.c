@@ -2,9 +2,11 @@
  * Forms:
  *   install [-m MODE|-mMODE] SOURCE DEST
  *   install [-m MODE|-mMODE] SOURCE... DIRECTORY
+ *   install -t DIR|-tDIR [-m MODE|-mMODE] SOURCE...
  *   install -d [-m MODE|-mMODE] DIR...
- * Default MODE is 0755. -d is mkdir -p style, then chmod. Copy path reuses
- * open/read/write + chmod. Glued -mMODE / -dmMODE keep argv under EXEC_MAX_ARGC=8.
+ * Default MODE is 0755. -d is mkdir -p style, then chmod. -t names the
+ * destination directory (GNU). Copy path reuses open/read/write + chmod.
+ * Glued -mMODE / -tDIR / -dmMODE keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -158,12 +160,13 @@ static int copy_file(const char *src, const char *dst, unsigned int mode) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: install [-d] [-m MODE] SRC DST|DIR...\n", 46);
+    u_write(2, "usage: install [-d] [-t DIR] [-m MODE] SRC...\n", 47);
 }
 
 int main(int argc, char **argv) {
     int dirs = 0;
     unsigned int mode = DEFAULT_MODE;
+    const char *tdir = 0;
     int ai = 1;
     int rc = 0;
     int nops;
@@ -179,6 +182,18 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'd') {
                 dirs = 1;
+            } else if (o[j] == 't') {
+                if (o[j + 1] != 0) {
+                    tdir = o + j + 1;
+                    j = (int)strlen(o) - 1;
+                } else {
+                    ai++;
+                    if (ai >= argc) {
+                        usage();
+                        return 1;
+                    }
+                    tdir = argv[ai];
+                }
             } else if (o[j] == 'm') {
                 const char *ms;
                 if (o[j + 1] != 0) {
@@ -211,6 +226,10 @@ int main(int argc, char **argv) {
     }
 
     if (dirs) {
+        if (tdir != 0) {
+            usage();
+            return 1;
+        }
         for (i = ai; i < argc; i++) {
             if (mkdir_one(argv[i]) < 0) {
                 printf("install: %s: cannot create directory\n", argv[i]);
@@ -221,6 +240,24 @@ int main(int argc, char **argv) {
                 printf("install: %s: chmod failed\n", argv[i]);
                 rc = 1;
             }
+        }
+        return rc;
+    }
+
+    if (tdir != 0) {
+        /* -t DIR SRC... : all remaining operands are sources. */
+        if (!is_dir(tdir)) {
+            printf("install: %s: not a directory\n", tdir);
+            return 1;
+        }
+        for (i = ai; i < argc; i++) {
+            char joined[PATH_CAP];
+            if (join_dir_base(joined, PATH_CAP, tdir, basename_of(argv[i])) < 0) {
+                u_write(2, "install: path too long\n", 23);
+                rc = 1;
+                continue;
+            }
+            if (copy_file(argv[i], joined, mode) < 0) rc = 1;
         }
         return rc;
     }

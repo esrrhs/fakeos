@@ -1025,6 +1025,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "mkdir")) {
         int parents = 0;
+        int have_mode = 0;
+        unsigned int mode = 0;
         int ai = 1;
         int rc = 0;
         int saw = 0;
@@ -1035,8 +1037,36 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 'p') {
                     parents = 1;
+                } else if (o[j] == 'm') {
+                    const char *ms;
+                    unsigned int m = 0;
+                    int k;
+                    if (o[j + 1] != 0) {
+                        ms = o + j + 1;
+                        j = (int)strlen(o) - 1;
+                    } else {
+                        ai++;
+                        if (tokens[ai] == 0) {
+                            puts("usage: mkdir [-p] [-m MODE] DIR...");
+                            return 1;
+                        }
+                        ms = tokens[ai];
+                    }
+                    if (ms[0] == 0) {
+                        puts("sh: mkdir: bad mode");
+                        return 1;
+                    }
+                    for (k = 0; ms[k] != 0; k++) {
+                        if (ms[k] < '0' || ms[k] > '7') {
+                            puts("sh: mkdir: bad mode");
+                            return 1;
+                        }
+                        m = (m << 3) | (unsigned int)(ms[k] - '0');
+                    }
+                    mode = m;
+                    have_mode = 1;
                 } else {
-                    puts("usage: mkdir [-p] DIR...");
+                    puts("usage: mkdir [-p] [-m MODE] DIR...");
                     return 1;
                 }
             }
@@ -1051,6 +1081,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             if (sh_mkdir_one(tokens[ai], parents) < 0) {
                 printf("sh: mkdir: %s: cannot create directory\n", tokens[ai]);
                 rc = 1;
+            } else if (have_mode) {
+                if (u_chmod(tokens[ai], (long)mode) != 0) {
+                    printf("sh: mkdir: %s: chmod failed\n", tokens[ai]);
+                    rc = 1;
+                }
             }
             ai++;
         }
@@ -1107,9 +1142,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown, id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -1509,26 +1544,20 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "chown")) {
-        /* chown UID[:GID] FILE...  (decimal; missing GID keeps old) */
+        /* chown [UID][:GID] FILE...  (:GID leaves owner; missing GID leaves group) */
         if (tokens[1] == 0 || tokens[2] == 0) {
-            puts("usage: chown UID[:GID] FILE...");
+            puts("usage: chown [UID][:GID] FILE...");
             rc = 1;
         } else {
-            unsigned long uid = 0;
+            unsigned long uid = 0xFFFFFFFFUL; /* unchanged unless digits */
             unsigned long gid = 0xFFFFFFFFUL; /* unchanged */
             const char *spec = tokens[1];
             long ai;
             long i = 0;
             int bad = 0;
-            while (spec[i] >= '0' && spec[i] <= '9') {
-                uid = uid * 10 + (unsigned long)(spec[i] - '0');
-                i++;
-            }
-            if (i == 0) {
-                puts("sh: chown: bad owner");
-                bad = 1;
-            } else if (spec[i] == ':') {
-                long j = i + 1;
+            int have_uid = 0;
+            if (spec[0] == ':') {
+                long j = 1;
                 gid = 0;
                 if (spec[j] == 0) {
                     puts("sh: chown: bad group");
@@ -1543,9 +1572,38 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                         bad = 1;
                     }
                 }
-            } else if (spec[i] != 0) {
-                puts("sh: chown: bad owner");
-                bad = 1;
+            } else {
+                while (spec[i] >= '0' && spec[i] <= '9') {
+                    if (!have_uid) {
+                        uid = 0;
+                        have_uid = 1;
+                    }
+                    uid = uid * 10 + (unsigned long)(spec[i] - '0');
+                    i++;
+                }
+                if (!have_uid) {
+                    puts("sh: chown: bad owner");
+                    bad = 1;
+                } else if (spec[i] == ':') {
+                    long j = i + 1;
+                    gid = 0;
+                    if (spec[j] == 0) {
+                        puts("sh: chown: bad group");
+                        bad = 1;
+                    } else {
+                        while (spec[j] >= '0' && spec[j] <= '9') {
+                            gid = gid * 10 + (unsigned long)(spec[j] - '0');
+                            j++;
+                        }
+                        if (spec[j] != 0) {
+                            puts("sh: chown: bad group");
+                            bad = 1;
+                        }
+                    }
+                } else if (spec[i] != 0) {
+                    puts("sh: chown: bad owner");
+                    bad = 1;
+                }
             }
             if (bad) {
                 rc = 1;

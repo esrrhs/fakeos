@@ -1,12 +1,14 @@
 /* fakeos userland - mkdir: create directories (thin; mirrors shell builtin).
- *   mkdir [-p] DIR...
+ *   mkdir [-p] [-m MODE|-mMODE] DIR...
  * -p  create parents; existing directories are OK (re-stat after mkdir).
+ * -m  set mode after create (octal; glued -mMODE keeps EXEC_MAX_ARGC=8).
  * External form for xargs/scripts that exec mkdir without the shell builtin.
  */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_mkdir(const char *path);
+extern long u_chmod(const char *path, long mode);
 extern long u_stat(const char *path, void *statbuf);
 extern int strcmp(const char *a, const char *b);
 extern unsigned long strlen(const char *s);
@@ -34,6 +36,18 @@ static int is_dir(const char *path) {
     if (u_stat(path, st) != 0) return 0;
     mode = load_u32(st + ST_MODE);
     return (mode & S_IFMT) == S_IFDIR;
+}
+
+static int parse_mode(const char *s, unsigned int *out) {
+    unsigned int mode = 0;
+    int j;
+    if (s == 0 || s[0] == 0) return 0;
+    for (j = 0; s[j] != 0; j++) {
+        if (s[j] < '0' || s[j] > '7') return 0;
+        mode = (mode << 3) | (unsigned int)(s[j] - '0');
+    }
+    *out = mode;
+    return 1;
 }
 
 static int mkdir_one(const char *path, int parents) {
@@ -75,8 +89,14 @@ static int mkdir_one(const char *path, int parents) {
     return 0;
 }
 
+static void usage(void) {
+    u_write(2, "usage: mkdir [-p] [-m MODE] DIR...\n", 35);
+}
+
 int main(int argc, char **argv) {
     int parents = 0;
+    int have_mode = 0;
+    unsigned int mode = 0;
     int ai = 1;
     int rc = 0;
     int saw = 0;
@@ -88,8 +108,26 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'p') {
                 parents = 1;
+            } else if (o[j] == 'm') {
+                const char *ms;
+                if (o[j + 1] != 0) {
+                    ms = o + j + 1;
+                    j = (int)strlen(o) - 1;
+                } else {
+                    ai++;
+                    if (ai >= argc) {
+                        usage();
+                        return 1;
+                    }
+                    ms = argv[ai];
+                }
+                if (!parse_mode(ms, &mode)) {
+                    u_write(2, "mkdir: bad mode\n", 16);
+                    return 1;
+                }
+                have_mode = 1;
             } else {
-                u_write(2, "usage: mkdir [-p] DIR...\n", 24);
+                usage();
                 return 1;
             }
         }
@@ -104,6 +142,12 @@ int main(int argc, char **argv) {
         if (mkdir_one(argv[ai], parents) < 0) {
             printf("mkdir: %s: cannot create directory\n", argv[ai]);
             rc = 1;
+        } else if (have_mode) {
+            /* chmod final path only (GNU mkdir -m with -p). */
+            if (u_chmod(argv[ai], (long)mode) != 0) {
+                printf("mkdir: %s: chmod failed\n", argv[ai]);
+                rc = 1;
+            }
         }
         ai++;
     }
