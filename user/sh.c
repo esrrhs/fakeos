@@ -2839,9 +2839,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -3402,27 +3402,55 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "type")) {
-        /* type NAME... — describe alias, builtin, or PATH resolution */
-        int ai;
+        /* type [-t] NAME... — describe alias/keyword/function/builtin/file.
+         * -t: print single word (alias|keyword|function|builtin|file). */
+        int ai = 1;
+        int tflag = 0;
         int any = 0;
         int bad = 0;
-        if (tokens[1] == 0) {
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
+            const char *o = tokens[1] + 1;
+            int j;
+            if (!(o[0] == '-' && o[1] == 0)) {
+                for (j = 0; o[j] != 0; j++) {
+                    if (o[j] == 't') {
+                        tflag = 1;
+                    } else {
+                        puts("usage: type [-t] NAME...");
+                        rc = 1;
+                        tflag = -1;
+                        break;
+                    }
+                }
+                if (tflag >= 0) ai = 2;
+            }
+        }
+        if (tflag < 0) {
+            /* usage printed */
+        } else if (tokens[ai] == 0) {
             puts("sh: type: missing operand");
             rc = 1;
         } else {
-            for (ai = 1; tokens[ai] != 0; ai++) {
+            for (; tokens[ai] != 0; ai++) {
                 char path[96];
                 const char *target;
                 long fd;
                 const char *aval;
+                const char *name = tokens[ai];
                 any = 1;
-                aval = alias_lookup(tokens[ai]);
+                aval = alias_lookup(name);
                 if (aval != 0) {
-                    printf("%s is aliased to `%s'\n", tokens[ai], aval);
-                } else if (func_lookup(tokens[ai]) != 0) {
-                    printf("%s is a shell function\n", tokens[ai]);
-                } else if (is_builtin(tokens[ai])) {
-                    printf("%s is a shell builtin\n", tokens[ai]);
+                    if (tflag) puts("alias");
+                    else printf("%s is aliased to `%s'\n", name, aval);
+                } else if (is_shell_keyword(name)) {
+                    if (tflag) puts("keyword");
+                    else printf("%s is a shell keyword\n", name);
+                } else if (func_lookup(name) != 0) {
+                    if (tflag) puts("function");
+                    else printf("%s is a shell function\n", name);
+                } else if (is_builtin(name)) {
+                    if (tflag) puts("builtin");
+                    else printf("%s is a shell builtin\n", name);
                 } else {
                     char *av[2];
                     av[0] = tokens[ai];
@@ -3431,9 +3459,12 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     fd = u_open(target, 0, 0);
                     if (fd >= 0) {
                         u_close(fd);
-                        printf("%s is %s\n", tokens[ai], target);
+                        if (tflag) puts("file");
+                        else printf("%s is %s\n", name, target);
                     } else {
-                        printf("sh: type: %s: not found\n", tokens[ai]);
+                        if (!tflag) {
+                            printf("sh: type: %s: not found\n", name);
+                        }
                         bad = 1;
                     }
                 }
@@ -4655,6 +4686,14 @@ static int is_compound_kw(const char *s) {
     return eq(s, "for") || eq(s, "while") || eq(s, "until") || eq(s, "if")
         || eq(s, "case");
 }
+/* Thin reserved words for type -t (bash-ish keyword). */
+static int is_shell_keyword(const char *s) {
+    return eq(s, "if") || eq(s, "then") || eq(s, "else") || eq(s, "elif")
+        || eq(s, "fi") || eq(s, "for") || eq(s, "while") || eq(s, "until")
+        || eq(s, "do") || eq(s, "done") || eq(s, "case") || eq(s, "esac")
+        || eq(s, "in") || eq(s, "!") || eq(s, "[[") || eq(s, "]]");
+}
+
 
 /* Run orig with per-;-segment $ re-expand (mid-body export visible to later if). */
 static long expand_and_run(char **orig, long rc_in) {
@@ -5758,7 +5797,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

@@ -1316,6 +1316,15 @@ dent). Bare `set -o`/`+o` lists `errexit`/`nounset` on|off; `set -o NAME` /
 +o nounset / legacy -eu + prior greens (smp 1/2). Ramfs `/bin` dents
 ~114/128.
 
+## shell type -t — landed
+
+Thin `type [-t] NAME…` on existing type (no new `/bin` dent). Inventory:
+`hash`/`hash -r`/`hash NAME` already present — left alone. `-t` prints one
+word: `alias`/`keyword`/`function`/`builtin`/`file` (silent fail if missing).
+Verbose form also reports shell keywords. Keyword set is thin reserved words
+(`if`/`for`/`[[`/…). Focused virtio login smoke covers `-t` cases + prior
+greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
