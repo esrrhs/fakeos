@@ -42,6 +42,8 @@ extern u64 sys_lseek(u64 fd, u64 off, u64 whence);
 extern u64 sys_mkdir(u64 upath);
 extern u64 sys_rename(u64 uold, u64 unew);
 extern u64 sys_unlink(u64 upath);
+extern u64 sys_symlink(u64 utarget, u64 ulinkpath);
+extern u64 sys_readlink(u64 upath, u64 ubuf, u64 bufsiz);
 extern u64 sys_rmdir(u64 upath);
 extern u64 sys_dup2(u64 oldfd, u64 newfd);
 extern u64 sys_pipe(u64 upipefd);
@@ -60,6 +62,7 @@ extern u64 sys_getcwd(u64 buf, u64 len);
 extern u64 sys_getdents64(u64 fd, u64 buf, u64 len);
 extern u64 sys_ftruncate(u64 fd, u64 length);
 extern u64 sys_stat(u64 upath, u64 ustat);
+extern u64 sys_lstat(u64 upath, u64 ustat);
 extern u64 sys_fstat(u64 fd, u64 ustat);
 extern u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags);
 
@@ -186,7 +189,9 @@ enum {
     SC_TTY_GETFG = 502,   /* tcgetpgrp */
     SC_RT_SIGACTION = 13,
     SC_RT_SIGRETURN = 15,
-    SC_NICE = 89,
+    SC_SYMLINK = 88,
+    SC_READLINK = 89,
+    SC_NICE = 503,            /* fakeos-specific; Linux has no nice(2) nr */
     SC_FTRUNCATE = 77,
     SC_STAT = 4,
     SC_FSTAT = 5,
@@ -423,8 +428,11 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_FTRUNCATE) {
         return sys_ftruncate(f->rdi, f->rsi);
     }
-    if (f->rax == SC_STAT || f->rax == SC_LSTAT) {
+    if (f->rax == SC_STAT) {
         return sys_stat(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_LSTAT) {
+        return sys_lstat(f->rdi, f->rsi);
     }
     if (f->rax == SC_FSTAT) {
         return sys_fstat(f->rdi, f->rsi);
@@ -452,6 +460,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_UNLINK) {
         return sys_unlink(f->rdi);
+    }
+    if (f->rax == SC_SYMLINK) {
+        return sys_symlink(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_READLINK) {
+        return sys_readlink(f->rdi, f->rsi, f->rdx);
     }
     if (f->rax == SC_RMDIR) {
         return sys_rmdir(f->rdi);

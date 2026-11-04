@@ -2851,7 +2851,7 @@ u64 sched_vruntime(u32 id) {
     return threads[id].vruntime;
 }
 
-/* int nice(int inc): Linux nr 89. */
+/* int nice(int inc): fakeos nr 503 (Linux x86-64 has no nice; 89 is readlink). */
 u64 sys_nice(u64 inc) {
     s32 cur = threads[sched_cur()].nice;
     s64 next = (s64)cur + (s64)(s32)inc;

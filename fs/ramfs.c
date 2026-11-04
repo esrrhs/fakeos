@@ -21,7 +21,7 @@ extern u64 procfs_gen_cmdline(char *buf, u64 cap);
  * Minimal in-memory VFS + Ramfs
  *
  * Objects:
- *   inode  - file, directory or the console character device
+ *   inode  - file, directory, symlink or the console character device
  *   dentry - a named {name -> inode} link held by its parent directory
  *   open file - one per open(2), carrying offset/refcount/flags
  *
@@ -43,6 +43,7 @@ enum {
     INO_PROC_STATUS  = 6,          /* /proc/self/status (snapshot on open) */
     INO_PROC_MAPS    = 7,          /* /proc/self/maps */
     INO_PROC_CMDLINE = 8,          /* /proc/self/cmdline */
+    INO_SYMLINK = 9,               /* symbolic link; target in buf/size */
 
     ROOT_INO    = 1,
     PROC_STATUS_INO  = 58,
@@ -80,7 +81,11 @@ enum {
 
     DT_REG = 8,
     DT_DIR = 4,
-    DT_CHR = 2
+    DT_CHR = 2,
+    DT_LNK = 10,
+
+    SYMLOOP_MAX = 8,
+    SYMLINK_MAX = 127              /* target bytes (not counting NUL) */
 };
 
 struct dent {
@@ -212,15 +217,41 @@ static u32 dir_add(u32 dir_ino, const char *name, u32 n, u32 child) {
     return 1;
 }
 
-/* Absolute path lookup. Empty components (leading/double/trailing slash),
- * "." and ".." are honored. Returns inode number or 0 on any failure. */
-/* Walk components of `path` starting at `cur`. Absolute paths that begin
- * with '/' still walk from ROOT_INO when cur is ROOT_INO; callers that pass
- * a directory inode feed a relative path (no leading slash required). */
-static u32 walk_lookup_from(u32 cur, const char *path) {
+/* Copy symlink target into out (NUL-terminated). Returns byte length or 0. */
+static u32 symlink_copy_target(u32 ino, char *out, u32 cap) {
+    u64 n;
+    u64 i;
+    const char *src;
+    if (ino == 0 || ino >= MAX_INODES || inodes[ino].type != INO_SYMLINK
+        || out == 0 || cap < 2) {
+        return 0;
+    }
+    n = inodes[ino].size;
+    if (n == 0 || n > SYMLINK_MAX || n + 1 > cap) {
+        return 0;
+    }
+    src = inodes[ino].buf;
+    if (src == 0) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        out[i] = src[i];
+    }
+    out[n] = 0;
+    return (u32)n;
+}
+
+/* Walk components of `path` starting at `cur`. Absolute paths reset to root.
+ * Intermediate symlinks are always followed; the final component is followed
+ * only when follow_last is set (open/stat/chdir). Depth-limited. */
+static u32 walk_lookup_from_flags(u32 cur, const char *path, u32 follow_last,
+                                  u32 depth) {
     u32 i = 0;
     if (path == 0 || cur == 0 || cur >= MAX_INODES
         || inodes[cur].type == INO_FREE) {
+        return 0;
+    }
+    if (depth > SYMLOOP_MAX) {
         return 0;
     }
     if (path[0] == '/') {
@@ -229,6 +260,8 @@ static u32 walk_lookup_from(u32 cur, const char *path) {
     while (path[i] != 0) {
         u32 n;
         u32 nxt;
+        u32 is_last;
+        u32 j;
         while (path[i] == '/') {
             i++;
         }
@@ -242,6 +275,11 @@ static u32 walk_lookup_from(u32 cur, const char *path) {
                 return 0;
             }
         }
+        j = i + n;
+        while (path[j] == '/') {
+            j++;
+        }
+        is_last = (path[j] == 0) ? 1 : 0;
         if (n == 1 && path[i] == '.') {
             /* stay */
         } else if (n == 2 && path[i] == '.' && path[i + 1] == '.') {
@@ -251,6 +289,33 @@ static u32 walk_lookup_from(u32 cur, const char *path) {
             if (nxt == 0) {
                 return 0;
             }
+            if (inodes[nxt].type == INO_SYMLINK
+                && (!is_last || follow_last)) {
+                char tgt[SYMLINK_MAX + 1];
+                u32 start;
+                u32 resolved;
+                const char *rest;
+                if (!symlink_copy_target(nxt, tgt, SYMLINK_MAX + 1)) {
+                    return 0;
+                }
+                start = (tgt[0] == '/') ? ROOT_INO : cur;
+                resolved = walk_lookup_from_flags(start, tgt, 1, depth + 1);
+                if (resolved == 0) {
+                    return 0;
+                }
+                if (is_last) {
+                    return resolved;
+                }
+                rest = &path[i + n];
+                while (rest[0] == '/') {
+                    rest++;
+                }
+                return walk_lookup_from_flags(resolved, rest, follow_last,
+                                              depth + 1);
+            }
+            if (!is_last && inodes[nxt].type != INO_DIR) {
+                return 0;            /* intermediate must be a directory */
+            }
             cur = nxt;
         }
         i += n;
@@ -258,11 +323,22 @@ static u32 walk_lookup_from(u32 cur, const char *path) {
     return cur;
 }
 
+static u32 walk_lookup_from(u32 cur, const char *path) {
+    return walk_lookup_from_flags(cur, path, 1, 0);
+}
+
 static u32 walk_lookup(const char *path) {
     if (path == 0 || path[0] != '/') {
         return 0;
     }
-    return walk_lookup_from(ROOT_INO, path);
+    return walk_lookup_from_flags(ROOT_INO, path, 1, 0);
+}
+
+static u32 walk_lookup_nofollow(const char *path) {
+    if (path == 0 || path[0] != '/') {
+        return 0;
+    }
+    return walk_lookup_from_flags(ROOT_INO, path, 0, 0);
 }
 
 /* Split path into parent directory + final component, creating missing
@@ -316,6 +392,19 @@ static u32 walk_parent(const char *path, char *last, u32 *last_n, u32 ensure_dir
                 }
                 nxt = alloc_ino(INO_DIR, cur);
                 if (nxt == 0 || !dir_add(cur, &path[start], n, nxt)) {
+                    return 0;
+                }
+            }
+            /* Intermediate symlinks must resolve to a directory. */
+            if (inodes[nxt].type == INO_SYMLINK) {
+                char tgt[SYMLINK_MAX + 1];
+                u32 start_ino;
+                if (!symlink_copy_target(nxt, tgt, SYMLINK_MAX + 1)) {
+                    return 0;
+                }
+                start_ino = (tgt[0] == '/') ? ROOT_INO : cur;
+                nxt = walk_lookup_from_flags(start_ino, tgt, 1, 0);
+                if (nxt == 0) {
                     return 0;
                 }
             }
@@ -461,12 +550,16 @@ u32 fs_publish_file(const char *path, u64 kva, u64 size) {
 }
 
 u32 fs_lookup(const char *path) {
-    u32 ino = walk_lookup(path);
-    return ino;
+    return walk_lookup(path);
+}
+
+/* Like fs_lookup but leave a final symlink unresolved (lstat/readlink). */
+u32 fs_lookup_nofollow(const char *path) {
+    return walk_lookup_nofollow(path);
 }
 
 /* Resolve `rel` relative to directory inode `dir_ino` ("" / "." => dir). */
-u32 fs_lookup_at(u32 dir_ino, const char *rel) {
+u32 fs_lookup_at_flags(u32 dir_ino, const char *rel, u32 follow_last) {
     if (dir_ino == 0 || dir_ino >= MAX_INODES
         || inodes[dir_ino].type != INO_DIR) {
         return 0;
@@ -474,7 +567,85 @@ u32 fs_lookup_at(u32 dir_ino, const char *rel) {
     if (rel == 0 || rel[0] == 0 || (rel[0] == '.' && rel[1] == 0)) {
         return dir_ino;
     }
-    return walk_lookup_from(dir_ino, rel);
+    return walk_lookup_from_flags(dir_ino, rel, follow_last, 0);
+}
+
+u32 fs_lookup_at(u32 dir_ino, const char *rel) {
+    return fs_lookup_at_flags(dir_ino, rel, 1);
+}
+
+/* symlink(2): create linkpath -> target. Target is stored verbatim (may be
+ * absolute or relative); linkpath must not exist. Returns inode or 0. */
+u32 fs_symlink(const char *target, const char *linkpath) {
+    char last[NAME_LEN];
+    u32 last_n = 0;
+    u32 parent;
+    u32 ino;
+    u32 tlen;
+    u32 i;
+    char *buf;
+    if (target == 0 || linkpath == 0) {
+        return 0;
+    }
+    tlen = cstr_len(target);
+    if (tlen == 0 || tlen > SYMLINK_MAX) {
+        return 0;
+    }
+    parent = walk_parent(linkpath, last, &last_n, 0);
+    if (parent == 0 || last_n == 0) {
+        return 0;
+    }
+    if (dir_find(parent, last, last_n) != 0) {
+        return 0;                    /* EEXIST */
+    }
+    ino = alloc_ino(INO_SYMLINK, parent);
+    if (ino == 0) {
+        return 0;
+    }
+    buf = (char *)mem.kmalloc(tlen + 1);
+    if (buf == 0) {
+        inodes[ino].type = INO_FREE;
+        return 0;
+    }
+    for (i = 0; i < tlen; i++) {
+        buf[i] = target[i];
+    }
+    buf[tlen] = 0;
+    inodes[ino].buf = buf;
+    inodes[ino].size = tlen;
+    inodes[ino].cap = tlen + 1;
+    if (!dir_add(parent, last, last_n, ino)) {
+        mem.kfree(buf);
+        inodes[ino].buf = 0;
+        inodes[ino].type = INO_FREE;
+        return 0;
+    }
+    return ino;
+}
+
+/* readlink(2): copy target of the final symlink (nofollow) into kbuf.
+ * Returns byte count (no NUL) or (u64)-1. Truncates to bufsiz. */
+u64 fs_readlink(const char *path, char *kbuf, u64 bufsiz) {
+    u32 ino;
+    u64 n;
+    u64 i;
+    const char *src;
+    if (path == 0 || kbuf == 0 || bufsiz == 0) {
+        return (u64)(-1);
+    }
+    ino = walk_lookup_nofollow(path);
+    if (ino == 0 || inodes[ino].type != INO_SYMLINK || inodes[ino].buf == 0) {
+        return (u64)(-1);
+    }
+    n = inodes[ino].size;
+    if (n > bufsiz) {
+        n = bufsiz;
+    }
+    src = inodes[ino].buf;
+    for (i = 0; i < n; i++) {
+        kbuf[i] = src[i];
+    }
+    return n;
 }
 
 /* Create a dynamic writable file (fail if the name already exists). */
@@ -586,6 +757,9 @@ u32 fs_unlink(const char *path) {
     if (target == 0) {
         return 0;
     }
+    if (inodes[target].type == INO_DIR) {
+        return 0;                    /* use rmdir(2) */
+    }
     /* Never unlink fixed character devices. */
     if (target == CONSOLE_INO || target == NULL_INO || target == ZERO_INO
         || target == PROC_STATUS_INO || target == PROC_MAPS_INO
@@ -611,6 +785,12 @@ u32 fs_unlink(const char *path) {
     d->ndent--;
 
     if (!inode_is_open(target)) {
+        if (inodes[target].buf != 0 && !inodes[target].ro) {
+            mem.kfree(inodes[target].buf);
+            inodes[target].buf = 0;
+            inodes[target].cap = 0;
+            inodes[target].size = 0;
+        }
         inodes[target].type = INO_FREE;
         inodes[target].parent = 0;
         inodes[target].ndent = 0;
@@ -1121,6 +1301,8 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
         if (inodes[de->ino].type == INO_DIR) {
             r[18] = (char)DT_DIR;
+        } else if (inodes[de->ino].type == INO_SYMLINK) {
+            r[18] = (char)DT_LNK;
         } else if (inodes[de->ino].type == INO_FILE
                    || inode_is_proc(inodes[de->ino].type)) {
             r[18] = (char)DT_REG;
@@ -1278,6 +1460,8 @@ u32 fs_stat_ino(u32 ino, u32 *mode_out, u64 *size_out, u32 *rdev_out,
         mode = 0x21B6;
         rdev = (1 << 8) | 5;         /* /dev/zero */
         size = 0;
+    } else if (t == INO_SYMLINK) {
+        mode = 0xA1FF;               /* S_IFLNK | 0777 */
     } else if (inode_is_proc(t)) {
         mode = 0x81A4;               /* S_IFREG | 0644 */
         size = 0;                    /* live size known after open snapshot */

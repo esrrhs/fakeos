@@ -1,6 +1,7 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, exit [code], help,
- * jobs, fg, bg. Redirects (> >> <), pipelines (|), && / || lists, and & jobs. */
+ * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, ln -s, readlink,
+ * exit [code], help, jobs, fg, bg. Redirects (> >> <), pipelines (|),
+ * && / || lists, and & jobs. */
 package user;
 
 typedef unsigned long u64;
@@ -19,6 +20,9 @@ extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
+extern long u_symlink(const char *target, const char *linkpath);
+extern long u_readlink(const char *path, char *buf, unsigned long n);
+extern long u_unlink(const char *path);
 extern long u_getpid(void);
 extern long u_getppid(void);
 extern long u_uname(void *buf);
@@ -318,7 +322,8 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "ppid") ||
            eq(cmd, "uname") || eq(cmd, "sleep") || eq(cmd, "sync") ||
            eq(cmd, "clear") || eq(cmd, "history") || eq(cmd, "jobs") ||
-           eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill");
+           eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill") ||
+           eq(cmd, "ln") || eq(cmd, "readlink");
 }
 
 /* Default PATH directories (colon-separated). */
@@ -432,7 +437,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
@@ -587,6 +592,35 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 puts("sh: sleep interrupted");
                 rc = 1;
             } else {
+                rc = 0;
+            }
+        }
+    } else if (eq(tokens[0], "ln")) {
+        /* ln -s TARGET LINKPATH */
+        if (tokens[1] == 0 || !eq(tokens[1], "-s") || tokens[2] == 0
+            || tokens[3] == 0) {
+            puts("sh: ln: usage: ln -s TARGET LINKPATH");
+            rc = 1;
+        } else if (u_symlink(tokens[2], tokens[3]) != 0) {
+            puts("sh: ln: symlink failed");
+            rc = 1;
+        } else {
+            rc = 0;
+        }
+    } else if (eq(tokens[0], "readlink")) {
+        char buf[128];
+        long n;
+        if (tokens[1] == 0) {
+            puts("sh: readlink: missing operand");
+            rc = 1;
+        } else {
+            n = u_readlink(tokens[1], buf, sizeof(buf) - 1);
+            if (n < 0) {
+                puts("sh: readlink: failed");
+                rc = 1;
+            } else {
+                buf[n] = 0;
+                puts(buf);
                 rc = 0;
             }
         }

@@ -106,9 +106,20 @@ Non-`MAP_FIXED` non-zero `addr` is a POSIX hint for anon and file maps (try VA,
 else `mmap_next`). `MAP_FIXED` still rejects overlaps (no silent replace). Init
 smoke: `[U][PASS] PROT_NONE + mmap addr hint`.
 
+## symlink / readlink — landed
+
+Linux nr `symlink(88)` / `readlink(89)`. Ramfs `INO_SYMLINK` + Ext2 `S_IFLNK`
+(fast symlink in `i_block` when target < 60). Path walks follow intermediate
+and (for open/stat/chdir) final symlinks with `SYMLOOP_MAX=8`; absolute Ext2
+targets are remapped through `/mnt`/`/home` `persist_rel`. `lstat` /
+`newfstatat(AT_SYMLINK_NOFOLLOW)` / `readlink` leave the final component.
+`nice(2)` moved to fakeos nr 503 (Linux x86-64 has no `nice`; 89 is readlink).
+Shell builtins: `ln -s`, `readlink`. `ls -l` uses NOFOLLOW and shows `l`.
+Init smoke: `[U][PASS] symlink/readlink` (Ramfs + Ext2 when mounted).
+
 ## Suggested next steps
 
-1. Symlink/`readlink` (and `lstat` already-ish) — interactive POSIX gap if useful.
-2. getcwd polish / richer shell niceties — scan README daily-driver wants.
-3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-4. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd) — avoid unless needed.
+1. getcwd polish / richer shell niceties — scan README daily-driver wants.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Deep jbd — avoid unless needed.
+4. Optional: `readlink` in `ls -l` arrow display / `realpath`.

@@ -31,6 +31,8 @@ global u_getcwd
 global u_getdents
 global u_rename
 global u_unlink
+global u_symlink
+global u_readlink
 global u_rmdir
 global u_pipe
 global u_sync
@@ -168,6 +170,12 @@ USYSC1 u_rename, 82
 
 ; long u_unlink(const char *path)
 USYSC1 u_unlink, 87
+
+; long u_symlink(const char *target, const char *linkpath) -- Linux nr 88
+USYSC1 u_symlink, 88
+
+; long u_readlink(const char *path, char *buf, unsigned long bufsiz) -- Linux nr 89
+USYSC1 u_readlink, 89
 
 ; long u_rmdir(const char *path)
 USYSC1 u_rmdir, 84
@@ -327,7 +335,7 @@ USYSC1 u_stat, 4
 ; long u_fstat(long fd, void *statbuf) -- Linux nr 5
 USYSC1 u_fstat, 5
 
-; long u_lstat(const char *path, void *statbuf) -- Linux nr 6 (no symlinks)
+; long u_lstat(const char *path, void *statbuf) -- Linux nr 6 (nofollow)
 USYSC1 u_lstat, 6
 
 ; long u_newfstatat(long dfd, const char *path, void *statbuf, long flags)

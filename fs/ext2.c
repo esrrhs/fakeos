@@ -12,8 +12,9 @@ extern void kprintf(const char *fmt, ...);
 /* ---------------------------------------------------------------------------
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
  *
- * Mount, path lookup, open/read/write/lseek, create, mkdir, getdents,
- * unlink (regular files), rmdir, rename, ftruncate, sync. Block size
+ * Mount, path lookup, open/read/write/lseek, create, mkdir, symlink,
+ * readlink, getdents, unlink (regular files), rmdir, rename, ftruncate,
+ * sync. Block size
  * 1024/2048/4096. Multi block group (BGDT indexed). Direct + single-/
  * double-/triple-indirect maps. Hardening: free-count bookkeeping in
  * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered/
@@ -38,9 +39,14 @@ enum {
     EXT2_ROOT_INO   = 2,
     EXT2_S_IFDIR    = 0x4000,
     EXT2_S_IFREG    = 0x8000,
+    EXT2_S_IFLNK    = 0xA000,
     EXT2_S_IFMT     = 0xF000,
     EXT2_FT_REG     = 1,
     EXT2_FT_DIR     = 2,
+    EXT2_FT_SYMLINK = 7,
+
+    SYMLOOP_MAX     = 8,
+    SYMLINK_FAST_MAX = 60,         /* ext2 fast symlink fits in i_block[0..14] */
 
     SECTOR_SIZE     = 512,
     NAME_MAX        = 255,
@@ -1518,18 +1524,55 @@ static u32 dir_remove(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
     return 0;
 }
 
+static const char *persist_rel(const char *path);
+
+/* Read symlink target into out (NUL-terminated). Fast symlinks live in the
+ * 60-byte i_block area when size < 60; otherwise data blocks are used.
+ * Returns length or 0. */
+static u32 symlink_read_target(u32 ino, char *out, u32 cap) {
+    u8 raw[128];
+    u32 size;
+    u32 i;
+    if (ino == 0 || out == 0 || cap < 2) return 0;
+    if (!inode_read(ino, raw)) return 0;
+    if ((rd16(raw + I_MODE) & EXT2_S_IFMT) != EXT2_S_IFLNK) return 0;
+    size = rd32(raw + I_SIZE_LO);
+    if (size == 0 || size + 1 > cap) return 0;
+    if (size < SYMLINK_FAST_MAX) {
+        for (i = 0; i < size; i++) out[i] = (char)raw[I_BLOCK + i];
+        out[size] = 0;
+        return size;
+    }
+    {
+        u32 phys = inode_get_block(raw, 0);
+        if (phys == 0 || size > sb.block_size) return 0;
+        if (!bread(phys, blk_buf)) return 0;
+        for (i = 0; i < size; i++) out[i] = (char)blk_buf[i];
+        out[size] = 0;
+        return size;
+    }
+}
+
 /* Walk a path relative to start_ino. Leading slashes ignored. */
-static u32 walk_rel_from(u32 start_ino, const char *rel, u32 *is_dir) {
+static u32 walk_rel_from_flags(u32 start_ino, const char *rel, u32 *is_dir,
+                                u32 follow_last, u32 depth) {
     u32 cur = start_ino;
     u32 i = 0;
     if (rel == 0 || cur == 0) return 0;
+    if (depth > SYMLOOP_MAX) return 0;
     while (rel[i] != 0) {
         u32 n;
         u32 nxt;
+        u32 is_last;
+        u32 j;
+        u16 mode;
         while (rel[i] == '/') i++;
         if (rel[i] == 0) break;
         n = 0;
         while (rel[i + n] != 0 && rel[i + n] != '/') n++;
+        j = i + n;
+        while (rel[j] == '/') j++;
+        is_last = (rel[j] == 0) ? 1 : 0;
         if (n == 1 && rel[i] == '.') {
             /* stay */
         } else if (n == 2 && rel[i] == '.' && rel[i + 1] == '.') {
@@ -1539,6 +1582,37 @@ static u32 walk_rel_from(u32 start_ino, const char *rel, u32 *is_dir) {
             }
         } else {
             if (!dir_find(cur, &rel[i], n, &nxt)) return 0;
+            if (!inode_read(nxt, ino_raw)) return 0;
+            mode = rd16(ino_raw + I_MODE);
+            if ((mode & EXT2_S_IFMT) == EXT2_S_IFLNK
+                && (!is_last || follow_last)) {
+                char tgt[256];
+                u32 resolved;
+                const char *rest;
+                u32 start;
+                const char *walk = tgt;
+                if (!symlink_read_target(nxt, tgt, 256)) return 0;
+                if (tgt[0] == '/') {
+                    /* Absolute targets are OS paths; map /mnt and /home into
+                     * volume-relative form before continuing the walk. */
+                    walk = persist_rel(tgt);
+                    if (walk == 0) return 0;
+                    start = EXT2_ROOT_INO;
+                } else {
+                    start = cur;
+                }
+                resolved = walk_rel_from_flags(start, walk, 0, 1, depth + 1);
+                if (resolved == 0) return 0;
+                if (is_last) {
+                    cur = resolved;
+                    break;
+                }
+                rest = &rel[i + n];
+                while (rest[0] == '/') rest++;
+                return walk_rel_from_flags(resolved, rest, is_dir, follow_last,
+                                           depth + 1);
+            }
+            if (!is_last && (mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
             cur = nxt;
         }
         i += n;
@@ -1548,6 +1622,10 @@ static u32 walk_rel_from(u32 start_ino, const char *rel, u32 *is_dir) {
         *is_dir = ((rd16(ino_raw + I_MODE) & EXT2_S_IFMT) == EXT2_S_IFDIR) ? 1 : 0;
     }
     return cur;
+}
+
+static u32 walk_rel_from(u32 start_ino, const char *rel, u32 *is_dir) {
+    return walk_rel_from_flags(start_ino, rel, is_dir, 1, 0);
 }
 
 /* Walk a path relative to the Ext2 root. Leading slashes ignored. */
@@ -1590,7 +1668,29 @@ static u32 walk_parent(const char *rel, char *last, u32 *last_n) {
                     cur = nxt;
                 }
             } else {
+                u16 mode;
                 if (!dir_find(cur, &rel[start], n, &nxt)) return 0;
+                if (!inode_read(nxt, ino_raw)) return 0;
+                mode = rd16(ino_raw + I_MODE);
+                if ((mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+                    char tgt[256];
+                    u32 start_ino;
+                    const char *walk;
+                    if (!symlink_read_target(nxt, tgt, 256)) return 0;
+                    if (tgt[0] == '/') {
+                        walk = persist_rel(tgt);
+                        if (walk == 0) return 0;
+                        start_ino = EXT2_ROOT_INO;
+                    } else {
+                        walk = tgt;
+                        start_ino = cur;
+                    }
+                    nxt = walk_rel_from_flags(start_ino, walk, 0, 1, 0);
+                    if (nxt == 0) return 0;
+                    if (!inode_read(nxt, ino_raw)) return 0;
+                    mode = rd16(ino_raw + I_MODE);
+                }
+                if ((mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 0;
                 cur = nxt;
             }
         }
@@ -1878,6 +1978,8 @@ u32 ext2_open(const char *path, u32 flags) {
 
     if (is_dir && acc != O_RDONLY) return 0;
     if (!inode_read(ino, ino_raw)) return 0;
+    /* Symlinks are never openable as themselves (open follows). */
+    if ((rd16(ino_raw + I_MODE) & EXT2_S_IFMT) == EXT2_S_IFLNK) return 0;
 
     if (want_trunc && !is_dir && (acc == O_WRONLY || acc == O_RDWR)) {
         jl_begin();
@@ -1956,6 +2058,93 @@ u32 ext2_stat_path(const char *path, u32 *ino_out, u32 *mode_out, u64 *size_out,
     return 1;
 }
 
+/* Path stat without following a final symlink (lstat). */
+u32 ext2_stat_path_nofollow(const char *path, u32 *ino_out, u32 *mode_out,
+                            u64 *size_out, u32 *nlink_out) {
+    const char *rel;
+    u32 ino;
+    u8 raw[128];
+    if (!sb.mounted || path == 0) return 0;
+    rel = persist_rel(path);
+    if (rel == 0) return 0;
+    ino = walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0);
+    if (ino == 0) return 0;
+    if (!inode_read(ino, raw)) return 0;
+    if (ino_out) *ino_out = ino;
+    if (mode_out) *mode_out = rd16(raw + I_MODE);
+    if (size_out) *size_out = rd32(raw + I_SIZE_LO);
+    if (nlink_out) *nlink_out = rd16(raw + I_LINKS);
+    return 1;
+}
+
+/* symlink(2) under Ext2: fast symlink when target fits in i_block (60B). */
+u32 ext2_symlink(const char *target, const char *linkpath) {
+    const char *rel;
+    char last[NAME_MAX + 1];
+    u32 last_n;
+    u32 parent;
+    u32 neu;
+    u32 tlen;
+    u32 k;
+    if (!sb.mounted || target == 0 || linkpath == 0) return 0;
+    tlen = 0;
+    while (target[tlen] != 0) {
+        tlen++;
+        if (tlen > 255) return 0;
+    }
+    if (tlen == 0) return 0;
+    rel = persist_rel(linkpath);
+    if (rel == 0 || rel[0] == 0) return 0;
+    if (walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0) != 0) return 0;
+    parent = walk_parent(rel, last, &last_n);
+    if (parent == 0 || last_n == 0) return 0;
+    jl_begin();
+    neu = alloc_inode_num();
+    if (neu == 0) { jl_commit(); return 0; }
+    for (k = 0; k < 128; k++) ino_raw[k] = 0;
+    wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFLNK | 0x1FF));
+    wr16(ino_raw + I_LINKS, 1);
+    wr32(ino_raw + I_SIZE_LO, tlen);
+    if (tlen < SYMLINK_FAST_MAX) {
+        for (k = 0; k < tlen; k++) ino_raw[I_BLOCK + k] = (u8)target[k];
+        wr32(ino_raw + I_BLOCKS, 0);
+    } else {
+        u32 phys = alloc_block();
+        if (phys == 0) { jl_commit(); return 0; }
+        for (k = 0; k < sb.block_size; k++) blk_buf[k] = 0;
+        for (k = 0; k < tlen; k++) blk_buf[k] = (u8)target[k];
+        if (!bwrite(phys, blk_buf)) { jl_commit(); return 0; }
+        wr32(ino_raw + I_BLOCK, phys);
+        wr32(ino_raw + I_BLOCKS, sb.block_size / 512);
+    }
+    if (!inode_write(neu, ino_raw)) { jl_commit(); return 0; }
+    if (!dir_add(parent, last, last_n, neu, EXT2_FT_SYMLINK)) {
+        jl_commit();
+        return 0;
+    }
+    jl_commit();
+    return 1;
+}
+
+/* readlink(2): final component must be a symlink (nofollow). */
+u64 ext2_readlink(const char *path, char *kbuf, u64 bufsiz) {
+    const char *rel;
+    u32 ino;
+    char tgt[256];
+    u32 n;
+    u32 i;
+    if (!sb.mounted || path == 0 || kbuf == 0 || bufsiz == 0) return (u64)(-1);
+    rel = persist_rel(path);
+    if (rel == 0) return (u64)(-1);
+    ino = walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0);
+    if (ino == 0) return (u64)(-1);
+    n = symlink_read_target(ino, tgt, 256);
+    if (n == 0) return (u64)(-1);
+    if ((u64)n > bufsiz) n = (u32)bufsiz;
+    for (i = 0; i < n; i++) kbuf[i] = tgt[i];
+    return n;
+}
+
 /* fstat for an Ext2 open handle (refreshes size from disk). */
 u32 ext2_fstat(u32 fh, u32 *ino_out, u32 *mode_out, u64 *size_out,
                u32 *nlink_out) {
@@ -1976,8 +2165,8 @@ u32 ext2_fstat(u32 fh, u32 *ino_out, u32 *mode_out, u64 *size_out,
 
 /* Resolve `rel` under an open Ext2 directory handle, then stat. Empty/"."
  * stats the directory itself. */
-u32 ext2_stat_at(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
-                 u64 *size_out, u32 *nlink_out) {
+u32 ext2_stat_at_flags(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
+                       u64 *size_out, u32 *nlink_out, u32 follow_last) {
     u32 s;
     u32 ino;
     u8 raw[128];
@@ -1988,7 +2177,7 @@ u32 ext2_stat_at(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
     if (rel == 0 || rel[0] == 0 || (rel[0] == '.' && rel[1] == 0)) {
         ino = opens[s].ino;
     } else {
-        ino = walk_rel_from(opens[s].ino, rel, 0);
+        ino = walk_rel_from_flags(opens[s].ino, rel, 0, follow_last, 0);
         if (ino == 0) return 0;
     }
     if (!inode_read(ino, raw)) return 0;
@@ -1997,6 +2186,11 @@ u32 ext2_stat_at(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
     if (size_out) *size_out = rd32(raw + I_SIZE_LO);
     if (nlink_out) *nlink_out = rd16(raw + I_LINKS);
     return 1;
+}
+
+u32 ext2_stat_at(u32 fh, const char *rel, u32 *ino_out, u32 *mode_out,
+                 u64 *size_out, u32 *nlink_out) {
+    return ext2_stat_at_flags(fh, rel, ino_out, mode_out, size_out, nlink_out, 1);
 }
 
 /* Read up to `len` bytes from inode at absolute file offset into kbuf.
@@ -2222,7 +2416,13 @@ u64 ext2_getdents(u32 fh, char *kbuf, u64 len) {
                     /* Record: ino:u32, reclen:u16=48, type:u8, namelen:u8, name */
                     wr32((u8 *)(kbuf + produced), ino);
                     wr16((u8 *)(kbuf + produced + 4), (u16)DENT_RECLEN);
-                    kbuf[produced + 6] = (char)((ftype == EXT2_FT_DIR) ? 4 : 8);
+                    if (ftype == EXT2_FT_DIR) {
+                        kbuf[produced + 6] = (char)4;
+                    } else if (ftype == EXT2_FT_SYMLINK) {
+                        kbuf[produced + 6] = (char)10;
+                    } else {
+                        kbuf[produced + 6] = (char)8;
+                    }
                     kbuf[produced + 7] = (char)namelen;
                     for (k = 0; k < 40; k++) kbuf[produced + 8 + k] = 0;
                     for (k = 0; k < namelen && k < 39; k++) {
@@ -2338,7 +2538,11 @@ u32 ext2_unlink(const char *path) {
     jl_begin();
     if (!dir_remove(parent, last, last_n, &victim)) { jl_commit(); return 0; }
     if (!inode_read(victim, ino_raw)) { jl_commit(); return 0; }
-    inode_free_all_blocks(ino_raw);
+    /* Fast symlinks store the target in i_block[]; do not free those bytes
+     * as block numbers. Slow symlinks (i_blocks != 0) free normally. */
+    if (!((mode & EXT2_S_IFMT) == EXT2_S_IFLNK && rd32(ino_raw + I_BLOCKS) == 0)) {
+        inode_free_all_blocks(ino_raw);
+    }
     for (b = 0; b < 128; b++) ino_raw[b] = 0;
     inode_write(victim, ino_raw);
     free_inode_bit(victim);

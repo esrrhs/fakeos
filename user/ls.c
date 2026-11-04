@@ -23,7 +23,9 @@ enum {
     S_IFDIR = 0x4000,
     S_IFCHR = 0x2000,
     S_IFIFO = 0x1000,
-    S_IFSOCK = 0xC000
+    S_IFSOCK = 0xC000,
+    S_IFLNK = 0xA000,
+    AT_SYMLINK_NOFOLLOW = 0x100
 };
 
 static unsigned int load_u32(const char *p) {
@@ -55,6 +57,9 @@ static char mode_type_char(unsigned int mode) {
     }
     if (t == S_IFSOCK) {
         return 's';
+    }
+    if (t == S_IFLNK) {
+        return 'l';
     }
     return '-';
 }
@@ -116,7 +121,7 @@ int main(int argc, char **argv) {
                 char mstr[12];
                 unsigned int mode;
                 unsigned long size;
-                if (u_newfstatat(fd, name, stbuf, 0) != 0) {
+                if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
                     printf("?????????? 0 %s\n", name);
                     continue;
                 }

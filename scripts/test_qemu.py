@@ -220,6 +220,9 @@ def main():
         "cd ..",
         "ls /bin",          # getdents64, programs including kbuild/ldfake
         "ls -l /bin",       # fstatat mode/size listing
+        "ln -s /etc/motd /tmp/motdlink",  # symlink builtin
+        "readlink /tmp/motdlink",         # readlink builtin
+        "ls -l /tmp",                     # show l type
         "mkdir /home",      # duplicate -> error, shell survives
         "nosuchcmd",        # exec failure -> 127 + not found
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
@@ -404,6 +407,7 @@ def main():
         "[U][PASS] file MAP_FIXED mmap",
         "[U][PASS] mprotect RO/RW",
         "[U][PASS] PROT_NONE + mmap addr hint",
+        "[U][PASS] symlink/readlink",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
         "[U][PASS] execve rejects non-ELF file",

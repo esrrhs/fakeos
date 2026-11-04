@@ -30,6 +30,9 @@ extern long u_mkdir(const char *path);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
 extern long u_unlink(const char *path);
+extern long u_symlink(const char *target, const char *linkpath);
+extern long u_readlink(const char *path, char *buf, unsigned long n);
+extern long u_lstat(const char *path, void *statbuf);
 extern long u_stat(const char *path, void *statbuf);
 extern long u_fstat(long fd, void *statbuf);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
@@ -1636,6 +1639,184 @@ static void pthread_create_test(void) {
     puts("[U][PASS] pthread_join CLEARTID");
 }
 
+
+static void symlink_test(void) {
+    char st[144];
+    char buf[128];
+    long n;
+    long fd;
+    unsigned int mode;
+    unsigned long i;
+    unsigned long size;
+
+    u_unlink("/tmp/sym_tgt.txt");
+    u_unlink("/tmp/sym_link");
+    u_unlink("/tmp/sym_rel");
+    u_unlink("/tmp/sym_dirlink");
+
+    fd = u_open("/tmp/sym_tgt.txt", 0x241, 0x1A4); /* WRONLY|CREAT|TRUNC */
+    if (fd < 0) {
+        puts("[U][FAIL] symlink create target");
+        return;
+    }
+    if (u_write(fd, "symlink-payload", 15) != 15) {
+        puts("[U][FAIL] symlink write target");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    if (u_symlink("/tmp/sym_tgt.txt", "/tmp/sym_link") != 0) {
+        puts("[U][FAIL] symlink absolute");
+        return;
+    }
+    n = u_readlink("/tmp/sym_link", buf, sizeof(buf) - 1);
+    if (n < 0) {
+        puts("[U][FAIL] readlink absolute");
+        return;
+    }
+    buf[n] = 0;
+    /* target is "/tmp/sym_tgt.txt" (16 bytes). */
+    if (n != 16 || buf[0] != '/' || buf[5] != 's' || buf[9] != 't'
+        || buf[15] != 't') {
+        puts("[U][FAIL] readlink absolute value");
+        return;
+    }
+
+    if (u_lstat("/tmp/sym_link", st) != 0) {
+        puts("[U][FAIL] lstat symlink");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    if ((mode & 0xF000) != 0xA000) {
+        puts("[U][FAIL] lstat not S_IFLNK");
+        return;
+    }
+    if (u_stat("/tmp/sym_link", st) != 0) {
+        puts("[U][FAIL] stat follow symlink");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    size = 0;
+    for (i = 0; i < 8; i++) {
+        size |= ((unsigned long)(unsigned char)st[48 + i]) << (8 * i);
+    }
+    if ((mode & 0xF000) != 0x8000 || size != 15) {
+        puts("[U][FAIL] stat follow not regular");
+        return;
+    }
+
+    fd = u_open("/tmp/sym_link", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open follow symlink");
+        return;
+    }
+    n = u_read(fd, buf, 32);
+    u_close(fd);
+    if (n != 15) {
+        puts("[U][FAIL] open follow read len");
+        return;
+    }
+    /* "symlink-payload" — indices 0='s', 7='-', 14='d'. */
+    if (buf[0] != 's' || buf[7] != '-' || buf[14] != 'd') {
+        puts("[U][FAIL] open follow payload");
+        return;
+    }
+
+    /* Relative symlink from /tmp: target "sym_tgt.txt" */
+    if (u_symlink("sym_tgt.txt", "/tmp/sym_rel") != 0) {
+        puts("[U][FAIL] symlink relative");
+        return;
+    }
+    fd = u_open("/tmp/sym_rel", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open relative symlink");
+        return;
+    }
+    n = u_read(fd, buf, 32);
+    u_close(fd);
+    if (n != 15) {
+        puts("[U][FAIL] relative symlink read");
+        return;
+    }
+
+    /* Directory symlink: /tmp/sym_dirlink -> /tmp then open through it. */
+    if (u_symlink("/tmp", "/tmp/sym_dirlink") != 0) {
+        puts("[U][FAIL] symlink dir");
+        return;
+    }
+    fd = u_open("/tmp/sym_dirlink/sym_tgt.txt", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open via dir symlink");
+        return;
+    }
+    u_close(fd);
+
+    if (u_newfstatat(-100, "/tmp/sym_link", st, 0x100) != 0) {
+        puts("[U][FAIL] fstatat NOFOLLOW");
+        return;
+    }
+    mode = (unsigned int)(unsigned char)st[24]
+         | ((unsigned int)(unsigned char)st[25] << 8)
+         | ((unsigned int)(unsigned char)st[26] << 16)
+         | ((unsigned int)(unsigned char)st[27] << 24);
+    if ((mode & 0xF000) != 0xA000) {
+        puts("[U][FAIL] fstatat NOFOLLOW not link");
+        return;
+    }
+
+    if (u_unlink("/tmp/sym_link") != 0 || u_unlink("/tmp/sym_rel") != 0
+        || u_unlink("/tmp/sym_dirlink") != 0) {
+        puts("[U][FAIL] unlink symlink");
+        return;
+    }
+    /* Target file must still exist after unlinking the link. */
+    fd = u_open("/tmp/sym_tgt.txt", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] target gone after unlink link");
+        return;
+    }
+    u_close(fd);
+    u_unlink("/tmp/sym_tgt.txt");
+
+    /* Ext2: link at /mnt/sym_e2 -> existing /mnt/m6pass.txt when mounted. */
+    fd = u_open("/mnt/m6pass.txt", 0, 0);
+    if (fd >= 0) {
+        u_close(fd);
+        u_unlink("/mnt/sym_e2");
+        if (u_symlink("/mnt/m6pass.txt", "/mnt/sym_e2") != 0) {
+            puts("[U][FAIL] Ext2 symlink create");
+            return;
+        }
+        n = u_readlink("/mnt/sym_e2", buf, sizeof(buf) - 1);
+        if (n < 0) {
+            puts("[U][FAIL] Ext2 readlink");
+            return;
+        }
+        fd = u_open("/mnt/sym_e2", 0, 0);
+        if (fd < 0) {
+            puts("[U][FAIL] Ext2 open follow symlink");
+            return;
+        }
+        n = u_read(fd, buf, 8);
+        u_close(fd);
+        if (n <= 0) {
+            puts("[U][FAIL] Ext2 follow read");
+            return;
+        }
+        u_unlink("/mnt/sym_e2");
+        puts("[U] Ext2 symlink follow OK");
+    }
+
+    puts("[U][PASS] symlink/readlink");
+}
+
 int main(int argc, char **argv) {
     char *sh_argv[2];
     long pid = u_getpid();
@@ -1671,6 +1852,7 @@ int main(int argc, char **argv) {
     posix_basics_test();
     proc_self_test();
     stat_test();
+    symlink_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

@@ -729,6 +729,7 @@ enum {
     S_IFCHR = 0x2000,
     S_IFDIR = 0x4000,
     S_IFREG = 0x8000,
+    S_IFLNK = 0xA000,
     S_IFSOCK = 0xC000
 };
 
@@ -817,7 +818,7 @@ static u32 kstat_from_fh(u32 fh, char *k) {
     return 1;
 }
 
-static u32 kstat_from_path(const char *path, char *k) {
+static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
     u32 ino = 0;
     u32 mode = 0;
     u64 size = 0;
@@ -830,18 +831,28 @@ static u32 kstat_from_path(const char *path, char *k) {
         if (!fs.ext2_mounted()) {
             return 0;
         }
-        if (!fs.ext2_stat_path(path, &ino, &mode, &size, &nlink)) {
-            return 0;
+        if (follow) {
+            if (!fs.ext2_stat_path(path, &ino, &mode, &size, &nlink)) {
+                return 0;
+            }
+        } else {
+            if (!fs.ext2_stat_path_nofollow(path, &ino, &mode, &size, &nlink)) {
+                return 0;
+            }
         }
         kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
         return 1;
     }
-    ino = fs.fs_lookup(path);
+    ino = follow ? fs.fs_lookup(path) : fs.fs_lookup_nofollow(path);
     if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
         return 0;
     }
     kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
     return 1;
+}
+
+static u32 kstat_from_path(const char *path, char *k) {
+    return kstat_from_path_flags(path, k, 1);
 }
 
 u64 sys_fstat(u64 fd, u64 ustat) {
@@ -868,6 +879,18 @@ u64 sys_stat(u64 upath, u64 ustat) {
     return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
 }
 
+u64 sys_lstat(u64 upath, u64 ustat) {
+    char path[PATH_KMAX];
+    char k[STAT_SIZE];
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (!kstat_from_path_flags(path, k, 0)) {
+        return (u64)(-1);
+    }
+    return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+}
+
 /* newfstatat(dfd, path, statbuf, flags): AT_FDCWD + cwd-relative paths,
  * AT_EMPTY_PATH on a real fd, and relative names under a directory fd. */
 u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
@@ -880,7 +903,7 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
     u64 size;
     u32 rdev;
     u32 nlink;
-    (void)flags;                     /* no symlinks: NOFOLLOW is a no-op */
+    u32 follow = ((flags & (u64)AT_SYMLINK_NOFOLLOW) == 0) ? 1 : 0;
 
     if ((flags & (u64)AT_EMPTY_PATH) != 0) {
         /* May have empty path: fstat(dfd). */
@@ -893,7 +916,10 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
     }
 
     if ((u32)dfd == AT_FDCWD_U) {
-        return sys_stat(upath, ustat);
+        if (follow) {
+            return sys_stat(upath, ustat);
+        }
+        return sys_lstat(upath, ustat);
     }
 
     if (!copy_user_cstring(rel, upath, PATH_KMAX - 1)) {
@@ -904,7 +930,7 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
         if (!canon_path("/", rel, path, PATH_KMAX)) {
             return (u64)(-1);
         }
-        if (!kstat_from_path(path, k)) {
+        if (!kstat_from_path_flags(path, k, follow)) {
             return (u64)(-1);
         }
         return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
@@ -915,7 +941,7 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh)) {
-        if (!fs.ext2_stat_at(fh, rel, &ino, &mode, &size, &nlink)) {
+        if (!fs.ext2_stat_at_flags(fh, rel, &ino, &mode, &size, &nlink, follow)) {
             return (u64)(-1);
         }
         kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
@@ -924,12 +950,67 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
     if (!fs.fs_file_is_dir(fh)) {
         return (u64)(-1);
     }
-    ino = fs.fs_lookup_at(fs.fs_file_ino(fh), rel);
+    ino = fs.fs_lookup_at_flags(fs.fs_file_ino(fh), rel, follow);
     if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
         return (u64)(-1);
     }
     kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
     return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
+}
+
+u64 sys_symlink(u64 utarget, u64 ulinkpath) {
+    char target[PATH_KMAX];
+    char linkpath[PATH_KMAX];
+    if (!copy_user_cstring(target, utarget, PATH_KMAX - 1)) {
+        return (u64)(-1);
+    }
+    if (!copy_user_path(linkpath, ulinkpath)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(linkpath)) {
+        return fs.ext2_mounted() && fs.ext2_symlink(target, linkpath) ? 0 : (u64)(-1);
+    }
+    return fs.fs_symlink(target, linkpath) != 0 ? 0 : (u64)(-1);
+}
+
+u64 sys_readlink(u64 upath, u64 ubuf, u64 bufsiz) {
+    char path[PATH_KMAX];
+    char kbuf[PATH_KMAX];
+    u64 as = sched_current_as_h();
+    u64 n;
+    u64 i;
+    u64 want;
+    if (bufsiz == 0 || as == 0) {
+        return (u64)(-1);
+    }
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    want = bufsiz;
+    if (want > PATH_KMAX) {
+        want = PATH_KMAX;
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted()) {
+            return (u64)(-1);
+        }
+        n = fs.ext2_readlink(path, kbuf, want);
+    } else {
+        n = fs.fs_readlink(path, kbuf, want);
+    }
+    if (n == (u64)(-1)) {
+        return (u64)(-1);
+    }
+    if (!mem.as_user_range_ok(as, ubuf, n)) {
+        return (u64)(-1);
+    }
+    {
+        volatile char *u = (volatile char *)ubuf;
+        for (i = 0; i < n; i++) {
+            u[i] = kbuf[i];
+        }
+    }
+    return n;
 }
 
 u64 sys_sync(void) {
