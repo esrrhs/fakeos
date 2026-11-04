@@ -348,12 +348,21 @@ suffixes (same as dd). Missing files are created (0644). Focused virtio login
 smoke covers shrink/grow/zero/create, usage/invalid, plus prior interactive
 greens (smp 1/2).
 
+## /bin/mkdir + /bin/pwd + /bin/ln — landed
+
+Thin external shell mirrors for scripts/`xargs` that cannot use builtins:
+`mkdir [-p] DIR...` (parents; existing dirs OK), `pwd` via `getcwd(2)`, and
+`ln [-s] TARGET LINKPATH` via `link(2)`/`symlink(2)`. Focused virtio login
+smoke covers `/bin/mkdir -p`, `/bin/pwd`, `/bin/ln` hard+`-s`, `xargs
+/bin/mkdir`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: other thin POSIX coreutils / kernel bits after
-   README scan (higher value than deep jbd). Avoid deep jbd / Ext2-redirect
-   duplex races / CFS nesting unless a clear bite-sized fix.
+4. More daily-driver gaps: remaining shell mirrors (`chmod`, `sync`, `uname`,
+   `env`/`printenv`, `readlink`, `realpath`) or other thin utils (`stat`,
+   `date`, `mktemp`, `nl`/`fold`/`rev`/`paste`). Avoid deep jbd /
+   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
