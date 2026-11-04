@@ -1307,6 +1307,15 @@ glued `-vp`/`-pv` ok (`-v` wins). Default remains space-joined. Focused
 virtio login smoke covers default/`-p`/`-v` after pushd + prior greens
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell set -o — landed
+
+Thin `set -o`/`+o` on existing `shell_opt_e`/`shell_opt_u` (no new `/bin`
+dent). Bare `set -o`/`+o` lists `errexit`/`nounset` on|off; `set -o NAME` /
+`set +o NAME` toggles `errexit`/`nounset`. Existing `set -e`/`-u`/`+e`/`+u`
+(and glued) unchanged. Focused virtio login smoke covers list / -o errexit /
++o nounset / legacy -eu + prior greens (smp 1/2). Ramfs `/bin` dents
+~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1314,7 +1323,6 @@ virtio login smoke covers default/`-p`/`-v` after pushd + prior greens
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `set -o`/`+o` for existing e/u, other small
-   `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
-   bite-sized; `ulimit` still needs kernel rlimit). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other small `/bin`/shell bites (skip large
+   `getopts` / here-doc / trap unless bite-sized; `ulimit` still needs
+   kernel rlimit). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

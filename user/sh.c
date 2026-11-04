@@ -2839,9 +2839,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], builtin, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs[-vp], alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-]|DIR; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2935,8 +2935,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
     }
     if (eq(tokens[0], "set")) {
-        /* set             -> print $- style flags
-         * set -e / +e / -u / +u / glued -eu / +eu */
+        /* set                -> print $- style flags
+         * set -e/+e/-u/+u / glued -eu/+eu
+         * set -o/+o          -> list errexit/nounset
+         * set -o/+o NAME     -> set named option (errexit|nounset) */
         int ai = 1;
         if (tokens[1] == 0) {
             char buf[8];
@@ -2957,21 +2959,43 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             int on;
             int j;
             if (a[0] != '-' && a[0] != '+') {
-                puts("usage: set [-eu] [+eu]");
+                puts("usage: set [-eu] [+eu] [-o|+o [errexit|nounset]]");
                 return 1;
             }
             if (a[1] == 0) {
-                puts("usage: set [-eu] [+eu]");
+                puts("usage: set [-eu] [+eu] [-o|+o [errexit|nounset]]");
                 return 1;
             }
             on = (a[0] == '-');
+            /* Thin -o / +o (name form). Bare -o/+o lists; -o NAME sets. */
+            if (a[1] == 'o' && a[2] == 0) {
+                const char *name = tokens[ai + 1];
+                if (name == 0) {
+                    printf("errexit\t\t%s\n", shell_opt_e ? "on" : "off");
+                    printf("nounset\t\t%s\n", shell_opt_u ? "on" : "off");
+                    return 0;
+                }
+                ai++;
+                if (eq(name, "errexit")) {
+                    shell_opt_e = on;
+                } else if (eq(name, "nounset")) {
+                    shell_opt_u = on;
+                } else {
+                    printf("sh: set: %s: invalid option name\n", name);
+                    return 1;
+                }
+                continue;
+            }
             for (j = 1; a[j] != 0; j++) {
                 if (a[j] == 'e') {
                     shell_opt_e = on;
                 } else if (a[j] == 'u') {
                     shell_opt_u = on;
+                } else if (a[j] == 'o') {
+                    puts("usage: set [-eu] [+eu] [-o|+o [errexit|nounset]]");
+                    return 1;
                 } else {
-                    puts("usage: set [-eu] [+eu]");
+                    puts("usage: set [-eu] [+eu] [-o|+o [errexit|nounset]]");
                     return 1;
                 }
             }
@@ -5734,7 +5758,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
