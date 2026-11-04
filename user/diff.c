@@ -1,8 +1,9 @@
 /* fakeos userland - diff: line-oriented file compare (thin POSIX).
- * Forms: diff [-uqbw] FILE1 FILE2
+ * Forms: diff [-uqbiw] FILE1 FILE2
  * Default: classic a/c/d hunks with "< "/"> " lines.
  * -u: unified hunks (3 lines context). -q: brief "Files X and Y differ".
  * -b: ignore changes in amount of whitespace. -w: ignore all whitespace.
+ * -i: ignore case when comparing. Combines with -b/-w.
  * Exit 0 identical, 1 differ, 2 error. "-" is stdin (at most one).
  * cmp already covers byte compare; this is the line-oriented companion.
  * Compact argv for EXEC_MAX_ARGC=8. Loads lines into RAM (MAX_LINES).
@@ -34,6 +35,7 @@ static int opt_u;
 static int opt_q;
 static int opt_b; /* ignore amount of whitespace */
 static int opt_w; /* ignore all whitespace */
+static int opt_i; /* ignore case */
 static const char *name1;
 static const char *name2;
 
@@ -130,17 +132,34 @@ static int is_ws(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
 }
 
-/* Line equality under -b/-w (or plain strcmp). */
+static char fold_c(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+static int chars_eq(char ca, char cb) {
+    if (opt_i) return fold_c(ca) == fold_c(cb);
+    return ca == cb;
+}
+
+/* Line equality under -b/-w/-i (or plain strcmp). */
 static int lines_eq(const char *a, const char *b) {
     int i = 0;
     int j = 0;
-    if (!opt_b && !opt_w) return strcmp(a, b) == 0;
+    if (!opt_b && !opt_w) {
+        if (!opt_i) return strcmp(a, b) == 0;
+        while (a[i] && b[i]) {
+            if (!chars_eq(a[i], b[i])) return 0;
+            i++;
+        }
+        return a[i] == 0 && b[i] == 0;
+    }
     if (opt_w) {
         while (1) {
             while (a[i] && is_ws(a[i])) i++;
             while (b[j] && is_ws(b[j])) j++;
             if (a[i] == 0 || b[j] == 0) return a[i] == 0 && b[j] == 0;
-            if (a[i] != b[j]) return 0;
+            if (!chars_eq(a[i], b[j])) return 0;
             i++;
             j++;
         }
@@ -161,7 +180,7 @@ static int lines_eq(const char *a, const char *b) {
             return a[i] == 0;
         }
         if (is_ws(a[i]) || is_ws(b[j])) return 0;
-        if (a[i] != b[j]) return 0;
+        if (!chars_eq(a[i], b[j])) return 0;
         i++;
         j++;
     }
@@ -532,6 +551,7 @@ int main(int argc, char **argv) {
     opt_q = 0;
     opt_b = 0;
     opt_w = 0;
+    opt_i = 0;
     na = 0;
     nb = 0;
 
@@ -549,6 +569,7 @@ int main(int argc, char **argv) {
             else if (o[j] == 'q') opt_q = 1;
             else if (o[j] == 'b') opt_b = 1;
             else if (o[j] == 'w') opt_w = 1;
+            else if (o[j] == 'i') opt_i = 1;
             else {
                 usage();
                 return 2;
