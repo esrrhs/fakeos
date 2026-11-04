@@ -417,6 +417,8 @@ def main():
         "[FS] published /bin/yes (",
         "[FS] published /bin/od (",
         "[FS] published /bin/xargs (",
+        "[FS] published /bin/cmp (",
+        "[FS] published /bin/dd (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

@@ -226,6 +226,7 @@ flowchart TD
 - [x] **/bin/uniq + /bin/sort**：`uniq [-c][-d][-u]` 折叠连续重复行；`sort [-r][-n]` 字典序/数值排序（内存载入）。virtio login smoke（smp 1/2）。
 - [x] **/bin/yes + /bin/od**：`yes [STRING...]` 重复输出行直到写失败；`od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [FILE...]` 薄十六进制/八进制转储（默认 `-A o -t x1`）。virtio login smoke（smp 1/2）。
 - [x] **shell echo -n/-e + /bin/xargs**：shell `echo [-neE]`（`-n` 无换行、`-e` 反斜杠转义含 `\c`、`-E` 字面）；`/bin/xargs [-n N] [-r] [CMD [ARGS...]]` 按空白分词拼 argv（默认打印；批量受 execve argc=8 限制）。virtio login smoke（smp 1/2）。
+- [x] **/bin/cmp + /bin/dd**：`cmp [-l|-s] FILE1 FILE2` 按字节比较（退出 0/1/2；`-s` 静默、`-l` 列出差异）；`dd [if=] [of=] [bs=N] [count=N] [skip=N] [seek=N] [status=none]` 块拷贝（`k`/`b`/`M` 后缀；默认 bs=512）。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。

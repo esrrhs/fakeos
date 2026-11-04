@@ -299,6 +299,17 @@ VGA (`vga_clear`), then redisplays the edit buffer at the saved cursor
 clear only — do not paint the hidden buffer. Focused virtio login smoke covers
 Ctrl-L bites + prior interactive greens (smp 1/2).
 
+## /bin/cmp + /bin/dd — landed
+
+Thin coreutils pair for scripting. `cmp [-l|-s] FILE1 FILE2` compares two files
+byte-by-byte (exit 0 identical / 1 differ / 2 error; `-s` silent; `-l` lists
+each differing byte as `POS OCT1 OCT2`; `-` = stdin). `dd [if=FILE] [of=FILE]
+[bs=N] [count=N] [skip=N] [seek=N] [status=none]` copies blocks (default
+`bs=512`, stdin→stdout; `N` accepts decimal with optional `k`/`b`/`M` suffix;
+`skip`/`seek` are in blocks; `status=none` suppresses the records summary).
+Focused virtio login smoke covers `cmp`/`-s`/`-l`, `dd` if/of/bs/count/skip +
+prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
