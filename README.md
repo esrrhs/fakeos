@@ -213,6 +213,7 @@ flowchart TD
 - [x] **TTY Tab completion**：ICANON 行编辑下 Tab 补全光标处单词；相对路径相对 cwd，绝对路径用目录前缀；命令位（行首、无 `/`）另搜 `/bin` + 内建名表；唯一目录命中追加 `/`；无匹配/无进展响 BEL；ECHO 关闭时跳过。virtio login smoke（smp 1/2）。
 - [x] **TTY Double-Tab match listing**：歧义且无公共前缀进展时首次 Tab 响 BEL，再次 Tab 列出候选（目录名尾加 `/`）并回显当前编辑缓冲（内核不知 shell 提示符）。其它编辑清 pending。virtio login smoke（smp 1/2）。
 - [x] **TTY Ctrl-W/K + quoted Tab**：ICANON 下行编辑 Ctrl-W 删光标前一词、Ctrl-K 删至行尾；Ctrl-V 引用下一键（Tab 插入字面 `\t`，回显占一格以保持光标 1:1）。virtio login smoke（smp 1/2）。
+- [x] **TTY Ctrl-L redraw/clear**：ICANON 下 Ctrl-L 清屏（串口 CSI `2J`/`H` + `vga_clear`）并回显当前编辑缓冲（内核不知 shell 提示符，同 Double-Tab）；ECHO 关闭时只清屏不回显。virtio login smoke（smp 1/2）。
 - [x] **/bin/head + /bin/wc**：`head [-n N]|-N` 默认 10 行；`wc [-lwc]` 计行/词/字节（多文件带 total）；stdin/`-` 可用。virtio login smoke（smp 1/2）。
 - [x] **shell history 持久化**：环形 32 条写入 `/home/.sh_history`（Ext2）；启动 `hist_load`，每条命令后 `hist_save`+`fsync`；`!!`/`history`/CSI 上下跨重启仍可用。virtio login smoke（smp 1/2）。
 - [x] **/bin/getent**：`getent passwd|group|hosts [key...]`；无 key 时 dump；passwd/group 按名或 uid/gid 过滤；hosts 先扫 `/etc/hosts`，否则 `resolve_host`（含 DNS）。virtio login smoke（smp 1/2）。

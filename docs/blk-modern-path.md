@@ -243,11 +243,19 @@ zero. Shell builtin: `ln TARGET LINKPATH` (hard) and `ln -s` (symlink). Init
 smoke: `[U][PASS] hard link(2)` (Ramfs + Ext2 when mounted). Focused virtio
 login smoke covers `ln` hard + prior interactive greens (smp 1/2).
 
+## TTY Ctrl-L redraw/clear — landed
+
+ICANON line edit: Ctrl-L clears the host serial terminal (CSI `2J` + `H`) and
+VGA (`vga_clear`), then redisplays the edit buffer at the saved cursor
+(shell prompt is userspace-owned, same as Double-Tab listing). With ECHO off,
+clear only — do not paint the hidden buffer. Focused virtio login smoke covers
+Ctrl-L bites + prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: TTY Ctrl-L redraw, or other thin coreutils /
-   kernel POSIX after README scan.
+4. More daily-driver gaps: other thin coreutils / kernel POSIX after README
+   scan (higher value than deep jbd).

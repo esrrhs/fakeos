@@ -17,9 +17,11 @@ typedef types.uint64_t u64;
  * so unlock+sleep is atomic under the run lock (same pattern as pipes).
  * Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
- * + Ctrl-W (werase) + Ctrl-K (kill-to-EOL) provide readline-style editing.
- * Ctrl-V quotes the next key (Tab inserts a literal TAB; echoed as one
- * blank cell so cursor math stays 1:1). Tab completes the word at the cursor
+ * + Ctrl-W (werase) + Ctrl-K (kill-to-EOL) + Ctrl-L (clear+redraw) provide
+ * readline-style editing. Ctrl-V quotes the next key (Tab inserts a literal
+ * TAB; echoed as one blank cell so cursor math stays 1:1). Ctrl-L clears the
+ * host serial (CSI 2J/H) and VGA, then redisplays the edit buffer (shell
+ * prompt is userspace-owned, same as Double-Tab). Tab completes the word at the cursor
  * against cwd / absolute paths, /bin (command position), and a small builtin
  * name table; unique directory matches get a trailing '/'. Ambiguous Tab with
  * no common-prefix progress rings BEL; a second Tab lists matches (dirs get
@@ -770,6 +772,41 @@ static void tty_kill_eol(void) {
     tty_hist_view = -1;
 }
 
+
+/* Ctrl-L: clear screen and redisplay the edit buffer. Serial gets CSI 2J+H
+ * so the host terminal clears; VGA uses vga_clear. The shell prompt is
+ * userspace-owned (same limitation as Double-Tab listing). With ECHO off,
+ * clear only — do not paint the hidden buffer. */
+static void tty_clear_redraw(void) {
+    u32 i;
+    u32 save_cursor;
+
+    drivers.uart_putc(0x1B);
+    drivers.uart_putc('[');
+    drivers.uart_putc('2');
+    drivers.uart_putc('J');
+    drivers.uart_putc(0x1B);
+    drivers.uart_putc('[');
+    drivers.uart_putc('H');
+    drivers.vga_clear();
+
+    tab_list_pending = 0;
+    if ((tty_lflag & TTY_ECHO) == 0) {
+        return;
+    }
+    save_cursor = tty_cursor;
+    for (i = 0; i < tty_editing; i++) {
+        tty_echo_ch(tty_buf[i]);
+    }
+    i = tty_editing;
+    while (i > save_cursor) {
+        drivers.uart_putc('\b');
+        drivers.vga_putc('\b');
+        i--;
+    }
+    tty_cursor = save_cursor;
+}
+
 static void tty_insert_char(char ch) {
     u32 i;
     if (tty_editing >= LINE_MAX - 1) return;
@@ -1063,6 +1100,10 @@ static void tty_recv_line(void) {
         }
         if (c == 0x16) { /* Ctrl-V quoted-insert */
             tty_quote_next = 1;
+            continue;
+        }
+        if (c == 0x0C) { /* Ctrl-L clear + redraw */
+            tty_clear_redraw();
             continue;
         }
         if (c == '\n' || c == '\r') {
