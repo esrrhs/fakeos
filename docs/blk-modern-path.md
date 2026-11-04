@@ -400,7 +400,7 @@ Thin script/text-pipeline trio. `mktemp [-d][-u|-du] [TEMPLATE]` creates a
 unique file (default) or directory (`-d`) under a template ending in `XXXXXX`
 (default `/tmp/tmp.XXXXXX`); `-u` dry-runs (create then unlink/rmdir). Uniqueness
 via `getpid` + retry with `O_CREAT|O_EXCL` / `mkdir`.
-`rev [FILE...]` reverses characters of each line.
+`rev [-z] [FILE...]` reverses characters of each line (or NUL record with `-z`).
 `paste [-s] [-d LIST|-dLIST] [FILE...]` merges lines (default tab delim; `-s`
 serial; max 6 files; one `-` stdin). Focused virtio login smoke covers
 `mktemp`/`-d`/`-u`, `printf|rev`, `paste`/`-s`/`-d:`, plus prior interactive
@@ -1946,6 +1946,13 @@ row-major instead of the default column-major grid. Keeps `-c` width and the
 covers `-x` + prior greens including fill/`-c`/`-o` (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## rev -z — landed
+
+`/bin/rev -z` uses NUL-terminated records for input and output (GNU-ish;
+pairs with `xargs -0` / `head -z` / `paste -z`). Default remains newline
+records. No new `/bin` dent. Focused virtio login smoke covers `rev -z` +
+prior greens including column -x (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1953,6 +1960,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (`cp -p`
-   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
+   `tac -z` / `cut -z` / `nl` polish; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
