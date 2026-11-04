@@ -1275,6 +1275,17 @@ later (trap not clearly bite-sized). Deferred kernel gaps unchanged.
 (`[N]+ PID Running NAME`). Focused virtio login smoke covers `true &` +
 `jobs -l` + `wait` + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## /bin/printf width — landed
+
+Thin `/bin/printf` polish (no new `/bin` dent; no shell printf builtin).
+Inventory: specs `%s/%c/%d/%i/%u/%x/%X/%o/%b/%%` already present — added
+width/flags only. `ulimit`/`trap` deferred. Deferred kernel gaps unchanged.
+
+Flags `-` (left) and `0` (zero-pad; `-` wins); decimal width before the
+conversion. Applies to `d/i/u/x/X/o/s` (and thin `c`/`b`). No precision /
+`*` / `#`. Focused virtio login smoke covers `%5d`/`%04d`/`%-5s`/`%08x` +
+prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1282,6 +1293,6 @@ later (trap not clearly bite-sized). Deferred kernel gaps unchanged.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: printf width, thin `ulimit`, or other small
-   `/bin`/shell bites (skip large `getopts` / here-doc / trap unless bite-sized).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: thin `ulimit`, or other small `/bin`/shell
+   bites (skip large `getopts` / here-doc / trap unless bite-sized). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
