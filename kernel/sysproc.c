@@ -27,6 +27,9 @@ extern u32 sched_current_pid(void);
 extern u32 sched_fd_get(u32 idx);
 extern u32 pipe_fh_is(u32 fh);
 extern u32 sock_fh_is(u32 fh);
+extern void sched_sleep(u64 chan);
+extern u32 sched_wakeup_n(u64 chan, u32 n);
+extern u32 sched_should_eintr(void);
 
 /* Fill one page for a VMA_FILE fault. Returns 1 on success (partial/EOF OK). */
 
@@ -204,9 +207,52 @@ u64 sys_gettid(void) {
     return (u64)sched_current_pid();
 }
 
-/* Threading is not implemented; the compiler never creates threads. Report
- * the Linux ENOSYS code so runtime thread waiters fail predictably. */
+enum {
+    FUTEX_WAIT          = 0,
+    FUTEX_WAKE          = 1,
+    FUTEX_PRIVATE_FLAG  = 128,
+    FUTEX_CLOCK_REALTIME = 256,
+    EAGAIN_NEG          = (u64)-11,
+    EINTR_NEG           = (u64)-4,
+    EINVAL_NEG          = (u64)-22
+};
+
+/* futex(2) basics: WAIT/WAKE (+ PRIVATE). Channel is the user VA; works for
+ * same-AS threads and MAP_SHARED across fork. No PI/bitset/requeue yet. */
 u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
-    (void)uaddr; (void)op; (void)val; (void)timeout; (void)uaddr2; (void)val3;
+    u64 as;
+    u32 cmd;
+    (void)uaddr2;
+    (void)val3;
+    (void)timeout; /* absolute/relative timeout not wired yet */
+
+    if ((uaddr & 3ULL) != 0) {
+        return EINVAL_NEG;
+    }
+    as = sched_current_as_h();
+    if (as == 0 || !mem.as_user_range_ok(as, uaddr, 4)) {
+        return EINVAL_NEG;
+    }
+
+    cmd = (u32)op & ~(u32)(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+    if (cmd == FUTEX_WAIT) {
+        volatile u32 *p = (volatile u32 *)uaddr;
+        u32 cur = *p;
+        if (cur != (u32)val) {
+            return EAGAIN_NEG;
+        }
+        sched_sleep(uaddr);
+        if (sched_should_eintr()) {
+            return EINTR_NEG;
+        }
+        return 0;
+    }
+    if (cmd == FUTEX_WAKE) {
+        u32 n = (u32)val;
+        if (n == 0) {
+            return 0;
+        }
+        return (u64)sched_wakeup_n(uaddr, n);
+    }
     return ENOSYS_NEG;
 }

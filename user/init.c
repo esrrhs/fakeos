@@ -25,6 +25,9 @@ extern long u_kill(long pid, long sig);
 extern int shm_open(const char *name, int oflag, unsigned int mode);
 extern int shm_unlink(const char *name);
 extern int ftruncate(int fd, long length);
+extern long futex(volatile unsigned int *uaddr, int op, unsigned int val,
+                  void *timeout, volatile unsigned int *uaddr2,
+                  unsigned int val3);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
@@ -414,6 +417,64 @@ static void shm_test(void) {
     puts("[U][PASS] POSIX shm_open/mmap/unlink");
 }
 
+
+static void futex_test(void) {
+    volatile unsigned int *p;
+    long pid;
+    long st;
+    long r;
+    unsigned int word;
+
+    word = 1;
+    r = futex(&word, 0, 0, 0, 0, 0);
+    if (r != -11) {
+        puts("[U][FAIL] futex WAIT mismatch");
+        return;
+    }
+    r = futex(&word, 1, 1, 0, 0, 0);
+    if (r != 0) {
+        puts("[U][FAIL] futex WAKE empty");
+        return;
+    }
+
+    p = (volatile unsigned int *)u_mmap(0, 4096, 3, 0x21, -1, 0);
+    if (p == (volatile unsigned int *)-1 || p == 0) {
+        puts("[U][FAIL] futex mmap shared");
+        return;
+    }
+    *p = 1;
+    pid = u_fork();
+    if (pid < 0) {
+        puts("[U][FAIL] futex fork");
+        return;
+    }
+    if (pid == 0) {
+        r = futex(p, 0, 1, 0, 0, 0);
+        while (r == -4) {
+            r = futex(p, 0, 1, 0, 0, 0);
+        }
+        if (*p != 0) {
+            u_exit(1);
+        }
+        u_exit(0);
+    }
+    {
+        volatile unsigned long i;
+        for (i = 0; i < 3000000UL; i++) {
+        }
+        u_yield();
+        u_yield();
+    }
+    *p = 0;
+    futex(p, 1, 1, 0, 0, 0);
+    u_wait4(pid, &st, 0, 0);
+    if (((st >> 8) & 0xff) != 0) {
+        puts("[U][FAIL] futex child status");
+        return;
+    }
+    puts("[U][PASS] futex WAIT/WAKE");
+}
+
 int main(int argc, char **argv) {
     char *sh_argv[2];
     long pid = u_getpid();
@@ -436,6 +497,7 @@ int main(int argc, char **argv) {
     heap_test();
     mmap_test();
     shm_test();
+    futex_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

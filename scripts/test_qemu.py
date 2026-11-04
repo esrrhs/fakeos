@@ -18,6 +18,7 @@ class VM:
     def __init__(self, kernel, mem="128M", extra_args=None):
         cmd = [
                 "qemu-system-x86_64",
+                "-accel", "tcg,thread=multi",
                 "-kernel", kernel,
                 "-m", mem,
                 "-serial", "stdio",
@@ -116,7 +117,7 @@ def decode_dumpbin(captured):
 def second_boot_checks(disk):
     """Boot the in-OS linked kernel and run a reduced shell session."""
     print("\n==> Phase 5b: second boot of the in-OS rebuilt kernel...")
-    vm = VM(REBUILT, extra_args=disk_args(disk) + net_args())
+    vm = VM(REBUILT, mem="256M", extra_args=disk_args(disk) + net_args())
     boot = vm.wait_for("fakeos login:", 30.0)
     vm.send("root")
     boot += vm.wait_for("Password:", 5.0)
@@ -194,7 +195,7 @@ def disk_args(disk):
 def main():
     print("==> Phase 1-6: boot stock kernel (+IDE disk) and run the interactive shell...")
     disk = ensure_disk()
-    vm = VM(KERNEL, extra_args=disk_args(disk) + net_args())
+    vm = VM(KERNEL, mem="256M", extra_args=disk_args(disk) + net_args())
 
     # 1. Boot + kernel self-tests + init -> login stub -> shell prompt.
     boot = vm.wait_for("fakeos login:", 30.0)
@@ -244,7 +245,7 @@ def main():
     if not vm.send("kbuild"):
         bootstrap += "kbuild dispatch failed\n"
     else:
-        bootstrap += vm.wait_for("[kbuild] kernel image linked", 900.0)
+        bootstrap += vm.wait_for("[kbuild] kernel image linked", 5400.0)
         if "[kbuild] kernel image linked" not in bootstrap:
             print("    kbuild did not finish; capturing 5 s of tail...")
             bootstrap += vm.read_available(5.0)
@@ -299,10 +300,12 @@ def main():
         "[PASS] Exception #UD",
         "[PASS] Exception #PF",
         "[PASS] APIC Timer Calibration",
+        "[SMP] AP trampoline at phys",
         "[PASS] I/O APIC IRQ1 (kbd) -> 33, IRQ4 (COM1) -> 36 armed",
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
         "[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB",
         "[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin",
+        "[EXT2] [PASS] ftruncate grow/shrink/zero",
         "[EXT2] journal-lite ordered markers online (not a full journal)",
         # AHCI probe log (QEMU may or may not expose 01.06)
         re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
@@ -323,6 +326,7 @@ def main():
         "[PASS] COW clone",
         "[PASS] MAP_SHARED anon",
         "[U][PASS] POSIX shm_open/mmap/unlink",
+        "[U][PASS] futex WAIT/WAKE",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
         "[PASS] CFS-lite",
@@ -386,7 +390,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: POSIX shm + AHCI NCQ-lite + SMP stubs online!",
+        "[SUCCESS] fakeos: futex + Ext2 ftruncate + AP trampoline online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

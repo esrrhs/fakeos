@@ -32,7 +32,7 @@ extern void memset(void *dst, int c, unsigned long n);
 extern void strcpy(char *dst, const char *src);
 extern unsigned long strlen(const char *s);
 
-enum { O_RDONLY = 0, READ_CAP = 65536,
+enum { O_RDONLY = 0, READ_CAP = 131072,
        CC_MAX_FLAGS = 2, CC_FLAG_LEN = 40 };
 
 static unsigned long read_file(const char *path, char *buf);
@@ -130,7 +130,7 @@ static long run_child(const char *path, char **argv) {
 }
 
 /* Read a whole file into a static buffer. Returns the byte count; 0 means
- * missing/empty. Largest kernel object is well under READ_CAP. */
+ * missing/empty. Largest C kernel object (~66 KiB ext2.o) fits under READ_CAP. */
 static unsigned long read_file(const char *path, char *buf) {
     long fd = u_open(path, O_RDONLY, 0);
     if (fd < 0) {
@@ -324,7 +324,7 @@ int main(void) {
      * object list goes through an @response file:
      *   ldfake -o /tmp/fakeos-new @/tmp/ldfake.args
      * boot.o leads (low-address multiboot entry); then the 38 C
-     * objects, the other 4 nasm objects, and the userblob + empty
+     * objects, nasm objects (incl. ap_tramp_blob), userblob + empty
      * m5-blob stub. */
     {
         long lfd2 = u_open("/tmp/ldfake.args", 0x42, 0x1FF);
@@ -345,6 +345,7 @@ int main(void) {
         add_arg(line, &used, "/asm/io.o");
         add_arg(line, &used, "/asm/sysentry.o");
         add_arg(line, &used, "/asm/switch.o");
+        add_arg(line, &used, "/asm/ap_tramp_blob.o");
         add_arg(line, &used, "/asm/userblob.o");
         add_arg(line, &used, "/asm/m5stub.o");
         u_write(lfd2, line, used);

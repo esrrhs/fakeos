@@ -66,7 +66,7 @@ enum {
  * MAP_FIXED callers (ASAN shadow) reserve their own ranges above; none of
  * the fixed ranges overlap. */
 static const u64 HEAP_BASE = 0x02000000ULL;
-static const u64 HEAP_SIZE = 0x00400000ULL;        /* 4 MiB reserved: in-OS build tools */
+static const u64 HEAP_SIZE = 0x04000000ULL;        /* 64 MiB reserved: in-OS fakecc (ext2.c needs ~19MiB+) */
 static const u64 MMAP_BASE = 0x10000000ULL;        /* 256 MiB */
 static const u64 MMAP_LIMIT = 0x40000000ULL;       /* 1 GiB ceiling */
 
@@ -900,7 +900,7 @@ int as_map_anon_h(u64 handle, u64 start, u64 size, u32 prot) {
     return as_map_anon(as_of(handle), start, size, prot, 0);
 }
 
-/* brk(): lazily reserve the fixed 4 MiB heap VMA on first use and move the
+/* brk(): lazily reserve the fixed 64 MiB heap VMA on first use and move the
  * program break. A newbrk of 0 queries the current break. The break only
  * moves; touched pages demand-allocate through the ordinary #PF path. */
 u64 as_brk_h(u64 handle, u64 newbrk) {

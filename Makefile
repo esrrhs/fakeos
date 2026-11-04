@@ -53,7 +53,7 @@ NASMFLAGS := -f elf64
 FCC_HAS_TARGET := $(shell '$(FCC)' 2>&1 | grep -q -- '--target' && echo yes)
 FCCFLAGS  := -O0 $(if $(filter yes,$(FCC_HAS_TARGET)),--target=x86_64-linux)
 LDFLAGS   := -T boot/linker.ld -n --gc-sections
-QEMUFLAGS := -m 128M -serial stdio
+QEMUFLAGS := -m 256M -serial stdio
 DISK_IMG  := $(BUILD_DIR)/disk.img
 # Legacy/transitional VirtIO-blk so the guest can use the I/O BAR interface.
 QEMU_DISK := -drive id=disk0,file=$(DISK_IMG),format=raw,if=none 	-device virtio-blk-pci,disable-modern=on,drive=disk0
@@ -79,6 +79,7 @@ OBJS := \
 	$(BUILD_DIR)/desc.o \
 	$(BUILD_DIR)/switch.o \
 	$(BUILD_DIR)/sysentry.o \
+	$(BUILD_DIR)/ap_tramp_blob.o \
 	$(BUILD_DIR)/types.o \
 	$(BUILD_DIR)/arch.o \
 	$(BUILD_DIR)/gdt.o \
@@ -120,7 +121,7 @@ OBJS := \
 	$(BUILD_DIR)/userblob.o \
 	$(BUILD_DIR)/kmain.o
 
-.PHONY: all build run qemu qemu-gui qemu-disk qemu-ahci qemu-modern disk clean help
+.PHONY: all build run qemu qemu-gui qemu-disk qemu-ahci qemu-modern qemu-smp disk clean help
 
 all: build
 
@@ -165,6 +166,18 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+
+$(BUILD_DIR)/ap_tramp.bin: arch/x86_64/ap_tramp.asm
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [NASM]    $< (bin)"
+	@$(NASM) -f bin -o $@ $<
+
+$(BUILD_DIR)/ap_tramp_blob.o: arch/x86_64/ap_tramp_blob.asm $(BUILD_DIR)/ap_tramp.bin
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [NASM]    $<"
+	@cp -f $(BUILD_DIR)/ap_tramp.bin ap_tramp.bin
+	@$(NASM) $(NASMFLAGS) -o $@ $<
+	@rm -f ap_tramp.bin
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
@@ -438,6 +451,10 @@ $(DISK_IMG): tools/mkext2.py
 qemu-disk: build $(DISK_IMG)
 	@echo "Launching fakeos + VirtIO-blk disk (Ctrl-A X to exit)..."
 	@$(QEMU) -kernel $(KERNEL_BIN) $(QEMUFLAGS) $(QEMU_DISK) $(QEMU_NET) -display none -no-reboot
+
+qemu-smp: $(KERNEL_BIN)
+	@echo "  [QEMU]    $< (-smp 2)"
+	@$(QEMU) -kernel $(KERNEL_BIN) -m 256M -serial stdio -display none -no-reboot -smp 2
 
 qemu-ahci: build $(DISK_IMG)
 	@echo "Launching fakeos + AHCI disk (Ctrl-A X to exit)..."

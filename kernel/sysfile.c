@@ -545,8 +545,7 @@ u64 sys_pipe(u64 upipefd) {
  * Directory and working-directory syscalls
  * ------------------------------------------------------------------------- */
 
-/* int ftruncate(fd, length): resize a regular file (Ramfs). Ext2/pipes/
- * sockets are rejected for now (shm lives under /dev/shm on Ramfs). */
+/* int ftruncate(fd, length): resize a regular file (Ramfs or Ext2). */
 u64 sys_ftruncate(u64 fd, u64 length) {
     u32 fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD) {
@@ -556,7 +555,7 @@ u64 sys_ftruncate(u64 fd, u64 length) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh)) {
-        return (u64)(-1);            /* Ext2 ftruncate later */
+        return fs.ext2_ftruncate(fh, length) ? 0 : (u64)(-1);
     }
     if (fs.fs_file_is_console(fh) || fs.fs_file_is_dir(fh)) {
         return (u64)(-1);

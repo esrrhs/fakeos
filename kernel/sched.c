@@ -598,6 +598,27 @@ void sched_wakeup(u64 chan) {
     cfs_update_min();
 }
 
+/* Wake up to `n` sleepers on `chan` (futex FUTEX_WAKE). Returns woken count. */
+u32 sched_wakeup_n(u64 chan, u32 n) {
+    u32 i;
+    u32 woke = 0;
+    if (chan == 0 || n == 0) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS && woke < n; i++) {
+        if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+            threads[i].wait_chan = 0;
+            cfs_place_entity(i);
+            threads[i].state = TCB_RUNNABLE;
+            woke++;
+        }
+    }
+    if (woke != 0) {
+        cfs_update_min();
+    }
+    return woke;
+}
+
 /* Channel used by wait4 so an exiting child can wake its parent. */
 u64 sched_wait4_chan(u32 parent_pid) {
     return 0x5774000000000000ULL | (u64)parent_pid;

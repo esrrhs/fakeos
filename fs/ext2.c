@@ -692,6 +692,73 @@ static u32 inode_map(u8 *raw, u32 file_block, u32 do_alloc) {
     return b;
 }
 
+/* Clear one file-block pointer and free its data block (no new allocs). */
+static void inode_clear_data_block(u8 *raw, u32 file_block) {
+    u32 ptrs = sb.block_size / 4;
+    u32 single_max = 12 + ptrs;
+    u32 double_max = single_max + ptrs * ptrs;
+    u32 triple_max = double_max + ptrs * ptrs * ptrs;
+    u32 phys = inode_get_block(raw, file_block);
+    u32 ib;
+    if (phys == 0) {
+        return;
+    }
+    free_block_bit(phys);
+    ib = rd32(raw + I_BLOCKS);
+    if (ib >= sb.block_size / 512) {
+        wr32(raw + I_BLOCKS, ib - sb.block_size / 512);
+    }
+    if (file_block < 12) {
+        wr32(raw + I_BLOCK + file_block * 4, 0);
+        return;
+    }
+    if (file_block < single_max) {
+        u32 ind = rd32(raw + I_BLOCK + 12 * 4);
+        u32 idx = file_block - 12;
+        if (ind == 0) return;
+        if (!bread(ind, blk_buf)) return;
+        wr32(blk_buf + idx * 4, 0);
+        bwrite(ind, blk_buf);
+        return;
+    }
+    if (file_block < double_max) {
+        u32 dind = rd32(raw + I_BLOCK + 13 * 4);
+        u32 rel = file_block - single_max;
+        u32 lvl1 = rel / ptrs;
+        u32 lvl2 = rel % ptrs;
+        u32 leaf;
+        if (dind == 0) return;
+        if (!bread(dind, ind_buf)) return;
+        leaf = rd32(ind_buf + lvl1 * 4);
+        if (leaf == 0) return;
+        if (!bread(leaf, blk_buf)) return;
+        wr32(blk_buf + lvl2 * 4, 0);
+        bwrite(leaf, blk_buf);
+        return;
+    }
+    if (file_block < triple_max) {
+        u32 tind = rd32(raw + I_BLOCK + 14 * 4);
+        u32 rel = file_block - double_max;
+        u32 lvl1 = rel / (ptrs * ptrs);
+        u32 rem = rel % (ptrs * ptrs);
+        u32 lvl2 = rem / ptrs;
+        u32 lvl3 = rem % ptrs;
+        u32 dind;
+        u32 leaf;
+        if (tind == 0) return;
+        if (!bread(tind, tind_buf)) return;
+        dind = rd32(tind_buf + lvl1 * 4);
+        if (dind == 0) return;
+        if (!bread(dind, ind_buf)) return;
+        leaf = rd32(ind_buf + lvl2 * 4);
+        if (leaf == 0) return;
+        if (!bread(leaf, blk_buf)) return;
+        wr32(blk_buf + lvl3 * 4, 0);
+        bwrite(leaf, blk_buf);
+    }
+    (void)triple_max;
+}
+
 static u32 dir_find(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
     u32 size;
     u32 fblk;
@@ -1595,6 +1662,65 @@ u32 ext2_rmdir(const char *path) {
     return 1;
 }
 
+u32 ext2_ftruncate(u32 fh, u64 length) {
+    u32 s;
+    u8 raw[128];
+    u32 old_size;
+    u32 new_size;
+    u32 old_blocks;
+    u32 new_blocks;
+    u32 fblk;
+    if (!ext2_fh_is(fh)) return 0;
+    s = fh_slot(fh);
+    if (s >= MAX_OPEN || !opens[s].used || !opens[s].writable) return 0;
+    if ((opens[s].mode & EXT2_S_IFMT) == EXT2_S_IFDIR) return 0;
+    if (length > 0xFFFFFFFFULL) return 0;
+    new_size = (u32)length;
+    if (!inode_read(opens[s].ino, raw)) return 0;
+    old_size = rd32(raw + I_SIZE_LO);
+    if (new_size == old_size) {
+        opens[s].size = new_size;
+        return 1;
+    }
+
+    jl_begin();
+    if (new_size == 0) {
+        inode_free_all_blocks(raw);
+    } else if (new_size < old_size) {
+        new_blocks = (new_size + sb.block_size - 1) / sb.block_size;
+        old_blocks = (old_size + sb.block_size - 1) / sb.block_size;
+        /* Zero the partial tail of the last kept block. */
+        if ((new_size % sb.block_size) != 0) {
+            u32 phys = inode_get_block(raw, new_blocks - 1);
+            if (phys != 0 && bread(phys, blk_buf)) {
+                u32 off = new_size % sb.block_size;
+                u32 k;
+                for (k = off; k < sb.block_size; k++) {
+                    blk_buf[k] = 0;
+                }
+                bwrite(phys, blk_buf);
+            }
+        }
+        for (fblk = new_blocks; fblk < old_blocks; fblk++) {
+            inode_clear_data_block(raw, fblk);
+        }
+        wr32(raw + I_SIZE_LO, new_size);
+    } else {
+        /* Sparse grow: size only; blocks allocated on write. */
+        wr32(raw + I_SIZE_LO, new_size);
+    }
+    if (!inode_write(opens[s].ino, raw)) {
+        jl_commit();
+        return 0;
+    }
+    jl_commit();
+    opens[s].size = new_size;
+    if (opens[s].off > new_size) {
+        opens[s].off = new_size;
+    }
+    return 1;
+}
+
 u32 ext2_sync(void) {
     if (!sb.mounted) return 0;
     /* Write barrier: clear jl pending, mark VALID_FS, then FLUSH. */
@@ -1775,5 +1901,58 @@ void ext2_selftest(void) {
         }
         drivers.blk_flush();
         kprintf("[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin\n");
+    }
+
+    /* ftruncate(2): grow sparse, shrink with prefix keep, truncate-to-zero. */
+    {
+        u32 tfh;
+        char tbuf[16];
+        u32 k;
+        tfh = ext2_open("/mnt/trunc.bin", O_CREAT | O_RDWR | O_TRUNC);
+        if (tfh == 0) {
+            kprintf("[EXT2] [FAIL] ftruncate open\n");
+            return;
+        }
+        for (k = 0; k < 8; k++) tbuf[k] = (char)('A' + k);
+        if (ext2_write(tfh, tbuf, 8) != 8) {
+            kprintf("[EXT2] [FAIL] ftruncate seed write\n");
+            ext2_close(tfh);
+            return;
+        }
+        if (!ext2_ftruncate(tfh, 4096)) {
+            kprintf("[EXT2] [FAIL] ftruncate grow\n");
+            ext2_close(tfh);
+            return;
+        }
+        if (!ext2_ftruncate(tfh, 4)) {
+            kprintf("[EXT2] [FAIL] ftruncate shrink\n");
+            ext2_close(tfh);
+            return;
+        }
+        if (ext2_lseek(tfh, 0, SEEK_SET) != 0) {
+            kprintf("[EXT2] [FAIL] ftruncate lseek\n");
+            ext2_close(tfh);
+            return;
+        }
+        for (k = 0; k < 16; k++) tbuf[k] = 0;
+        if (ext2_read(tfh, tbuf, 16) != 4) {
+            kprintf("[EXT2] [FAIL] ftruncate read len\n");
+            ext2_close(tfh);
+            return;
+        }
+        if (tbuf[0] != 'A' || tbuf[1] != 'B' || tbuf[2] != 'C' || tbuf[3] != 'D') {
+            kprintf("[EXT2] [FAIL] ftruncate prefix\n");
+            ext2_close(tfh);
+            return;
+        }
+        if (!ext2_ftruncate(tfh, 0)) {
+            kprintf("[EXT2] [FAIL] ftruncate zero\n");
+            ext2_close(tfh);
+            return;
+        }
+        ext2_close(tfh);
+        ext2_unlink("/mnt/trunc.bin");
+        drivers.blk_flush();
+        kprintf("[EXT2] [PASS] ftruncate grow/shrink/zero\n");
     }
 }

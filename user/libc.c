@@ -977,3 +977,19 @@ int shm_unlink(const char *name) {
     r = u_unlink(path);
     return r < 0 ? -1 : 0;
 }
+
+/* ---- futex(2) basics ---------------------------------------------------- */
+extern long u_futex(volatile unsigned int *uaddr, int op, unsigned int val,
+                    void *timeout, volatile unsigned int *uaddr2,
+                    unsigned int val3);
+
+enum {
+    FUTEX_WAIT = 0,
+    FUTEX_WAKE = 1,
+    FUTEX_PRIVATE = 128
+};
+
+long futex(volatile unsigned int *uaddr, int op, unsigned int val,
+           void *timeout, volatile unsigned int *uaddr2, unsigned int val3) {
+    return u_futex(uaddr, op, val, timeout, uaddr2, val3);
+}

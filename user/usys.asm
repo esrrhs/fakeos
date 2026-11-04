@@ -55,6 +55,8 @@ global u_ioctl
 global u_rt_sigaction
 global u_rt_sigreturn
 global u_ftruncate
+global u_futex
+global u_gettid
 
 section .text
 
@@ -271,6 +273,17 @@ u_rt_sigreturn:
 
 ; long u_ftruncate(long fd, unsigned long length)
 USYSC1 u_ftruncate, 77
+
+; long u_gettid(void)
+USYSC1 u_gettid, 186
+
+; long u_futex(uaddr, op, val, timeout, uaddr2, val3) -- 4th C arg RCX -> R10
+align 16
+u_futex:
+    mov     r10, rcx
+    mov     eax, 202
+    syscall
+    ret
 
 ; void u_exit(long code) - does not return
 align 16

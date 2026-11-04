@@ -167,7 +167,8 @@ $M5_SRCS
 EOF
 
 # Prebuilt nasm objects (no in-OS assembler in this milestone).
-for a in boot desc io sysentry switch; do
+# ap_tramp_blob embeds the SIPI trampoline flat binary used by arch/smp.c.
+for a in boot desc io sysentry switch ap_tramp_blob; do
     cp "$BUILD/$a.o" "$STAGE/asm/$a.o"
 done
 # Userland blob (init/sh/hello/cat/ls/kbuild/ldfake + motd/environ):
