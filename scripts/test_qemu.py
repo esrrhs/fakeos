@@ -343,6 +343,8 @@ def main():
         "[PASS] CFS rbtree",
         "[PASS] CFS task_group: shares",
         "[PASS] CFS task_group: equal shares",
+        "[PASS] CFS task_group nested: mid shares",
+        "[PASS] CFS task_group nested: equal mids",
         "[PASS] CFS task_group SE rbtree",
         "[PASS] kmutex sleep-lock",
         "[PASS] kmutex waiter enters TCB_SLEEPING",
@@ -415,7 +417,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: CFS task_group SE rbtree + CFS rbtree + AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
+        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

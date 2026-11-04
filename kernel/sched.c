@@ -155,28 +155,33 @@ static u32 cfs_root[SCHED_MAX_CPUS] = {
 };
 static u32 cfs_nr[SCHED_MAX_CPUS];   /* runnable non-idle entities on RQ    */
 
-/* CFS task_group (hierarchical fair share + group SE rbtree):
- * Each thread belongs to a group. Groups compete by shares on each CPU via
- * a per-CPU intrusive red-black tree of group scheduling entities (keyed by
- * group vruntime, then tg id). Within a group, threads still compete on the
- * flat per-CPU task rbtree. pick_next leftmost-picks the group SE, then the
- * min-vruntime member of that group. Not full Linux cgroup nesting yet. */
+/* CFS task_group (hierarchical fair share + nested group SE rbtree):
+ * Each thread belongs to a group. Groups have a parent (TG_ROOT's parent is
+ * TG_NONE). Sibling groups compete by shares on their parent's per-CPU child
+ * SE red-black tree (keyed by group vruntime, then tg id). Top-level siblings
+ * (parent == TG_ROOT) plus TG_ROOT itself (when it has direct tasks) live in
+ * tg_se_root[]. Nested children live in parent->child_se_root[]. pick_next
+ * descends leftmost nested SEs to a leaf, then picks the min-vruntime member.
+ * Charge walks the parent chain. Not a full Linux cgroup yet. */
 enum {
-    MAX_TASK_GROUPS = 8,
+    MAX_TASK_GROUPS = 16,
     TG_ROOT         = 0,
     TG_NONE         = 0xFFFFFFFF
 };
 
 struct task_group {
     u32 used;                          /* 1 => slot allocated              */
+    u32 parent;                        /* TG_NONE for root; else parent tg */
     u32 shares;                        /* cpu.shares-style weight          */
     u64 vruntime[SCHED_MAX_CPUS];      /* group entity vruntime per CPU    */
-    u32 nr[SCHED_MAX_CPUS];            /* runnable members on that CPU RQ  */
-    u32 se_left[SCHED_MAX_CPUS];       /* intrusive group SE rbtree        */
+    u32 nr[SCHED_MAX_CPUS];            /* runnable direct tasks on CPU RQ  */
+    u32 se_left[SCHED_MAX_CPUS];       /* intrusive group SE in parent tree*/
     u32 se_right[SCHED_MAX_CPUS];
     u32 se_parent[SCHED_MAX_CPUS];
     u32 se_color[SCHED_MAX_CPUS];       /* 0=red, 1=black                   */
-    u32 se_on_rq[SCHED_MAX_CPUS];      /* 1 => linked in tg_se_root[cpu]   */
+    u32 se_on_rq[SCHED_MAX_CPUS];      /* 1 => linked in parent SE tree    */
+    /* Nested children SE tree root; must be NONE (not BSS 0). */
+    u32 child_se_root[SCHED_MAX_CPUS];
 };
 
 static struct task_group task_groups[MAX_TASK_GROUPS];
@@ -396,6 +401,45 @@ static u32 tg_valid(u32 tg) {
     return task_groups[tg].used;
 }
 
+/* SE tree root pointer for the tree that holds `tg`'s entity. Top-level
+ * (parent TG_NONE/TG_ROOT) uses tg_se_root; nested uses parent child_se_root. */
+static u32 *tg_se_tree_rootp(u32 tg, u32 cpu) {
+    u32 p;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return &tg_se_root[0];
+    }
+    if (tg >= MAX_TASK_GROUPS) {
+        return &tg_se_root[cpu];
+    }
+    p = task_groups[tg].parent;
+    if (p == TG_NONE || p == TG_ROOT) {
+        return &tg_se_root[cpu];
+    }
+    return &task_groups[p].child_se_root[cpu];
+}
+
+static u32 tg_has_nested_runnable(u32 tg, u32 cpu) {
+    if (tg >= MAX_TASK_GROUPS || cpu >= SCHED_MAX_CPUS) {
+        return 0;
+    }
+    return task_groups[tg].child_se_root[cpu] != TG_NONE;
+}
+
+/* Group should be linked in its parent SE tree. */
+static u32 tg_should_link(u32 tg, u32 cpu) {
+    if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
+        return 0;
+    }
+    if (task_groups[tg].nr[cpu] > 0) {
+        return 1;
+    }
+    /* Nested children make a mid group runnable; ROOT stays off the top tree. */
+    if (tg != TG_ROOT && tg_has_nested_runnable(tg, cpu)) {
+        return 1;
+    }
+    return 0;
+}
+
 static void tg_se_clear_node(u32 tg, u32 cpu) {
     if (tg >= MAX_TASK_GROUPS || cpu >= SCHED_MAX_CPUS) {
         return;
@@ -412,10 +456,12 @@ static void tg_init_root(void) {
     u32 g;
     for (g = 0; g < MAX_TASK_GROUPS; g++) {
         task_groups[g].used = 0;
+        task_groups[g].parent = TG_NONE;
         task_groups[g].shares = NICE0_WEIGHT;
         for (c = 0; c < SCHED_MAX_CPUS; c++) {
             task_groups[g].vruntime[c] = 0;
             task_groups[g].nr[c] = 0;
+            task_groups[g].child_se_root[c] = TG_NONE;
             tg_se_clear_node(g, c);
         }
     }
@@ -423,6 +469,7 @@ static void tg_init_root(void) {
         tg_se_root[c] = TG_NONE;
     }
     task_groups[TG_ROOT].used = 1;
+    task_groups[TG_ROOT].parent = TG_NONE;
     task_groups[TG_ROOT].shares = NICE0_WEIGHT;
 }
 
@@ -505,7 +552,7 @@ static void tg_se_rotate_left(u32 cpu, u32 x) {
     yp = task_groups[x].se_parent[cpu];
     task_groups[y].se_parent[cpu] = yp;
     if (yp == TG_NONE) {
-        tg_se_root[cpu] = y;
+        *tg_se_tree_rootp(x, cpu) = y;
     } else if (x == task_groups[yp].se_left[cpu]) {
         task_groups[yp].se_left[cpu] = y;
     } else {
@@ -532,7 +579,7 @@ static void tg_se_rotate_right(u32 cpu, u32 x) {
     yp = task_groups[x].se_parent[cpu];
     task_groups[y].se_parent[cpu] = yp;
     if (yp == TG_NONE) {
-        tg_se_root[cpu] = y;
+        *tg_se_tree_rootp(x, cpu) = y;
     } else if (x == task_groups[yp].se_right[cpu]) {
         task_groups[yp].se_right[cpu] = y;
     } else {
@@ -597,26 +644,31 @@ static void tg_se_insert_fixup(u32 cpu, u32 z) {
             }
         }
     }
-    if (tg_se_root[cpu] != TG_NONE) {
-        task_groups[tg_se_root[cpu]].se_color[cpu] = CFS_RB_BLACK;
+    {
+        u32 *rp = tg_se_tree_rootp(z, cpu);
+        if (*rp != TG_NONE) {
+            task_groups[*rp].se_color[cpu] = CFS_RB_BLACK;
+        }
     }
 }
 
 static void tg_se_insert(u32 cpu, u32 z) {
     u32 y;
     u32 x;
+    u32 *rootp;
     if (cpu >= SCHED_MAX_CPUS || z >= MAX_TASK_GROUPS) {
         return;
     }
     if (task_groups[z].se_on_rq[cpu]) {
         return;
     }
+    rootp = tg_se_tree_rootp(z, cpu);
     task_groups[z].se_left[cpu] = TG_NONE;
     task_groups[z].se_right[cpu] = TG_NONE;
     task_groups[z].se_parent[cpu] = TG_NONE;
     task_groups[z].se_color[cpu] = CFS_RB_RED;
     y = TG_NONE;
-    x = tg_se_root[cpu];
+    x = *rootp;
     while (x != TG_NONE) {
         y = x;
         if (tg_se_before(cpu, z, x)) {
@@ -627,7 +679,7 @@ static void tg_se_insert(u32 cpu, u32 z) {
     }
     task_groups[z].se_parent[cpu] = y;
     if (y == TG_NONE) {
-        tg_se_root[cpu] = z;
+        *rootp = z;
     } else if (tg_se_before(cpu, z, y)) {
         task_groups[y].se_left[cpu] = z;
     } else {
@@ -644,7 +696,7 @@ static void tg_se_transplant(u32 cpu, u32 u, u32 v) {
     }
     up = task_groups[u].se_parent[cpu];
     if (up == TG_NONE) {
-        tg_se_root[cpu] = v;
+        *tg_se_tree_rootp(u, cpu) = v;
     } else if (u == task_groups[up].se_left[cpu]) {
         task_groups[up].se_left[cpu] = v;
     } else {
@@ -655,9 +707,9 @@ static void tg_se_transplant(u32 cpu, u32 u, u32 v) {
     }
 }
 
-static void tg_se_erase_fixup(u32 cpu, u32 x, u32 xp) {
+static void tg_se_erase_fixup(u32 cpu, u32 x, u32 xp, u32 *rootp) {
     while ((x == TG_NONE || task_groups[x].se_color[cpu] == CFS_RB_BLACK)
-           && x != tg_se_root[cpu]) {
+           && x != *rootp) {
         u32 w;
         if (xp == TG_NONE) {
             break;
@@ -700,7 +752,7 @@ static void tg_se_erase_fixup(u32 cpu, u32 x, u32 xp) {
                 }
                 task_groups[xp].se_color[cpu] = CFS_RB_BLACK;
                 tg_se_rotate_left(cpu, xp);
-                x = tg_se_root[cpu];
+                x = *rootp;
                 xp = TG_NONE;
             }
         } else {
@@ -741,7 +793,7 @@ static void tg_se_erase_fixup(u32 cpu, u32 x, u32 xp) {
                 }
                 task_groups[xp].se_color[cpu] = CFS_RB_BLACK;
                 tg_se_rotate_right(cpu, xp);
-                x = tg_se_root[cpu];
+                x = *rootp;
                 xp = TG_NONE;
             }
         }
@@ -756,12 +808,14 @@ static void tg_se_erase(u32 cpu, u32 z) {
     u32 x;
     u32 xp;
     u32 y_orig_color;
+    u32 *rootp;
     if (cpu >= SCHED_MAX_CPUS || z >= MAX_TASK_GROUPS) {
         return;
     }
     if (!task_groups[z].se_on_rq[cpu]) {
         return;
     }
+    rootp = tg_se_tree_rootp(z, cpu);
     y = z;
     y_orig_color = task_groups[y].se_color[cpu];
     if (task_groups[z].se_left[cpu] == TG_NONE) {
@@ -798,24 +852,81 @@ static void tg_se_erase(u32 cpu, u32 z) {
     }
     tg_se_clear_node(z, cpu);
     if (y_orig_color == CFS_RB_BLACK) {
-        tg_se_erase_fixup(cpu, x, xp);
+        tg_se_erase_fixup(cpu, x, xp, rootp);
     }
 }
 
-/* Clamp a newly-runnable group's entity against peer groups on `cpu`. */
+/* Clamp a newly-runnable group's entity against siblings in its parent tree. */
 static void tg_place_entity(u32 tg, u32 cpu) {
     u32 left;
     u64 minv;
+    u32 *rootp;
+    u32 root;
     if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
         return;
     }
-    left = tg_se_rq_leftmost(cpu);
+    rootp = tg_se_tree_rootp(tg, cpu);
+    root = *rootp;
+    if (root >= MAX_TASK_GROUPS || !task_groups[root].se_on_rq[cpu]) {
+        return;
+    }
+    left = tg_se_leftmost_from(cpu, root);
     if (left == TG_NONE) {
         return;
     }
     minv = task_groups[left].vruntime[cpu];
     if (task_groups[tg].vruntime[cpu] < minv) {
         task_groups[tg].vruntime[cpu] = minv;
+    }
+}
+
+/* Link `tg` into its parent SE tree; bubble ancestors that become runnable. */
+static void tg_link_runnable(u32 tg, u32 cpu) {
+    u32 guard = 0;
+    while (tg_valid(tg) && guard < MAX_TASK_GROUPS) {
+        guard = guard + 1;
+        if (!tg_should_link(tg, cpu)) {
+            break;
+        }
+        if (!task_groups[tg].se_on_rq[cpu]) {
+            tg_place_entity(tg, cpu);
+            tg_se_insert(cpu, tg);
+        }
+        /* Top-level entities sit in tg_se_root; no further parent to link.
+         * (TG_ROOT itself only links when it has direct tasks.) */
+        if (tg == TG_ROOT) {
+            break;
+        }
+        if (task_groups[tg].parent == TG_ROOT || task_groups[tg].parent == TG_NONE) {
+            break;
+        }
+        tg = task_groups[tg].parent;
+    }
+}
+
+/* Erase idle groups and bubble: mid groups drop when child tree empties. */
+static void tg_unlink_idle(u32 tg, u32 cpu) {
+    u32 guard = 0;
+    while (tg_valid(tg) && guard < MAX_TASK_GROUPS) {
+        guard = guard + 1;
+        if (tg_should_link(tg, cpu)) {
+            break;
+        }
+        if (task_groups[tg].se_on_rq[cpu]) {
+            tg_se_erase(cpu, tg);
+        }
+        if (tg == TG_ROOT) {
+            break;
+        }
+        if (task_groups[tg].parent == TG_ROOT || task_groups[tg].parent == TG_NONE) {
+            /* Erased from top tree; if parent is ROOT check ROOT's own link. */
+            if (task_groups[tg].parent == TG_ROOT) {
+                tg = TG_ROOT;
+                continue;
+            }
+            break;
+        }
+        tg = task_groups[tg].parent;
     }
 }
 
@@ -829,11 +940,10 @@ static void tg_account_enqueue(u32 id, u32 cpu) {
         threads[id].tg = TG_ROOT;
         tg = TG_ROOT;
     }
-    if (task_groups[tg].nr[cpu] == 0) {
-        tg_place_entity(tg, cpu);
-        tg_se_insert(cpu, tg);
-    }
     task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] + 1;
+    if (task_groups[tg].nr[cpu] == 1) {
+        tg_link_runnable(tg, cpu);
+    }
 }
 
 static void tg_account_dequeue(u32 id, u32 cpu) {
@@ -848,12 +958,14 @@ static void tg_account_dequeue(u32 id, u32 cpu) {
     if (task_groups[tg].nr[cpu] > 0) {
         task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] - 1;
     }
-    if (task_groups[tg].nr[cpu] == 0 && task_groups[tg].se_on_rq[cpu]) {
-        tg_se_erase(cpu, tg);
+    if (task_groups[tg].nr[cpu] == 0) {
+        tg_unlink_idle(tg, cpu);
     }
 }
 
-static void tg_charge(u32 tg, u32 cpu, u64 units) {
+/* Charge leaf then walk parents (nested SE accounting). Stop before charging
+ * TG_ROOT for a nested descendant — ROOT only charges for direct tasks. */
+static void tg_charge_one(u32 tg, u32 cpu, u64 units) {
     u64 shares;
     u32 on;
     if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
@@ -869,17 +981,48 @@ static void tg_charge(u32 tg, u32 cpu, u64 units) {
     }
     task_groups[tg].vruntime[cpu] =
         task_groups[tg].vruntime[cpu] + (units * (u64)NICE0_WEIGHT) / shares;
-    if (on || task_groups[tg].nr[cpu] > 0) {
+    if (on || tg_should_link(tg, cpu)) {
         tg_se_insert(cpu, tg);
     }
 }
 
-/* Pick the runnable group with the lowest vruntime on `cpu` (SE tree leftmost). */
+static void tg_charge(u32 tg, u32 cpu, u64 units) {
+    u32 guard = 0;
+    while (tg_valid(tg) && guard < MAX_TASK_GROUPS) {
+        guard = guard + 1;
+        tg_charge_one(tg, cpu, units);
+        if (tg == TG_ROOT) {
+            break;
+        }
+        {
+            u32 p = task_groups[tg].parent;
+            if (p == TG_NONE || p == TG_ROOT) {
+                break;
+            }
+            tg = p;
+        }
+    }
+}
+
+/* Pick leftmost top-level SE, then descend nested child SE trees to a leaf. */
 static u32 tg_pick_min(u32 cpu) {
+    u32 tg;
+    u32 guard;
     if (cpu >= SCHED_MAX_CPUS) {
         return TG_NONE;
     }
-    return tg_se_rq_leftmost(cpu);
+    tg = tg_se_rq_leftmost(cpu);
+    guard = 0;
+    while (tg != TG_NONE && tg_has_nested_runnable(tg, cpu)
+           && guard < MAX_TASK_GROUPS) {
+        u32 root = task_groups[tg].child_se_root[cpu];
+        guard = guard + 1;
+        if (root >= MAX_TASK_GROUPS || !task_groups[root].se_on_rq[cpu]) {
+            break;
+        }
+        tg = tg_se_leftmost_from(cpu, root);
+    }
+    return tg;
 }
 
 static void cfs_rb_clear_node(u32 id) {
@@ -1423,8 +1566,8 @@ static void cfs_update_min(void) {
 }
 
 /* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
- * Hierarchical: leftmost group SE on this CPU's tg_se rbtree, then the
- * min-vruntime member of that group (task tree walk filtered by tg).
+ * Nested hierarchical: leftmost top SE, descend child SE trees to a leaf,
+ * then the min-vruntime member of that group (task tree filtered by tg).
  * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
 static u32 rq_pick_best(u32 cpu, u32 want_user) {
     u32 id;
@@ -1625,77 +1768,149 @@ u32 sched_cfs_rb_check(void) {
     return ok;
 }
 
-/* Validate every per-CPU group SE tree: sorted inorder, on_rq <=> nr>0. */
+/* Validate one SE tree rooted at `root`: sorted, on_rq nodes only. */
+static u32 tg_se_check_one_tree(u32 cpu, u32 root, u32 expect_parent) {
+    u32 tg;
+    u32 prev = TG_NONE;
+    u32 seen = 0;
+    u32 g;
+    u32 expect = 0;
+    if (root != TG_NONE) {
+        if (root >= MAX_TASK_GROUPS || !task_groups[root].se_on_rq[cpu]) {
+            return 0;
+        }
+        tg = tg_se_leftmost_from(cpu, root);
+    } else {
+        tg = TG_NONE;
+    }
+    while (tg != TG_NONE) {
+        if (!task_groups[tg].used || !task_groups[tg].se_on_rq[cpu]) {
+            return 0;
+        }
+        if (task_groups[tg].parent != expect_parent) {
+            /* Top tree also holds TG_ROOT (parent TG_NONE) when it has tasks. */
+            if (!(expect_parent == TG_ROOT
+                  && tg == TG_ROOT && task_groups[tg].parent == TG_NONE)) {
+                return 0;
+            }
+        }
+        if (!tg_should_link(tg, cpu)) {
+            return 0;
+        }
+        if (prev != TG_NONE && !tg_se_before(cpu, prev, tg)) {
+            return 0;
+        }
+        prev = tg;
+        seen = seen + 1;
+        tg = tg_se_successor(cpu, tg);
+    }
+    for (g = 0; g < MAX_TASK_GROUPS; g++) {
+        u32 want = 0;
+        if (!task_groups[g].used) {
+            continue;
+        }
+        if (expect_parent == TG_ROOT) {
+            if (g == TG_ROOT) {
+                want = (task_groups[g].nr[cpu] > 0) ? 1 : 0;
+            } else if (task_groups[g].parent == TG_ROOT) {
+                want = tg_should_link(g, cpu);
+            }
+        } else if (task_groups[g].parent == expect_parent) {
+            want = tg_should_link(g, cpu);
+        }
+        if (want) {
+            expect = expect + 1;
+            if (!task_groups[g].se_on_rq[cpu]) {
+                return 0;
+            }
+        } else {
+            u32 in_scope = 0;
+            if (expect_parent == TG_ROOT) {
+                if (g == TG_ROOT || task_groups[g].parent == TG_ROOT) {
+                    in_scope = 1;
+                }
+            } else if (task_groups[g].parent == expect_parent) {
+                in_scope = 1;
+            }
+            if (in_scope && task_groups[g].se_on_rq[cpu]) {
+                return 0;
+            }
+        }
+    }
+    if (seen != expect) {
+        return 0;
+    }
+    {
+        u32 best = TG_NONE;
+        u64 best_vr = 0;
+        u32 left = TG_NONE;
+        for (g = 0; g < MAX_TASK_GROUPS; g++) {
+            u32 want = 0;
+            if (!task_groups[g].used) {
+                continue;
+            }
+            if (expect_parent == TG_ROOT) {
+                if (g == TG_ROOT) {
+                    want = (task_groups[g].nr[cpu] > 0) ? 1 : 0;
+                } else if (task_groups[g].parent == TG_ROOT) {
+                    want = tg_should_link(g, cpu);
+                }
+            } else if (task_groups[g].parent == expect_parent) {
+                want = tg_should_link(g, cpu);
+            }
+            if (!want) {
+                continue;
+            }
+            if (best == TG_NONE
+                || task_groups[g].vruntime[cpu] < best_vr
+                || (task_groups[g].vruntime[cpu] == best_vr && g < best)) {
+                best = g;
+                best_vr = task_groups[g].vruntime[cpu];
+            }
+        }
+        if (root != TG_NONE && root < MAX_TASK_GROUPS
+            && task_groups[root].se_on_rq[cpu]) {
+            left = tg_se_leftmost_from(cpu, root);
+        }
+        if (best != left) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Validate every per-CPU top + nested child SE tree. Roots stay NONE when empty. */
 u32 sched_tg_se_rb_check(void) {
     u32 c;
     u32 ok = 1;
     u64 flags = cpu_irq_save();
     spin_lock(&sched_run_lock);
     for (c = 0; c < SCHED_MAX_CPUS; c++) {
-        u32 tg;
-        u32 prev = TG_NONE;
-        u32 seen = 0;
         u32 g;
-        u32 expect = 0;
-        tg = tg_se_rq_leftmost(c);
-        while (tg != TG_NONE) {
-            if (!task_groups[tg].used || !task_groups[tg].se_on_rq[c]
-                || task_groups[tg].nr[c] == 0) {
-                ok = 0;
-                break;
-            }
-            if (prev != TG_NONE && !tg_se_before(c, prev, tg)) {
-                ok = 0;
-                break;
-            }
-            prev = tg;
-            seen = seen + 1;
-            tg = tg_se_successor(c, tg);
+        if (tg_se_root[c] == 0 && !task_groups[0].se_on_rq[c]) {
+            ok = 0;
+            break;
         }
-        if (ok == 0) {
+        if (!tg_se_check_one_tree(c, tg_se_root[c], TG_ROOT)) {
+            ok = 0;
             break;
         }
         for (g = 0; g < MAX_TASK_GROUPS; g++) {
             if (!task_groups[g].used) {
                 continue;
             }
-            if (task_groups[g].nr[c] > 0) {
-                expect = expect + 1;
-                if (!task_groups[g].se_on_rq[c]) {
-                    ok = 0;
-                    break;
-                }
-            } else if (task_groups[g].se_on_rq[c]) {
+            /* child_se_root must be NONE or a real tg id (>=1); never BSS 0. */
+            if (task_groups[g].child_se_root[c] == 0) {
+                ok = 0;
+                break;
+            }
+            if (!tg_se_check_one_tree(c, task_groups[g].child_se_root[c], g)) {
                 ok = 0;
                 break;
             }
         }
         if (ok == 0) {
             break;
-        }
-        if (seen != expect) {
-            ok = 0;
-            break;
-        }
-        /* Leftmost must match linear min-vruntime among nr>0 groups. */
-        {
-            u32 best = TG_NONE;
-            u64 best_vr = 0;
-            for (g = 0; g < MAX_TASK_GROUPS; g++) {
-                if (!task_groups[g].used || task_groups[g].nr[c] == 0) {
-                    continue;
-                }
-                if (best == TG_NONE
-                    || task_groups[g].vruntime[c] < best_vr
-                    || (task_groups[g].vruntime[c] == best_vr && g < best)) {
-                    best = g;
-                    best_vr = task_groups[g].vruntime[c];
-                }
-            }
-            if (best != tg_se_rq_leftmost(c)) {
-                ok = 0;
-                break;
-            }
         }
     }
     spin_unlock(&sched_run_lock);
@@ -1703,9 +1918,6 @@ u32 sched_tg_se_rb_check(void) {
     return ok;
 }
 
-/* ---------------------------------------------------------------------------
- * Initialization
- * ------------------------------------------------------------------------- */
 
 u32 sched_is_active(void) {
     return active;
@@ -2633,27 +2845,43 @@ u64 sys_nice(u64 inc) {
     return (u64)(s64)threads[sched_cur()].nice;
 }
 
-/* ---- CFS task_group public API (hierarchical fair share + group SE rb) */
+/* ---- CFS task_group public API (nested hierarchical fair share + SE rb) */
 
-u32 sched_tg_create(u32 shares) {
+u32 sched_tg_create_under(u32 parent, u32 shares) {
     u32 g;
     u32 c;
+    if (parent != TG_ROOT && !tg_valid(parent)) {
+        return TG_NONE;
+    }
     if (shares == 0) {
         shares = NICE0_WEIGHT;
     }
     for (g = 1; g < MAX_TASK_GROUPS; g++) {
         if (!task_groups[g].used) {
             task_groups[g].used = 1;
+            task_groups[g].parent = parent;
             task_groups[g].shares = shares;
             for (c = 0; c < SCHED_MAX_CPUS; c++) {
                 task_groups[g].vruntime[c] = 0;
                 task_groups[g].nr[c] = 0;
+                task_groups[g].child_se_root[c] = TG_NONE;
                 tg_se_clear_node(g, c);
             }
             return g;
         }
     }
     return TG_NONE;
+}
+
+u32 sched_tg_create(u32 shares) {
+    return sched_tg_create_under(TG_ROOT, shares);
+}
+
+u32 sched_tg_parent(u32 tg) {
+    if (!tg_valid(tg)) {
+        return TG_NONE;
+    }
+    return task_groups[tg].parent;
 }
 
 u32 sched_tg_set_shares(u32 tg, u32 shares) {

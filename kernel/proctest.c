@@ -23,6 +23,8 @@ extern u32 sched_set_nice(u32 id, s32 nice);
 extern u32 sched_cfs_rb_check(void);
 extern u32 sched_tg_se_rb_check(void);
 extern u32 sched_tg_create(u32 shares);
+extern u32 sched_tg_create_under(u32 parent, u32 shares);
+extern u32 sched_tg_parent(u32 tg);
 extern u32 sched_tg_attach(u32 id, u32 tg);
 extern u32 sched_tg_set_shares(u32 tg, u32 shares);
 extern u32 sched_current_id(void);
@@ -267,7 +269,7 @@ static int test_weighted_fair(void) {
 
 /* Hierarchical CFS: two groups with shares 2048 vs 1024, one nice-0 spinner
  * each. The higher-share group must get roughly twice the CPU. */
-static volatile u64 g_tg_counts[3];
+static volatile u64 g_tg_counts[4];
 static volatile u64 g_tg_done;
 static volatile u64 g_tg_deadline;
 
@@ -392,6 +394,147 @@ static int test_tg_aggregate(void) {
     /* Accept within 2x either way (TCG noise); equal shares => not 2:1 flat. */
     if (sum_a > b * 2 || b > sum_a * 2) {
         kprintf("      [FAIL] tg aggregate not balanced: A2=%u B1=%u\n",
+                sum_a, b);
+        return 0;
+    }
+    return 1;
+}
+
+
+/* Nested SE path: midA(shares 2048)/midB(1024) under root, one leaf each.
+ * Leaf spinners must see ~2:1 via parent hierarchical charge + nested pick. */
+static int test_tg_nested_shares(void) {
+    u32 mid_a;
+    u32 mid_b;
+    u32 leaf_a;
+    u32 leaf_b;
+    u32 id0;
+    u32 id1;
+    u64 hi;
+    u64 lo;
+    g_tg_done = 0;
+    g_tg_counts[0] = 0;
+    g_tg_counts[1] = 0;
+    g_tg_deadline = sched_tick_count() + 40;
+
+    mid_a = sched_tg_create(2048);
+    mid_b = sched_tg_create(1024);
+    if (mid_a == 0xFFFFFFFF || mid_b == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create (nested mids)\n");
+        return 0;
+    }
+    leaf_a = sched_tg_create_under(mid_a, 1024);
+    leaf_b = sched_tg_create_under(mid_b, 1024);
+    if (leaf_a == 0xFFFFFFFF || leaf_b == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create_under (nested leaves)\n");
+        return 0;
+    }
+    if (sched_tg_parent(leaf_a) != mid_a || sched_tg_parent(leaf_b) != mid_b) {
+        kprintf("      [FAIL] nested parent linkage\n");
+        return 0;
+    }
+    id0 = kthread_create((u64)(&tg_spinner), 0);
+    id1 = kthread_create((u64)(&tg_spinner), 1);
+    if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF) {
+        kprintf("      [FAIL] could not create nested share spinners\n");
+        return 0;
+    }
+    if (!sched_tg_attach(id0, leaf_a) || !sched_tg_attach(id1, leaf_b)) {
+        kprintf("      [FAIL] sched_tg_attach (nested shares)\n");
+        return 0;
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 400;
+        while (g_tg_done != 2 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_tg_done != 2) {
+        kprintf("      [FAIL] nested share spinners did not finish (%u)\n",
+                g_tg_done);
+        return 0;
+    }
+    if (g_tg_counts[0] == 0 || g_tg_counts[1] == 0) {
+        kprintf("      [FAIL] nested share zero work A=%u B=%u\n",
+                g_tg_counts[0], g_tg_counts[1]);
+        return 0;
+    }
+    hi = g_tg_counts[0];
+    lo = g_tg_counts[1];
+    if (hi * 2 < lo * 3) {
+        kprintf("      [FAIL] nested shares ratio too weak: A2048=%u B1024=%u\n",
+                hi, lo);
+        return 0;
+    }
+    return 1;
+}
+
+/* Nested aggregate: equal mid shares; midA has 2 leaves, midB has 1.
+ * Aggregate A ~= B proves nested SE (flat leaf competition would favor A). */
+static int test_tg_nested_aggregate(void) {
+    u32 mid_a;
+    u32 mid_b;
+    u32 leaf_a1;
+    u32 leaf_a2;
+    u32 leaf_b;
+    u32 id0;
+    u32 id1;
+    u32 id2;
+    u64 sum_a;
+    u64 b;
+    g_tg_done = 0;
+    g_tg_counts[0] = 0;
+    g_tg_counts[1] = 0;
+    g_tg_counts[2] = 0;
+    g_tg_deadline = sched_tick_count() + 50;
+
+    mid_a = sched_tg_create(1024);
+    mid_b = sched_tg_create(1024);
+    if (mid_a == 0xFFFFFFFF || mid_b == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create (nested agg mids)\n");
+        return 0;
+    }
+    leaf_a1 = sched_tg_create_under(mid_a, 1024);
+    leaf_a2 = sched_tg_create_under(mid_a, 1024);
+    leaf_b = sched_tg_create_under(mid_b, 1024);
+    if (leaf_a1 == 0xFFFFFFFF || leaf_a2 == 0xFFFFFFFF
+        || leaf_b == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create_under (nested agg leaves)\n");
+        return 0;
+    }
+    id0 = kthread_create((u64)(&tg_spinner), 0);
+    id1 = kthread_create((u64)(&tg_spinner), 1);
+    id2 = kthread_create((u64)(&tg_spinner), 2);
+    if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF || id2 == 0xFFFFFFFF) {
+        kprintf("      [FAIL] could not create nested agg spinners\n");
+        return 0;
+    }
+    if (!sched_tg_attach(id0, leaf_a1) || !sched_tg_attach(id1, leaf_a2)
+        || !sched_tg_attach(id2, leaf_b)) {
+        kprintf("      [FAIL] sched_tg_attach (nested agg)\n");
+        return 0;
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 500;
+        while (g_tg_done != 3 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_tg_done != 3) {
+        kprintf("      [FAIL] nested agg spinners did not finish (%u)\n",
+                g_tg_done);
+        return 0;
+    }
+    sum_a = g_tg_counts[0] + g_tg_counts[1];
+    b = g_tg_counts[2];
+    if (sum_a == 0 || b == 0) {
+        kprintf("      [FAIL] nested agg zero work A=%u B=%u\n", sum_a, b);
+        return 0;
+    }
+    if (sum_a > b * 2 || b > sum_a * 2) {
+        kprintf("      [FAIL] nested agg not balanced: A2=%u B1=%u\n",
                 sum_a, b);
         return 0;
     }
@@ -970,7 +1113,7 @@ static int test_sock_kmutex_blocking(void) {
 void sched_selftest(void) {
     kprintf("\n[SCHED] Kernel Threads & CFS rbtree + task_group SE Hierarchical Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
-    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS + group SE rbtree shares\n");
+    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS + nested group SE rbtree shares\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
     kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");
 
@@ -1001,6 +1144,12 @@ void sched_selftest(void) {
     }
     if (test_tg_aggregate()) {
         kprintf("      [PASS] CFS task_group: equal shares 2v1 aggregate~fair\n");
+    }
+    if (test_tg_nested_shares()) {
+        kprintf("      [PASS] CFS task_group nested: mid shares 2048 vs 1024 >=1.5x\n");
+    }
+    if (test_tg_nested_aggregate()) {
+        kprintf("      [PASS] CFS task_group nested: equal mids 2leaves vs 1 ~fair\n");
     }
     if (sched_tg_se_rb_check()) {
         kprintf("      [PASS] CFS task_group SE rbtree: per-CPU min-vruntime + nr\n");
