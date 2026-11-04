@@ -239,6 +239,7 @@ flowchart TD
 - [x] **/bin/expand + /bin/unexpand**：外部 `expand [-t N]` 制表符展开、`unexpand [-a] [-t N]` 空格收折；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/comm + /bin/join**：外部 `comm [-123] FILE1 FILE2` 三列比较已排序文件、`join [-t C] [-1 N] [-2 N] FILE1 FILE2` 按字段连接；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/split + /bin/csplit**：外部 `split [-l N] [-a N] [FILE [PREFIX]]` 按行切分、`csplit [-f PREFIX] [-n DIGITS] FILE LINE...` 按行号切分；供脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/fmt + /bin/which**：外部 `fmt [-w WIDTH]` 段落填行、`which CMD...` PATH 查找（shell-mirror；内建仍覆盖 builtin）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。

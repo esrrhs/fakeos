@@ -435,13 +435,26 @@ printing each created path; numeric LINE args only (no regex). Glued forms
 keep argv under `EXEC_MAX_ARGC=8`. Focused virtio login smoke covers
 `split -l2`/`-a1`, `csplit -f`/`-n`, plus prior interactive greens (smp 1/2).
 
+## /bin/fmt + /bin/which — landed
+
+Ramfs `MAX_DENTS` raised 64→128 so `/bin` can hold the growing
+daily-driver set (was exactly full at `csplit`). Thin text util + shell-mirror pair. `fmt [-w WIDTH|-wWIDTH] [FILE...]` fills
+whitespace-separated words into lines of at most WIDTH columns (default 75;
+historic `-WIDTH` accepted); blank lines separate paragraphs; words longer
+than WIDTH stand alone. `which CMD...` searches `PATH` from
+`/proc/self/environ` (default `/bin:/usr/bin:.`) and prints the first hit per
+CMD (exit 0 iff all resolve); does not know shell builtins — the shell builtin
+`which` still reports those. Glued `-wN` keeps argv under `EXEC_MAX_ARGC=8`.
+Focused virtio login smoke covers `fmt`/`-w`/`-wN`, `/bin/which`, shell
+`which` builtin still, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin utils still missing (`fmt`, external
-   `/bin/which` shell-mirror; `dirname` already present) — prefer small
-   coherent chunks. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
-   unless a clear bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
+   (e.g. `head`/`tail` already present; consider `pr`, `column`, `strings`,
+   `cksum`/`md5sum` thin stubs) — prefer small coherent chunks. Avoid deep
+   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
