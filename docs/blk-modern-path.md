@@ -2041,6 +2041,14 @@ child is still alive (GNU kill-after). Without `-k`, keeps the prior short
 smoke covers `-k1` + `-s15 -k1` timed-out sleep (exit 124) and success path
 plus prior greens (smp 1/2).
 
+## od -t x4/o4/u4/d4 — landed
+
+`/bin/od -t x4|o4|u4|d4` (glued `-tx4`/`-to4`/`-tu4`/`-td4` and `-v` forms)
+dumps little-endian 32-bit words as 8-digit hex, 11-digit octal, width-10
+unsigned decimal, or width-11 signed decimal. Keeps prior 8/16-bit types.
+No new `/bin` dent. Focused virtio login smoke covers `-tx4`/`-to4`/`-tu4`/
+`-td4` + prior greens including `timeout -k` (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2048,6 +2056,6 @@ plus prior greens (smp 1/2).
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (inspect
-   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
+   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
+   `diff -i`; `cp -p` waits on utimensat; `set --` deferred; skip large
    shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
