@@ -1,8 +1,8 @@
 /* fakeos userland - cat: concatenate files, or stdin when none given.
- *   cat [-n|-b] [FILE...]
- * -n number all lines; -b number non-blank lines (overrides -n).
- * Number column is width 6 + tab (GNU-ish). Compact glued -nb ok.
- * Compact argv for EXEC_MAX_ARGC=8.
+ *   cat [-n|-b] [-s] [FILE...]
+ * -n number all lines; -b number non-blank lines (overrides -n numbering
+ * style); -s squeeze consecutive blank lines to one. Glued -nbs ok.
+ * Number column is width 6 + tab (GNU-ish). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -19,9 +19,11 @@ enum { LINE_MAX = 512 };
 
 static int opt_n;
 static int opt_b;
+static int opt_s;
+static int prev_blank; /* across files for -s */
 
 static void usage(void) {
-    u_write(2, "usage: cat [-n|-b] [FILE...]\n", 29);
+    u_write(2, "usage: cat [-nbs] [FILE...]\n", 27);
 }
 
 static void emit_num(long num) {
@@ -57,7 +59,7 @@ static int cat_fd_raw(long fd) {
     return n < 0 ? 1 : 0;
 }
 
-static int cat_fd_numbered(long fd, long *num) {
+static int cat_fd_lines(long fd, long *num) {
     char buf[512];
     char line[LINE_MAX];
     long n;
@@ -69,17 +71,24 @@ static int cat_fd_numbered(long fd, long *num) {
             char c = buf[i];
             if (c == '\n') {
                 int blank = (li == 0);
-                if (opt_b) {
-                    if (!blank) {
+                if (opt_s && blank && prev_blank) {
+                    li = 0;
+                    continue;
+                }
+                if (opt_n || opt_b) {
+                    if (opt_b) {
+                        if (!blank) {
+                            emit_num(*num);
+                            (*num)++;
+                        }
+                    } else {
                         emit_num(*num);
                         (*num)++;
                     }
-                } else {
-                    emit_num(*num);
-                    (*num)++;
                 }
                 if (li > 0) u_write(1, line, (unsigned long)li);
                 u_write(1, "\n", 1);
+                prev_blank = blank;
                 li = 0;
                 continue;
             }
@@ -87,21 +96,19 @@ static int cat_fd_numbered(long fd, long *num) {
         }
     }
     if (li > 0) {
-        /* unterminated final line still gets a number */
-        if (opt_b) {
-            emit_num(*num);
-            (*num)++;
-        } else {
+        /* unterminated final line — never blank for -s purposes */
+        if (opt_n || opt_b) {
             emit_num(*num);
             (*num)++;
         }
         u_write(1, line, (unsigned long)li);
+        prev_blank = 0;
     }
     return n < 0 ? 1 : 0;
 }
 
 static int cat_fd(long fd, long *num) {
-    if (opt_n || opt_b) return cat_fd_numbered(fd, num);
+    if (opt_n || opt_b || opt_s) return cat_fd_lines(fd, num);
     return cat_fd_raw(fd);
 }
 
@@ -124,6 +131,8 @@ int main(int argc, char **argv) {
             else if (o == 'b') {
                 opt_b = 1;
                 opt_n = 1; /* -b implies numbering */
+            } else if (o == 's') {
+                opt_s = 1;
             } else {
                 usage();
                 return 1;
