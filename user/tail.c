@@ -1,7 +1,8 @@
 /* fakeos userland - tail: print the last N lines or bytes of files.
- *   tail [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]
+ *   tail [-n N|-N] [-c N|-cN] [-q|-v|-z] [FILE...]
  * Default: last 10 lines (ring). -c byte mode: seekable files use
  * lseek+fstat; non-seekable/stdin use a byte ring (capped).
+ * -z NUL-terminated records (line mode; ring flush emits NUL).
  * -q never headers; -v always headers; default headers when more than
  * one FILE. Compact argv for EXEC_MAX_ARGC=8.
  */
@@ -37,6 +38,7 @@ static char byte_ring[BYTE_RING_MAX];
 static unsigned long byte_len;
 static unsigned long byte_next;
 static unsigned long byte_cap;
+static int opt_z; /* NUL record delimiter */
 
 static void ring_reset(int cap) {
     ring_len = 0;
@@ -64,7 +66,12 @@ static void ring_flush(void) {
         int n = 0;
         while (ring[idx][n]) n++;
         if (n > 0) u_write(1, ring[idx], (unsigned long)n);
-        u_write(1, "\n", 1);
+        if (opt_z) {
+            char z = 0;
+            u_write(1, &z, 1);
+        } else {
+            u_write(1, "\n", 1);
+        }
     }
 }
 
@@ -84,7 +91,8 @@ static int tail_lines(long fd, long limit) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            int delim = opt_z ? (c == 0) : (c == '\n');
+            if (delim) {
                 line[li] = 0;
                 ring_push_line(line, li);
                 li = 0;
@@ -198,7 +206,7 @@ static int is_digits(const char *s) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: tail [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]\n", 51);
+    u_write(2, "usage: tail [-n N|-N] [-c N|-cN] [-q|-v|-z] [FILE...]\n", 54);
 }
 
 int main(int argc, char **argv) {
@@ -211,6 +219,8 @@ int main(int argc, char **argv) {
     int files = 0;
     int nfiles;
     int fi;
+
+    opt_z = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
@@ -246,6 +256,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-v") == 0) {
             verbose = 1;
             quiet = 0;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
             i++;
             continue;
         }

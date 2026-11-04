@@ -1,9 +1,9 @@
 /* fakeos userland - head: print the first N lines or bytes of files.
- *   head [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]
+ *   head [-n N|-N] [-c N|-cN] [-q|-v|-z] [FILE...]
  * Default: first 10 lines. -c selects byte mode (mutually exclusive with -n
- * in practice: last of -n/-c wins). -q never headers; -v always headers;
- * default headers when more than one FILE. stdin if no FILE; "-" is stdin.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * in practice: last of -n/-c wins). -z NUL-terminated records (line mode).
+ * -q never headers; -v always headers; default headers when more than one
+ * FILE. stdin if no FILE; "-" is stdin. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -17,6 +17,8 @@ extern int strcmp(const char *a, const char *b);
 extern long strtol_dec(const char *s);
 extern void printf(const char *fmt, ...);
 
+static int opt_z; /* NUL record delimiter */
+
 static int head_lines(long fd, long limit) {
     char buf[512];
     long n;
@@ -27,7 +29,7 @@ static int head_lines(long fd, long limit) {
     while (left > 0 && (n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             if (u_write(1, &buf[i], 1) < 0) return 1;
-            if (buf[i] == '\n') {
+            if (opt_z ? (buf[i] == 0) : (buf[i] == '\n')) {
                 left--;
                 if (left <= 0) return 0;
             }
@@ -63,7 +65,7 @@ static int is_digits(const char *s) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: head [-n N|-N] [-c N|-cN] [-q|-v] [FILE...]\n", 51);
+    u_write(2, "usage: head [-n N|-N] [-c N|-cN] [-q|-v|-z] [FILE...]\n", 54);
 }
 
 int main(int argc, char **argv) {
@@ -72,6 +74,7 @@ int main(int argc, char **argv) {
     int quiet = 0;
     int verbose = 0;
     int i = 1;
+    opt_z = 0;
     int rc = 0;
     int files = 0;
     int nfiles;
@@ -111,6 +114,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-v") == 0) {
             verbose = 1;
             quiet = 0;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
             i++;
             continue;
         }
