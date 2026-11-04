@@ -864,6 +864,13 @@ static void *thr_detach_worker(void *arg) {
     return (void *)(long)0xBEEF;
 }
 
+/* Bypass pthread_finish user wake: join must rely on kernel CLEARTID. */
+static void *thr_raw_exit_worker(void *arg) {
+    (void)arg;
+    u_exit(0);
+    return (void *)(long)0;
+}
+
 static void pthread_create_test(void) {
     pthread_t th;
     pthread_t th2;
@@ -979,6 +986,18 @@ static void pthread_create_test(void) {
         return;
     }
     puts("[U][PASS] pthread_detach + stack reclaim");
+
+    /* Raw u_exit: no libc futex wake; kernel CLEARTID must unblock join. */
+    joined = (void *)(long)0x1111;
+    if (pthread_create(&th, 0, thr_raw_exit_worker, 0) != 0) {
+        puts("[U][FAIL] pthread_create (cleartid)");
+        return;
+    }
+    if (pthread_join(th, &joined) != 0) {
+        puts("[U][FAIL] pthread_join CLEARTID");
+        return;
+    }
+    puts("[U][PASS] pthread_join CLEARTID");
 }
 
 int main(int argc, char **argv) {

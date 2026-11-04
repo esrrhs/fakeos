@@ -335,6 +335,7 @@ def main():
         "[U][PASS] pthread_join + FS TLS",
         "[U][PASS] pthread_exit retval",
         "[U][PASS] pthread_detach + stack reclaim",
+        "[U][PASS] pthread_join CLEARTID",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
         "[PASS] CFS-lite",
@@ -402,7 +403,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: Ext2 journal ordered durability + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!",
+        "[SUCCESS] fakeos: CLEARTID join + Ext2 journal ordered + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

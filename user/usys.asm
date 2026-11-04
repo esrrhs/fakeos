@@ -62,6 +62,7 @@ global u_futex
 global u_gettid
 global u_clone
 global u_arch_prctl
+global u_set_tid_address
 
 section .text
 
@@ -318,6 +319,9 @@ u_futex:
 
 ; long u_arch_prctl(long code, unsigned long addr) -- Linux nr 158
 USYSC1 u_arch_prctl, 158
+
+; long u_set_tid_address(int *tidptr) -- Linux nr 218
+USYSC1 u_set_tid_address, 218
 
 ; void u_exit(long code) - does not return
 align 16

@@ -75,6 +75,7 @@ struct tcb {
     u64 as_h;          /* Address space handle (0 = kernel space)         */
     u64 wait_chan;     /* Sleep channel (0 = not waiting on a waitqueue)  */
     u64 fs_base;       /* MSR_FS_BASE (arch_prctl TLS); restored on switch */
+    u64 clear_child_tid; /* set_tid_address / CLEARTID: kernel stores 0 + futex wake on exit */
     u32 state;
     u32 id;
     u32 pid;           /* User process id (0 for kernel threads)          */
@@ -539,6 +540,7 @@ void sched_init(void) {
         threads[i].as_h = 0;
         threads[i].wait_chan = 0;
         threads[i].fs_base = 0;
+        threads[i].clear_child_tid = 0;
         threads[i].pid = 0;
         threads[i].tid = 0;
         threads[i].ppid = 0;
@@ -833,6 +835,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].as_h = child_as_h;
     threads[i].wait_chan = 0;
     threads[i].fs_base = threads[sched_cur()].fs_base; /* fork inherits TLS base */
+    threads[i].clear_child_tid = 0; /* Linux: child does not inherit CLEARTID */
     threads[i].pid = child_pid;
     threads[i].tid = child_pid;        /* new process leader */
     threads[i].ppid = threads[sched_cur()].pid;
@@ -922,6 +925,7 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     threads[i].as_h = threads[sched_cur()].as_h;
     threads[i].wait_chan = 0;
     threads[i].fs_base = 0;            /* child installs TLS via arch_prctl */
+    threads[i].clear_child_tid = 0;    /* child registers via set_tid_address */
     threads[i].pid = threads[sched_cur()].pid;
     threads[i].tid = child_tid;
     threads[i].ppid = threads[sched_cur()].ppid;
@@ -1304,6 +1308,33 @@ void sched_set_fs_base(u64 base) {
 
 u64 sched_get_fs_base(void) {
     return threads[sched_cur()].fs_base;
+}
+
+/* set_tid_address(2): remember user VA cleared+woken on this thread's exit. */
+void sched_set_clear_child_tid(u64 addr) {
+    threads[sched_cur()].clear_child_tid = addr;
+}
+
+u64 sched_get_clear_child_tid(void) {
+    return threads[sched_cur()].clear_child_tid;
+}
+
+/* CLONE_CHILD_CLEARTID-style: *ctid = 0 and FUTEX_WAKE. Call while the
+ * doomed thread's AS is still active (before as_activate_h(0)). */
+void sched_do_clear_child_tid(void) {
+    u64 addr;
+    u64 as;
+    addr = threads[sched_cur()].clear_child_tid;
+    threads[sched_cur()].clear_child_tid = 0;
+    if (addr == 0 || (addr & 3ULL) != 0) {
+        return;
+    }
+    as = threads[sched_cur()].as_h;
+    if (as == 0 || !mem.as_user_range_ok(as, addr, 4)) {
+        return;
+    }
+    *(volatile u32 *)addr = 0;
+    sched_wakeup_n(addr, 0x7fffffff);
 }
 
 u32 sched_current_id(void) {

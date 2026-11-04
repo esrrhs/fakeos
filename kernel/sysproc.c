@@ -25,6 +25,7 @@ enum {
 extern u64 sched_current_as_h(void);
 extern u32 sched_current_pid(void);
 extern u32 sched_current_tid(void);
+extern void sched_set_clear_child_tid(u64 addr);
 extern u32 sched_fd_get(u32 idx);
 extern u32 pipe_fh_is(u32 fh);
 extern u32 sock_fh_is(u32 fh);
@@ -205,6 +206,22 @@ u64 sys_chmod(u64 path, u64 mode) {
 }
 
 u64 sys_gettid(void) {
+    return (u64)sched_current_tid();
+}
+
+/* set_tid_address(2): register CLEARTID word; returns caller's tid. */
+u64 sys_set_tid_address(u64 tidptr) {
+    u64 as;
+    if (tidptr != 0) {
+        if ((tidptr & 3ULL) != 0) {
+            return (u64)(-22); /* EINVAL */
+        }
+        as = sched_current_as_h();
+        if (as == 0 || !mem.as_user_range_ok(as, tidptr, 4)) {
+            return (u64)(-22);
+        }
+    }
+    sched_set_clear_child_tid(tidptr);
     return (u64)sched_current_tid();
 }
 

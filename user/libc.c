@@ -1089,6 +1089,7 @@ extern long u_exit(long code);
 extern long u_gettid(void);
 extern long u_yield(void);
 extern long u_arch_prctl(long code, unsigned long addr);
+extern long u_set_tid_address(volatile unsigned int *tidptr);
 
 enum {
     PTHREAD_CLONE_FLAGS = 0x00010F00, /* CLONE_VM|FS|FILES|SIGHAND|THREAD */
@@ -1101,7 +1102,8 @@ enum {
     ARCH_GET_FS         = 0x1003,
     PT_EMPTY            = 0,
     PT_LIVE             = 1,
-    PT_DEAD             = 2
+    PT_DEAD             = 2,
+    PT_CTID_PENDING     = 0x80000000
 };
 
 typedef unsigned long pthread_t;
@@ -1118,7 +1120,7 @@ struct pthread_tls {
 struct pthread_start {
     void *(*fn)(void *);
     void *arg;
-    volatile unsigned int done; /* 0 running, 1 exited (futex word) */
+    volatile unsigned int done; /* CLEARTID word: non-0 alive, 0 after exit */
     volatile unsigned int detached;
     void *retval;
     unsigned char *stack_base;
@@ -1223,21 +1225,25 @@ static void pthread_finish(struct pthread_start *s, void *retval) {
     }
     tid = s->tls.tid;
     s->retval = retval;
-    s->done = 1;
     if (tid != 0) {
         pthread_tab_mark_dead(tid, retval);
     }
-    futex(&s->done, FUTEX_WAKE, 0x7fffffff, 0, 0, 0);
+    /* Join waiters wake via kernel CLEARTID (*done=0 + futex) on exit. */
     u_exit(0);
 }
 
 static void pthread_boot(void *p) {
     struct pthread_start *s;
     void *ret;
+    unsigned long tid;
     s = (struct pthread_start *)p;
+    tid = (unsigned long)u_gettid();
     s->tls.self = &s->tls;
-    s->tls.tid = (unsigned long)u_gettid();
+    s->tls.tid = tid;
     s->tls.owner = s;
+    /* Publish tid into CLEARTID word, then register with the kernel. */
+    s->done = (unsigned int)tid;
+    u_set_tid_address(&s->done);
     arch_prctl(ARCH_SET_FS, (unsigned long)&s->tls);
     ret = s->fn(s->arg);
     pthread_finish(s, ret);
@@ -1274,7 +1280,7 @@ int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *)
     s = (struct pthread_start *)stack;
     s->fn = start_routine;
     s->arg = arg;
-    s->done = 0;
+    s->done = (unsigned int)PT_CTID_PENDING;
     s->detached = 0;
     s->retval = 0;
     s->stack_base = stack;
@@ -1300,6 +1306,7 @@ int pthread_join(pthread_t thread, void **retval) {
     struct pthread_start *s;
     void *rv;
     long r;
+    unsigned int v;
     i = pthread_tab_index((unsigned long)thread);
     if (i < 0) {
         return -1;
@@ -1313,12 +1320,15 @@ int pthread_join(pthread_t thread, void **retval) {
     } else if (s == 0) {
         return -1;
     } else {
-        while (s->done == 0) {
-            r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+        /* Wait until kernel CLEARTID stores 0. Futex on the observed value. */
+        v = s->done;
+        while (v != 0) {
+            r = futex(&s->done, FUTEX_WAIT, v, 0, 0, 0);
             while (r == -4) {
-                r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+                r = futex(&s->done, FUTEX_WAIT, v, 0, 0, 0);
             }
             (void)r;
+            v = s->done;
         }
         rv = s->retval;
         pthread_tab[i].retval = rv;

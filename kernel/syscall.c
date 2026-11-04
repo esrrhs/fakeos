@@ -22,6 +22,8 @@ extern u32 sched_is_secondary_thread(void);
 extern u32 sched_current_tid(void);
 extern void sched_set_fs_base(u64 base);
 extern u64 sched_get_fs_base(void);
+extern void sched_set_clear_child_tid(u64 addr);
+extern void sched_do_clear_child_tid(void);
 extern void sched_replace_as(u64 new_as_h);
 extern void sched_yield(void);
 extern u32 sched_fd_close_all(void);
@@ -66,6 +68,7 @@ extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
 extern u64 sys_gettid(void);
 extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
+extern u64 sys_set_tid_address(u64 tidptr);
 
 /* proc.c */
 extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
@@ -176,7 +179,8 @@ enum {
     SC_RT_SIGRETURN = 15,
     SC_NICE = 89,
     SC_FTRUNCATE = 77,
-    SC_ARCH_PRCTL = 158
+    SC_ARCH_PRCTL = 158,
+    SC_SET_TID_ADDRESS = 218
 };
 
 enum {
@@ -290,6 +294,8 @@ void proc_terminate(u64 code) {
     if (sched_is_secondary_thread()) {
         kprintf("[UPROC] tid %u of pid %u exited (code %u)\n",
                 (u64)sched_current_tid(), (u64)pid, code);
+        /* CLEARTID before dropping the shared AS mapping. */
+        sched_do_clear_child_tid();
         sched_fd_close_all();
         as_h = sched_current_as_h();
         mem.as_activate_h(0);
@@ -321,6 +327,8 @@ void proc_terminate(u64 code) {
         sched_wakeup(sched_wait4_chan(1));
     }
 
+    /* CLEARTID while AS still mapped, then close fds and tear down. */
+    sched_do_clear_child_tid();
     /* Close all open files, then leave the doomed address space before its
      * page tables are freed. The DEAD TCB slot stays until wait4 reaps it. */
     sched_fd_close_all();
@@ -403,6 +411,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_ARCH_PRCTL) {
         return sys_arch_prctl(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_SET_TID_ADDRESS) {
+        return sys_set_tid_address(f->rdi);
     }
     if (f->rax == SC_FUTEX) {
         return sys_futex(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);
