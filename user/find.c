@@ -4,9 +4,10 @@
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
  * folds A-Z), -path GLOB (full path *,? only), -type f|d, -empty (empty
  * regular file or empty directory), -prune (do not descend into a matched
- * directory), -print, -maxdepth N, -mindepth N (start points are depth 0;
- * GNU-ish). Uses lstat(2). No -o/parens. Thin -prune: when predicates match
- * a directory, skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
+ * directory), -print / -print0 (NUL-terminated paths; pairs with xargs -0),
+ * -maxdepth N, -mindepth N (start points are depth 0; GNU-ish). Uses
+ * lstat(2). No -o/parens. Thin -prune: when predicates match a directory,
+ * skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -47,6 +48,7 @@ static char path_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int want_empty;
 static int do_print = 1;
+static int print_nul; /* -print0 */
 static int want_prune;
 static int max_depth = DEPTH_UNLIM;
 static int min_depth = 0;
@@ -169,8 +171,16 @@ static int match_preds(const char *path, unsigned int mode, const char *st) {
 }
 
 static void emit(const char *path) {
+    unsigned long n;
     if (!do_print) return;
-    printf("%s\n", path);
+    n = strlen(path);
+    if (n > 0) u_write(1, path, n);
+    if (print_nul) {
+        char z = 0;
+        u_write(1, &z, 1);
+    } else {
+        u_write(1, "\n", 1);
+    }
 }
 
 static void join_path(char *out, unsigned long cap, const char *dir,
@@ -203,6 +213,7 @@ static int is_primary(const char *a) {
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-empty") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
+    if (strcmp(a, "-print0") == 0) return 1;
     if (strcmp(a, "-prune") == 0) return 1;
     if (strcmp(a, "-maxdepth") == 0) return 1;
     if (strcmp(a, "-mindepth") == 0) return 1;
@@ -362,6 +373,13 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[ai], "-print") == 0) {
             do_print = 1;
+            print_nul = 0;
+            ai++;
+            continue;
+        }
+        if (strcmp(argv[ai], "-print0") == 0) {
+            do_print = 1;
+            print_nul = 1;
             ai++;
             continue;
         }
@@ -386,7 +404,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print]\n", 116);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print|-print0]\n", 123);
         return 1;
     }
 

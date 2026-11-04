@@ -1870,6 +1870,13 @@ compare / length / index / substr. No new `/bin` dent. Focused virtio login
 smoke covers `expr :` + prior greens including od -t a (smp 1/2). Ramfs
 `/bin` dents ~114/128.
 
+## find -print0 — landed
+
+`/bin/find -print0` emits NUL-terminated paths (pairs with `xargs -0`).
+Keeps `-print` and other primaries. No new `/bin` dent. Focused virtio
+login smoke covers `find -print0` + prior greens including expr : (smp
+1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1877,6 +1884,6 @@ smoke covers `expr :` + prior greens including od -t a (smp 1/2). Ramfs
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (`cp -p`
-   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `basename -z` / `pathchk -P` / expr capture /
+   other util flags on existing `/bin` (`cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
