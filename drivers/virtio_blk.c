@@ -24,7 +24,7 @@ extern u8 pci_read8(u8 bus, u8 slot, u8 func, u8 offset);
 extern void ioapic_route_irq_level(u32 irq, u32 vector);
 extern void cpu_pause(void);
 extern void io_wait(void);
-extern void sched_sleep(u64 chan);
+extern void sched_yield(void);
 extern void sched_wakeup(u64 chan);
 extern u32 sched_is_active(void);
 
@@ -35,9 +35,9 @@ extern u32 sched_is_active(void);
  * device exposes modern vendor caps (common/notify/ISR/device) and no usable
  * legacy I/O BAR0, or when `make qemu-modern` omits disable-modern, the modern
  * path maps those MMIO windows and programs queue_desc/driver/device. MSI-X
- * (preferred) or MSI on vector 41 drives used-ring completion; the request
- * path sleeps on a channel when the scheduler is live, with a polled fallback.
- * Port I/O / MMIO peeks in the poll loop keep QEMU/TCG retiring host AIO.
+ * (preferred) or MSI on vector 41 can wake waiters; the request path always
+ * pumps io_wait + sched_yield (not chan-sleep) so QEMU/TCG retires host AIO.
+ * Chan-sleep under a live scheduler deadlocked the first userspace Ext2 op.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -422,8 +422,13 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
 
     queue_notify();
 
-    /* Wait for used-ring advance: IRQ sleep when armed + scheduler live,
-     * else spin with occasional port I/O so QEMU/TCG retires host AIO. */
+    /* Wait for used-ring advance. Always pump io_wait so QEMU/TCG retires
+     * host AIO. Chan-sleep once the scheduler is live deadlocks under TCG:
+     * ext2 selftests run pre-sched (spin path works), then the first
+     * userspace Ext2 op (mkdir/open) sleeps waiting for an MSI that never
+     * arrives without VCPU poll — the long-standing post-COW login stall.
+     * Yield cooperatively when sched is up; MSI wakeup remains a fast path
+     * if the IRQ lands mid-spin. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vb.used_phys + 2);
@@ -431,10 +436,11 @@ static u32 blk_request(u32 type, u64 sector, u64 data_phys, u32 len) {
             break;
         }
         spins++;
-        if (vb.irq_armed && sched_is_active() && (spins & 63) == 0) {
-            sched_sleep(VBLK_WAIT_CHAN);
-        } else if ((spins & 255) == 0) {
+        if ((spins & 255) == 0) {
             io_wait();
+        }
+        if (sched_is_active() && (spins & 63) == 0) {
+            sched_yield();
         }
         if (spins > POLL_SPINS_MAX) {
             kprintf("[VIRTIO] blk request timeout (type=%u sector=%u)\n",

@@ -93,14 +93,17 @@ static void file_test(void) {
     long n;
     long i;
 
-    fd = u_open("/test.txt", 0x42, 0);       /* O_RDWR | O_CREAT */
+    /* Use /tmp (Ramfs overlay). Unclaimed paths like /test.txt route to Ext2
+     * when a disk is mounted; that was masking the virtio-blk TCG stall as a
+     * mysterious hang inside "vfs file" before login. */
+    fd = u_open("/tmp/test.txt", 0x42, 0);       /* O_RDWR | O_CREAT */
     if (fd < 0) {
-        puts("[U][FAIL] open O_CREAT /test.txt");
+        puts("[U][FAIL] open O_CREAT /tmp/test.txt");
         return;
     }
     if (u_write(fd, pat, (unsigned long)pat_len) != pat_len
         || u_write(fd, pat, (unsigned long)pat_len) != pat_len) {
-        puts("[U][FAIL] write /test.txt");
+        puts("[U][FAIL] write /tmp/test.txt");
         u_close(fd);
         return;
     }
@@ -138,8 +141,8 @@ static void file_test(void) {
     u_close(fd);
 
     /* Negative cases must fail safely without killing the process. */
-    if (u_open("/no/such/file", 0, 0) != -1) {
-        puts("[U][FAIL] open missing path should fail");
+    if (u_open("/tmp/no-such-file", 0, 0) != -1) {
+        puts("[U][FAIL] open missing /tmp path should fail");
         return;
     }
     if (u_close(99) != -1 || u_read(99, buf, 1) != -1) {
