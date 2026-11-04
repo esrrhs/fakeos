@@ -403,6 +403,16 @@ serial; max 6 files; one `-` stdin). Focused virtio login smoke covers
 `mktemp`/`-d`/`-u`, `printf|rev`, `paste`/`-s`/`-d:`, plus prior interactive
 greens (smp 1/2).
 
+## /bin/expand + /bin/unexpand — landed
+
+Thin text-pipeline pair. `expand [-t N|-tN] [FILE...]` converts tabs to spaces
+(default stops every 8 columns). `unexpand [-a] [-t N|-tN] [FILE...]` converts
+spaces to tabs (default leading blanks only; `-a` or `-t` converts all blank
+runs that hit a stop). Compact glued `-tN` keeps argv under `EXEC_MAX_ARGC=8`.
+Focused virtio login smoke covers `printf|expand`, `expand -t4`,
+`printf|unexpand`/`-a`/`-t4`, round-trip `expand|unexpand`, plus prior
+interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -410,7 +420,7 @@ greens (smp 1/2).
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: thin utils still missing (`which`/`type` external,
-   `dirname` already present; consider `split`/`csplit`, `expand`/`unexpand`,
-   `comm`, `join`, `fmt`) — prefer small coherent pairs.
+   `dirname` already present; consider `split`/`csplit`, `comm`/`join`,
+   `fmt`, external `/bin/which`) — prefer small coherent pairs.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.

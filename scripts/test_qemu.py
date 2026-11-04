@@ -440,6 +440,8 @@ def main():
         "[FS] published /bin/mktemp (",
         "[FS] published /bin/rev (",
         "[FS] published /bin/paste (",
+        "[FS] published /bin/expand (",
+        "[FS] published /bin/unexpand (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
