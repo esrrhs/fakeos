@@ -476,6 +476,8 @@ def main():
         "[FS] published /bin/pathchk (",
         "[FS] published /bin/logname (",
         "[FS] published /bin/nohup (",
+        "[FS] published /bin/find (",
+        "[FS] published /bin/du (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",

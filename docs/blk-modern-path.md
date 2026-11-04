@@ -630,16 +630,26 @@ Shell has no builtin `mv` — external only. Focused virtio login smoke covers
 Ramfs rename tree, cross-FS Ramfs→Ext2 copy+rm, into-dir, cycle refuse, prior
 interactive greens (smp 1/2). Ramfs `/bin` dents 98/128.
 
+
+## /bin/find + /bin/du — landed
+
+Thin tree-walk pair for daily-driver scripting (no kernel work). `find
+[PATH...] [-name GLOB] [-type f|d] [-print]` walks with `getdents`+`lstat`;
+paths are argv before the first primary (default `.`); `-name` matches the
+basename with `*`/`?` only; predicates AND; default action `-print`. `du
+[-a] [-s] [FILE...]` sums apparent `st_size` (1024-byte units, ceil); default
+prints each subdirectory total; `-a` includes files; `-s` summary only.
+Focused virtio login smoke covers find name/type, du -s/-a, Ext2 walk, prior
+interactive greens (smp 1/2). Ramfs `/bin` dents 100/128.
+
 ## Suggested next steps
 
-1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
-   coherent fix exists; otherwise leave known flakes.
-3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (`mv` recursive +
+1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
+   clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
+2. Deep jbd — avoid unless needed.
+3. More daily-driver gaps after inventory (`find`/`du` + `mv` recursive +
    `cp -r` + cp/mv dir targets + rmdir -p + logname/nohup + tsort/pathchk +
-   rmdir/unlink + tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
-   factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
-   small coherent chunks such as `head`/`tail` polish, or other thin POSIX
-   still missing. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
+   … already present): prefer small coherent chunks such as `shuf`,
+   `head`/`tail` polish (`-c`), thin `df` (needs `statfs`), or other missing
+   thin POSIX. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
    unless a clear bite-sized fix.
