@@ -59,6 +59,7 @@ global u_ftruncate
 global u_futex
 global u_gettid
 global u_clone
+global u_arch_prctl
 
 section .text
 
@@ -298,6 +299,10 @@ u_futex:
     mov     eax, 202
     syscall
     ret
+
+
+; long u_arch_prctl(long code, unsigned long addr) -- Linux nr 158
+USYSC1 u_arch_prctl, 158
 
 ; void u_exit(long code) - does not return
 align 16

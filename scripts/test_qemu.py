@@ -330,6 +330,7 @@ def main():
         "[U][PASS] futex WAIT/WAKE",
         "[U][PASS] pthread_mutex futex lock/unlock",
         "[U][PASS] pthread_create clone same-AS",
+        "[U][PASS] pthread_join + FS TLS",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
         "[PASS] CFS-lite",
@@ -393,7 +394,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: pthread_create/clone + Ext2 rename + futex + AP trampoline online!",
+        "[SUCCESS] fakeos: pthread_join/FS TLS + clone + Ext2 rename + futex + AP trampoline online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

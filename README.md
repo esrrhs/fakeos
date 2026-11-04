@@ -204,6 +204,7 @@ flowchart TD
 - [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。
 - [x] **clone(2) / pthread_create basics**：`CLONE_VM|CLONE_THREAD` 同 AS 新 tid（`gettid`）；AS `refs` retain/release；libc `pthread_create`（mmap 栈 + start trampoline）；自测 `[U][PASS] pthread_create clone same-AS`。
+- [x] **pthread_join + FS TLS**：`arch_prctl(ARCH_SET_FS/GET_FS)` + 调度切换恢复 `MSR_FS_BASE`；libc `pthread_join`（futex）/`pthread_self`；自测 `[U][PASS] pthread_join + FS TLS`。
 
 
 

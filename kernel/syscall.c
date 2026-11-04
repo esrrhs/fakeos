@@ -20,6 +20,8 @@ extern u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid);
 extern u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid);
 extern u32 sched_is_secondary_thread(void);
 extern u32 sched_current_tid(void);
+extern void sched_set_fs_base(u64 base);
+extern u64 sched_get_fs_base(void);
 extern void sched_replace_as(u64 new_as_h);
 extern void sched_yield(void);
 extern u32 sched_fd_close_all(void);
@@ -171,7 +173,8 @@ enum {
     SC_RT_SIGACTION = 13,
     SC_RT_SIGRETURN = 15,
     SC_NICE = 89,
-    SC_FTRUNCATE = 77
+    SC_FTRUNCATE = 77,
+    SC_ARCH_PRCTL = 158
 };
 
 enum {
@@ -192,6 +195,31 @@ void syscall_init(void) {
     msr_write(MSR_LSTAR, (u64)(&syscall_entry));
     msr_write(MSR_SFMASK, 0x600);
     msr_write(MSR_EFER, msr_read(MSR_EFER) | 1);    /* EFER.SCE: enable SYSCALL */
+}
+
+/* arch_prctl(2): ARCH_SET_FS / ARCH_GET_FS for per-thread TLS (FS base). */
+static u64 sys_arch_prctl(u64 code, u64 addr) {
+    enum {
+        ARCH_SET_FS = 0x1002,
+        ARCH_GET_FS = 0x1003
+    };
+    u64 as;
+    if (code == ARCH_SET_FS) {
+        sched_set_fs_base(addr);
+        return 0;
+    }
+    if (code == ARCH_GET_FS) {
+        as = sched_current_as_h();
+        if (as == 0 || addr == 0) {
+            return (u64)(-1);
+        }
+        if (!mem.as_user_range_ok(as, addr, 8)) {
+            return (u64)(-1);
+        }
+        *(volatile u64 *)addr = sched_get_fs_base();
+        return 0;
+    }
+    return (u64)(-1);
 }
 
 enum {
@@ -370,6 +398,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_GETTID) {
         return sys_gettid();
+    }
+    if (f->rax == SC_ARCH_PRCTL) {
+        return sys_arch_prctl(f->rdi, f->rsi);
     }
     if (f->rax == SC_FUTEX) {
         return sys_futex(f->rdi, f->rsi, f->rdx, f->r10, f->r8, f->r9);

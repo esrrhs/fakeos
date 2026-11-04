@@ -1079,37 +1079,110 @@ int pthread_mutex_unlock(pthread_mutex_t *m) {
 }
 
 
-/* ---- pthread_create via clone(CLONE_VM|CLONE_THREAD) ---------------------- */
+/* ---- arch_prctl FS TLS + pthread_create/join -------------------------------- */
 extern long u_clone(unsigned long flags, void *stack, void *fn, void *arg);
 extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
                    long fd, long off);
 extern long u_exit(long code);
 extern long u_gettid(void);
 extern long u_yield(void);
+extern long u_arch_prctl(long code, unsigned long addr);
 
 enum {
     PTHREAD_CLONE_FLAGS = 0x00010F00, /* CLONE_VM|FS|FILES|SIGHAND|THREAD */
     PTHREAD_STACK_SIZE  = 65536,
+    PTHREAD_MAX         = 16,
     MAP_SHARED_ANON     = 0x21,
     MAP_PRIVATE_ANON    = 0x22,
-    PROT_RW             = 3
+    PROT_RW             = 3,
+    ARCH_SET_FS         = 0x1002,
+    ARCH_GET_FS         = 0x1003
 };
 
 typedef unsigned long pthread_t;
 
+/* Minimal TCB parked in FS base: self pointer at offset 0 (pthread_self). */
+struct pthread_tls {
+    struct pthread_tls *self;
+    unsigned long tid;
+};
+
 struct pthread_start {
     void *(*fn)(void *);
     void *arg;
+    volatile unsigned int done; /* 0 running, 1 exited (futex word) */
+    unsigned int _pad;
+    void *retval;
+    unsigned char *stack_base;
+    struct pthread_tls tls;
 };
+
+static struct {
+    unsigned long tid;
+    struct pthread_start *s;
+} pthread_tab[PTHREAD_MAX];
+
+static int pthread_tab_add(unsigned long tid, struct pthread_start *s) {
+    int i;
+    for (i = 0; i < PTHREAD_MAX; i++) {
+        if (pthread_tab[i].tid == 0) {
+            pthread_tab[i].tid = tid;
+            pthread_tab[i].s = s;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static struct pthread_start *pthread_tab_take(unsigned long tid) {
+    int i;
+    struct pthread_start *s;
+    for (i = 0; i < PTHREAD_MAX; i++) {
+        if (pthread_tab[i].tid == tid) {
+            s = pthread_tab[i].s;
+            pthread_tab[i].tid = 0;
+            pthread_tab[i].s = 0;
+            return s;
+        }
+    }
+    return 0;
+}
+
+long arch_prctl(long code, unsigned long addr) {
+    return u_arch_prctl(code, addr);
+}
+
+pthread_t pthread_self(void) {
+    unsigned long fs;
+    struct pthread_tls *t;
+    if (arch_prctl(ARCH_GET_FS, (unsigned long)&fs) != 0 || fs == 0) {
+        return (pthread_t)u_gettid();
+    }
+    t = (struct pthread_tls *)fs;
+    if (t->self != t) {
+        return (pthread_t)u_gettid();
+    }
+    return (pthread_t)t->tid;
+}
 
 static void pthread_boot(void *p) {
     struct pthread_start *s;
-    void *(*fn)(void *);
-    void *arg;
+    void *ret;
     s = (struct pthread_start *)p;
-    fn = s->fn;
-    arg = s->arg;
-    fn(arg);
+    s->tls.self = &s->tls;
+    s->tls.tid = (unsigned long)u_gettid();
+    arch_prctl(ARCH_SET_FS, (unsigned long)&s->tls);
+    ret = s->fn(s->arg);
+    s->retval = ret;
+    s->done = 1;
+    futex(&s->done, FUTEX_WAKE, 0x7fffffff, 0, 0, 0);
+    u_exit(0);
+}
+
+void pthread_exit(void *retval) {
+    /* Return value for join is normally published by pthread_boot when the
+     * start routine returns. Direct pthread_exit skips that path for now. */
+    (void)retval;
     u_exit(0);
 }
 
@@ -1132,12 +1205,41 @@ int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *)
     s = (struct pthread_start *)stack;
     s->fn = start_routine;
     s->arg = arg;
+    s->done = 0;
+    s->_pad = 0;
+    s->retval = 0;
+    s->stack_base = stack;
+    s->tls.self = 0;
+    s->tls.tid = 0;
     sp = stack + PTHREAD_STACK_SIZE;
     sp = (unsigned char *)((unsigned long)sp & ~0xFUL);
     tid = u_clone((unsigned long)PTHREAD_CLONE_FLAGS, sp, pthread_boot, s);
     if (tid < 0) {
         return -1;
     }
+    if (pthread_tab_add((unsigned long)tid, s) != 0) {
+        /* Table full: thread still runs; join will fail with ESRCH-ish. */
+    }
     *thread = (pthread_t)tid;
+    return 0;
+}
+
+int pthread_join(pthread_t thread, void **retval) {
+    struct pthread_start *s;
+    long r;
+    s = pthread_tab_take((unsigned long)thread);
+    if (s == 0) {
+        return -1;
+    }
+    while (s->done == 0) {
+        r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+        while (r == -4) {
+            r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+        }
+        (void)r;
+    }
+    if (retval != 0) {
+        *retval = s->retval;
+    }
     return 0;
 }

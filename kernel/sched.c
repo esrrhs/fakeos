@@ -27,6 +27,9 @@ extern u32 ext2_close(u32 fh);
 extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
 extern void switch_context(u64 *prev_rsp, u64 next_rsp);
+extern void msr_write(u32 msr, u64 value);
+
+enum { MSR_FS_BASE = 0xC0000100 };
 
 /* New-kernel-thread landing point in arch/x86_64/switch.asm. */
 extern void thread_trampoline(void);
@@ -68,6 +71,7 @@ struct tcb {
     u64 arg;           /* Single u64 argument                             */
     u64 as_h;          /* Address space handle (0 = kernel space)         */
     u64 wait_chan;     /* Sleep channel (0 = not waiting on a waitqueue)  */
+    u64 fs_base;       /* MSR_FS_BASE (arch_prctl TLS); restored on switch */
     u32 state;
     u32 id;
     u32 pid;           /* User process id (0 for kernel threads)          */
@@ -213,6 +217,7 @@ void sched_init(void) {
         threads[i].arg = 0;
         threads[i].as_h = 0;
         threads[i].wait_chan = 0;
+        threads[i].fs_base = 0;
         threads[i].pid = 0;
         threads[i].tid = 0;
         threads[i].ppid = 0;
@@ -355,6 +360,7 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].arg = arg;
     threads[i].as_h = 0;
     threads[i].wait_chan = 0;
+    threads[i].fs_base = 0;
     threads[i].pid = 0;
     threads[i].tid = 0;
     threads[i].ppid = 0;
@@ -400,6 +406,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].arg = 0;
     threads[i].as_h = as_h;
     threads[i].wait_chan = 0;
+    threads[i].fs_base = 0;
     threads[i].pid = pid;
     threads[i].tid = pid;              /* leader: tid == pid */
     threads[i].ppid = 0;
@@ -472,6 +479,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].arg = 0;
     threads[i].as_h = child_as_h;
     threads[i].wait_chan = 0;
+    threads[i].fs_base = threads[current].fs_base; /* fork inherits TLS base */
     threads[i].pid = child_pid;
     threads[i].tid = child_pid;        /* new process leader */
     threads[i].ppid = threads[current].pid;
@@ -558,6 +566,7 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     threads[i].arg = arg;
     threads[i].as_h = threads[current].as_h;
     threads[i].wait_chan = 0;
+    threads[i].fs_base = 0;            /* child installs TLS via arch_prctl */
     threads[i].pid = threads[current].pid;
     threads[i].tid = child_tid;
     threads[i].ppid = threads[current].ppid;
@@ -614,6 +623,9 @@ static void schedule_tail(u32 prev, u32 next) {
     if (threads[next].as_h != threads[prev].as_h) {
         mem.as_activate_h(threads[next].as_h);
     }
+    /* Per-thread TLS: install next FS base before the stack switch so the
+     * resumed thread sees its arch_prctl value (0 clears FS). */
+    msr_write((u32)MSR_FS_BASE, threads[next].fs_base);
     switch_context(&threads[prev].rsp, threads[next].rsp);
 }
 
@@ -834,6 +846,16 @@ u64 sys_nice(u64 inc) {
 
 u64 sched_tick_count(void) {
     return sched_ticks;
+}
+
+/* arch_prctl TLS: SET_FS updates TCB + live MSR; GET_FS reads TCB. */
+void sched_set_fs_base(u64 base) {
+    threads[current].fs_base = base;
+    msr_write((u32)MSR_FS_BASE, base);
+}
+
+u64 sched_get_fs_base(void) {
+    return threads[current].fs_base;
 }
 
 u32 sched_current_id(void) {
