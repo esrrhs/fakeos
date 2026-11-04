@@ -18,11 +18,12 @@ extern void kprintf(const char *fmt, ...);
  * double-/triple-indirect maps. Hardening: free-count bookkeeping in
  * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered/
  * writeback commit modes with recovery markers in unused SB space
- * (magic/gen/flags/mode/jblk); a real on-disk commit block records
- * OPEN/COMMIT for the current gen. Dirty or incomplete META_PENDING
- * mounts recount free bits; META_PENDING with a matching COMMIT block
- * clears the marker without recount (SB idle write lost after commit).
- * ORDERED flushes data before the COMMIT block (not a full jbd).
+ * (magic/gen/flags/mode/jblk); journal control block + ring slots hold
+ * DESCRIPTOR / REVOKE / COMMIT records across multiple txns. Dirty or
+ * incomplete META_PENDING mounts recount free bits; META_PENDING with a
+ * matching COMMIT in the ring clears the marker without recount (SB idle
+ * write lost after commit). ORDERED flushes data before COMMIT (not a
+ * full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -156,6 +157,10 @@ static void bitmap_clr(u8 *bm, u32 bit) {
     bm[bit / 8] = (u8)(bm[bit / 8] & (u8)(~(1u << (bit % 8))));
 }
 
+static void jl_desc_add(u32 blk);
+static void jl_revoke_add(u32 blk);
+static u32 jl_is_journal_blk(u32 blk);
+
 /* Load block-group descriptor `g` from the BGDT. */
 static u32 bg_load(u32 g, struct ext2_bg *out) {
     u32 descs_per = sb.block_size / 32;
@@ -177,6 +182,7 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
     u32 descs_per = sb.block_size / 32;
     u32 blk;
     u32 off;
+    u32 ok;
     if (g >= sb.groups_count) return 0;
     blk = sb.bg_block + g / descs_per;
     off = (g % descs_per) * 32;
@@ -186,17 +192,23 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
     wr32(blk_buf + off + 8, in->inode_table);
     wr16(blk_buf + off + 12, (u16)in->free_blocks);
     wr16(blk_buf + off + 14, (u16)in->free_inodes);
-    return bwrite(blk, blk_buf);
+    ok = bwrite(blk, blk_buf);
+    if (ok) jl_desc_add(blk);
+    return ok;
 }
 
-/* Journal-lite markers in otherwise-unused SB bytes + one commit block
- * (not a full jbd). ORDERED: device FLUSH before writing the COMMIT record
+/* Journal-lite markers in unused SB bytes + control block + ring slots
+ * (not a full jbd). Ring records: DESCRIPTOR (dirtied meta blocks),
+ * REVOKE (freed blocks), COMMIT. ORDERED: device FLUSH before COMMIT
  * (data-before-commit). WRITEBACK: COMMIT without the extra data FLUSH
- * (fsync/sync still drain). Recovery: matching COMMIT gen clears a stale
- * META_PENDING without recount; otherwise recount free bits. */
+ * (fsync/sync still drain). Recovery: matching COMMIT gen in the ring
+ * clears a stale META_PENDING without recount; otherwise recount. */
 enum {
-    JL_MAGIC = 0x4C4A3146u,   /* 'F1JL' */
+    JL_MAGIC = 0x4C4A3146u,        /* 'F1JL' SB marker */
+    JL_CTRL_MAGIC = 0x4B4A3146u,   /* 'F1JK' journal control */
     JL_COMMIT_MAGIC = 0x434A3146u, /* 'F1JC' */
+    JL_DESC_MAGIC = 0x444A3146u,   /* 'F1JD' descriptor tags */
+    JL_REVOKE_MAGIC = 0x524A3146u, /* 'F1JR' revoke tags */
     JL_OFF_MAGIC = 248,
     JL_OFF_GEN = 252,
     JL_OFF_FLAGS = 256,
@@ -209,6 +221,8 @@ enum {
     JL_J_IDLE = 0,
     JL_J_OPEN = 1,
     JL_J_COMMIT = 2,
+    JL_RING_MAX = 8,
+    JL_MAX_TAGS = 32,
     EXT2_VALID_FS = 1,
     EXT2_ERROR_FS = 2
 };
@@ -216,7 +230,15 @@ enum {
 static u32 jl_gen;
 static u32 jl_flags;
 static u32 jl_mode = JL_MODE_ORDERED;
-static u32 jl_jblk;                 /* FS block holding OPEN/COMMIT record */
+static u32 jl_jblk;                 /* FS block: journal control */
+static u32 jl_ring[JL_RING_MAX];    /* log slot FS blocks */
+static u32 jl_ring_len;
+static u32 jl_ring_head;            /* next slot index */
+static u32 jl_seq;                  /* monotonic record sequence */
+static u32 jl_desc_tags[JL_MAX_TAGS];
+static u32 jl_desc_n;
+static u32 jl_rev_tags[JL_MAX_TAGS];
+static u32 jl_rev_n;
 
 static u32 alloc_block(void);
 
@@ -249,54 +271,247 @@ static void jl_set_mode(u32 mode) {
     jl_mode = mode;
 }
 
-/* Write OPEN/COMMIT/IDLE record into the reserved journal commit block. */
-static u32 jl_write_jrec(u16 state) {
-    u32 i;
-    if (jl_jblk == 0) return 0;
-    for (i = 0; i < sb.block_size; i++) blk_buf[i] = 0;
-    wr32(blk_buf + 0, JL_COMMIT_MAGIC);
-    wr32(blk_buf + 4, jl_gen);
-    wr16(blk_buf + 8, state);
-    return bwrite(jl_jblk, blk_buf);
-}
-
 static u32 jl_jblk_sane(u32 blk) {
     if (blk < sb.first_data_block || blk >= sb.blocks_count) return 0;
     if (blk <= sb.bg_block) return 0;
     return 1;
 }
 
-/* Allocate (once) and persist the journal commit block. */
-static u32 jl_ensure_jblk(void) {
-    u32 b;
-    if (jl_jblk_sane(jl_jblk)) return 1;
-    b = alloc_block();
-    if (b == 0) {
-        kprintf("[EXT2] [FAIL] journal commit block alloc\n");
-        return 0;
+static u32 jl_is_journal_blk(u32 blk) {
+    u32 i;
+    if (blk == 0) return 0;
+    if (jl_jblk != 0 && blk == jl_jblk) return 1;
+    for (i = 0; i < jl_ring_len; i++) {
+        if (jl_ring[i] == blk) return 1;
     }
-    jl_jblk = b;
-    if (!jl_write_jrec(JL_J_IDLE)) return 0;
-    if (!sb_write_counts(0xFFFF)) return 0;
-    kprintf("[EXT2] journal commit block at blk %u\n", (u64)jl_jblk);
-    return 1;
+    return 0;
 }
 
-/* If META_PENDING and the commit block carries matching COMMIT, the txn
- * was durable and only the SB idle write was lost — clear the marker. */
-static u32 jl_try_commit_recover(void) {
+/* Persist control block: magic/len/head/seq + slot map. */
+static u32 jl_write_ctrl(void) {
+    u32 i;
+    if (!jl_jblk_sane(jl_jblk)) return 0;
+    for (i = 0; i < sb.block_size; i++) blk_buf[i] = 0;
+    wr32(blk_buf + 0, JL_CTRL_MAGIC);
+    wr16(blk_buf + 4, (u16)jl_ring_len);
+    wr16(blk_buf + 6, (u16)jl_ring_head);
+    wr32(blk_buf + 8, jl_seq);
+    for (i = 0; i < jl_ring_len && i < JL_RING_MAX; i++) {
+        wr32(blk_buf + 16 + i * 4, jl_ring[i]);
+    }
+    return bwrite(jl_jblk, blk_buf);
+}
+
+static u32 jl_load_ctrl(void) {
+    u32 i;
     u32 magic;
-    u32 gen;
-    u16 state;
-    if (jl_flags != JL_META_PENDING) return 0;
+    u32 n;
     if (!jl_jblk_sane(jl_jblk)) return 0;
     if (!bread(jl_jblk, blk_buf)) return 0;
     magic = rd32(blk_buf + 0);
-    gen = rd32(blk_buf + 4);
-    state = rd16(blk_buf + 8);
-    if (magic != JL_COMMIT_MAGIC) return 0;
-    if (gen != jl_gen) return 0;
-    if (state != JL_J_COMMIT) return 0;
+    if (magic != JL_CTRL_MAGIC) return 0;
+    n = rd16(blk_buf + 4);
+    if (n == 0 || n > JL_RING_MAX) return 0;
+    jl_ring_len = n;
+    jl_ring_head = rd16(blk_buf + 6);
+    if (jl_ring_head >= jl_ring_len) jl_ring_head = 0;
+    jl_seq = rd32(blk_buf + 8);
+    for (i = 0; i < jl_ring_len; i++) {
+        jl_ring[i] = rd32(blk_buf + 16 + i * 4);
+        if (!jl_jblk_sane(jl_ring[i])) return 0;
+    }
+    return 1;
+}
+
+/* Append one ring record; advances head + seq; persists control. */
+static u32 jl_ring_append(u32 magic, u32 gen, u16 state_or_ntag,
+                          const u32 *tags, u32 ntags) {
+    u32 slot;
+    u32 blk;
+    u32 i;
+    u32 max_tags;
+    u32 seq;
+    if (jl_ring_len == 0) return 0;
+    slot = jl_ring_head;
+    blk = jl_ring[slot];
+    if (!jl_jblk_sane(blk)) return 0;
+    for (i = 0; i < sb.block_size; i++) blk_buf[i] = 0;
+    seq = jl_seq;
+    wr32(blk_buf + 0, magic);
+    wr32(blk_buf + 4, gen);
+    wr32(blk_buf + 8, seq);
+    wr16(blk_buf + 12, state_or_ntag);
+    max_tags = (sb.block_size - 16) / 4;
+    if (ntags > max_tags) ntags = max_tags;
+    if (tags != 0) {
+        for (i = 0; i < ntags; i++) {
+            wr32(blk_buf + 16 + i * 4, tags[i]);
+        }
+    }
+    if (!bwrite(blk, blk_buf)) return 0;
+    jl_seq = seq + 1;
+    jl_ring_head = (slot + 1) % jl_ring_len;
+    return jl_write_ctrl();
+}
+
+/* Write COMMIT into the next ring slot (used by crash-sim selftest too). */
+static u32 jl_write_jrec(u16 state) {
+    return jl_ring_append(JL_COMMIT_MAGIC, jl_gen, state, 0, 0);
+}
+
+/* Tag a dirtied metadata FS block into the open txn descriptor list. */
+static void jl_desc_add(u32 blk) {
+    u32 i;
+    if (jl_flags != JL_META_PENDING) return;
+    if (blk == 0 || jl_is_journal_blk(blk)) return;
+    for (i = 0; i < jl_desc_n; i++) {
+        if (jl_desc_tags[i] == blk) return;
+    }
+    if (jl_desc_n >= JL_MAX_TAGS) return;
+    jl_desc_tags[jl_desc_n] = blk;
+    jl_desc_n++;
+}
+
+/* Tag a freed FS block into the open txn revoke list. */
+static void jl_revoke_add(u32 blk) {
+    u32 i;
+    if (jl_flags != JL_META_PENDING) return;
+    if (blk == 0 || jl_is_journal_blk(blk)) return;
+    for (i = 0; i < jl_rev_n; i++) {
+        if (jl_rev_tags[i] == blk) return;
+    }
+    if (jl_rev_n >= JL_MAX_TAGS) return;
+    jl_rev_tags[jl_rev_n] = blk;
+    jl_rev_n++;
+}
+
+/* Allocate (once) journal control + ring slots; upgrade old single-block. */
+static u32 jl_ensure_jblk(void) {
+    u32 i;
+    u32 b;
+    if (jl_jblk_sane(jl_jblk) && jl_load_ctrl()) {
+        return 1;
+    }
+    /* Fresh ring (or upgrade from pre-ring commit block). */
+    jl_ring_len = JL_RING_MAX;
+    jl_ring_head = 0;
+    jl_seq = 1;
+    for (i = 0; i < jl_ring_len; i++) jl_ring[i] = 0;
+    if (!jl_jblk_sane(jl_jblk)) {
+        b = alloc_block();
+        if (b == 0) {
+            kprintf("[EXT2] [FAIL] journal control block alloc\n");
+            return 0;
+        }
+        jl_jblk = b;
+    }
+    for (i = 0; i < jl_ring_len; i++) {
+        b = alloc_block();
+        if (b == 0) {
+            kprintf("[EXT2] [FAIL] journal ring slot %u alloc\n", (u64)i);
+            return 0;
+        }
+        jl_ring[i] = b;
+        /* Mark slot idle. */
+        {
+            u32 z;
+            for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
+            wr32(blk_buf + 0, JL_COMMIT_MAGIC);
+            wr32(blk_buf + 4, 0);
+            wr32(blk_buf + 8, 0);
+            wr16(blk_buf + 12, JL_J_IDLE);
+            if (!bwrite(b, blk_buf)) return 0;
+        }
+    }
+    if (!jl_write_ctrl()) return 0;
+    if (!sb_write_counts(0xFFFF)) return 0;
+    kprintf("[EXT2] journal ring ctrl=%u slots=%u\n",
+            (u64)jl_jblk, (u64)jl_ring_len);
+    return 1;
+}
+
+/* Scan ring for COMMIT matching jl_gen; used by mount recover + selftest. */
+static u32 jl_ring_find_commit(u32 want_gen) {
+    u32 i;
+    for (i = 0; i < jl_ring_len; i++) {
+        u32 magic;
+        u32 gen;
+        u16 state;
+        if (!jl_jblk_sane(jl_ring[i])) continue;
+        if (!bread(jl_ring[i], blk_buf)) continue;
+        magic = rd32(blk_buf + 0);
+        gen = rd32(blk_buf + 4);
+        state = rd16(blk_buf + 12);
+        if (magic == JL_COMMIT_MAGIC && gen == want_gen
+            && state == JL_J_COMMIT) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Count DESC/REVOKE/COMMIT records for gen (selftest / diagnostics). */
+static void jl_ring_count_gen(u32 want_gen, u32 *nd, u32 *nr, u32 *nc) {
+    u32 i;
+    *nd = 0;
+    *nr = 0;
+    *nc = 0;
+    for (i = 0; i < jl_ring_len; i++) {
+        u32 magic;
+        u32 gen;
+        u16 state;
+        if (!jl_jblk_sane(jl_ring[i])) continue;
+        if (!bread(jl_ring[i], blk_buf)) continue;
+        magic = rd32(blk_buf + 0);
+        gen = rd32(blk_buf + 4);
+        state = rd16(blk_buf + 12);
+        if (gen != want_gen) continue;
+        if (magic == JL_DESC_MAGIC) (*nd)++;
+        else if (magic == JL_REVOKE_MAGIC) (*nr)++;
+        else if (magic == JL_COMMIT_MAGIC && state == JL_J_COMMIT) (*nc)++;
+    }
+}
+
+/* True if any committed REVOKE in the ring lists blk. */
+static u32 jl_ring_revoked(u32 blk) {
+    u32 i;
+    u32 t;
+    for (i = 0; i < jl_ring_len; i++) {
+        u32 magic;
+        u16 ntags;
+        if (!jl_jblk_sane(jl_ring[i])) continue;
+        if (!bread(jl_ring[i], blk_buf)) continue;
+        magic = rd32(blk_buf + 0);
+        if (magic != JL_REVOKE_MAGIC) continue;
+        ntags = rd16(blk_buf + 12);
+        if (ntags > JL_MAX_TAGS) ntags = JL_MAX_TAGS;
+        for (t = 0; t < ntags; t++) {
+            if (rd32(blk_buf + 16 + t * 4) == blk) return 1;
+        }
+    }
+    return 0;
+}
+
+/* If META_PENDING and the ring carries matching COMMIT, the txn was
+ * durable and only the SB idle write was lost — clear the marker. */
+static u32 jl_try_commit_recover(void) {
+    if (jl_flags != JL_META_PENDING) return 0;
+    if (jl_ring_len == 0) {
+        /* Legacy single-block commit (pre-ring images). */
+        u32 magic;
+        u32 gen;
+        u16 state;
+        if (!jl_jblk_sane(jl_jblk)) return 0;
+        if (!bread(jl_jblk, blk_buf)) return 0;
+        magic = rd32(blk_buf + 0);
+        gen = rd32(blk_buf + 4);
+        state = rd16(blk_buf + 8);
+        if (magic != JL_COMMIT_MAGIC) return 0;
+        if (gen != jl_gen) return 0;
+        if (state != JL_J_COMMIT) return 0;
+    } else if (!jl_ring_find_commit(jl_gen)) {
+        return 0;
+    }
     jl_flags = JL_IDLE;
     if (!sb_write_counts(EXT2_ERROR_FS)) return 0;
     kprintf("[EXT2] [PASS] journal commit-block recover (gen=%u)\n",
@@ -306,25 +521,36 @@ static u32 jl_try_commit_recover(void) {
 
 static void jl_begin(void) {
     jl_gen++;
-    if (jl_jblk != 0) {
-        jl_write_jrec(JL_J_OPEN);
+    jl_desc_n = 0;
+    jl_rev_n = 0;
+    /* OPEN marker in ring (incomplete txn = OPEN/DESC without COMMIT). */
+    if (jl_ring_len != 0) {
+        jl_ring_append(JL_COMMIT_MAGIC, jl_gen, JL_J_OPEN, 0, 0);
     }
     jl_write_flags(JL_META_PENDING);
 }
 
-/* Commit: ORDERED drains data first; always write COMMIT record, then clear
- * META_PENDING. A second ORDERED flush makes the commit block durable before
- * the SB idle marker (crash between them is handled by commit recover). */
+/* Commit: ORDERED drains data; write DESCRIPTOR + optional REVOKE + COMMIT
+ * into the ring; then clear META_PENDING. A second ORDERED flush makes the
+ * commit durable before the SB idle marker. */
 static void jl_commit(void) {
     if (jl_mode == JL_MODE_ORDERED) {
         drivers.blk_flush();
     }
-    if (jl_jblk != 0) {
-        jl_write_jrec(JL_J_COMMIT);
+    if (jl_ring_len != 0) {
+        jl_ring_append(JL_DESC_MAGIC, jl_gen, (u16)jl_desc_n,
+                       jl_desc_tags, jl_desc_n);
+        if (jl_rev_n != 0) {
+            jl_ring_append(JL_REVOKE_MAGIC, jl_gen, (u16)jl_rev_n,
+                           jl_rev_tags, jl_rev_n);
+        }
+        jl_ring_append(JL_COMMIT_MAGIC, jl_gen, JL_J_COMMIT, 0, 0);
         if (jl_mode == JL_MODE_ORDERED) {
             drivers.blk_flush();
         }
     }
+    jl_desc_n = 0;
+    jl_rev_n = 0;
     jl_write_flags(JL_IDLE);
 }
 
@@ -414,7 +640,7 @@ static u32 alloc_block(void) {
                 if (i <= sb.bg_block) meta = 1;
                 if (i == bg.block_bitmap || i == bg.inode_bitmap) meta = 1;
                 if (i >= bg.inode_table && i < bg.inode_table + it_blocks) meta = 1;
-                if (jl_jblk != 0 && i == jl_jblk) meta = 1;
+                if (jl_is_journal_blk(i)) meta = 1;
                 if (meta) {
                     if (!bitmap_test(blk_buf, local)) {
                         bitmap_set(blk_buf, local);
@@ -426,6 +652,7 @@ static u32 alloc_block(void) {
             if (!bitmap_test(blk_buf, local)) {
                 bitmap_set(blk_buf, local);
                 if (!bwrite(bg.block_bitmap, blk_buf)) return 0;
+                jl_desc_add(bg.block_bitmap);
                 for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
                 if (!bwrite(i, blk_buf)) return 0;
                 if (bg.free_blocks > 0) bg.free_blocks--;
@@ -492,7 +719,7 @@ static void free_block_bit(u32 blk) {
     u32 base;
     if (blk < sb.first_data_block || blk >= sb.blocks_count) return;
     if (blk <= sb.bg_block) return;          /* never free SB / BGDT */
-    if (jl_jblk != 0 && blk == jl_jblk) return; /* journal commit block */
+    if (jl_is_journal_blk(blk)) return;      /* journal control / ring */
     g = group_of_block(blk);
     if (!bg_load(g, &bg)) return;
     {
@@ -501,11 +728,13 @@ static void free_block_bit(u32 blk) {
         if (blk == bg.block_bitmap || blk == bg.inode_bitmap) return;
         if (blk >= bg.inode_table && blk < bg.inode_table + it_blocks) return;
     }
+    jl_revoke_add(blk);
     base = sb.first_data_block + g * sb.blocks_per_group;
     local = (sb.groups_count == 1) ? blk : (blk - base);
     if (!bread(bg.block_bitmap, blk_buf)) return;
     bitmap_clr(blk_buf, local);
     bwrite(bg.block_bitmap, blk_buf);
+    jl_desc_add(bg.block_bitmap);
     bg.free_blocks++;
     bg_store(g, &bg);
     sb.free_blocks++;
@@ -535,9 +764,12 @@ static u32 inode_write(u32 ino, const u8 *raw) {
     u32 off;
     u32 blk = inode_block_of(ino, &off);
     u32 i;
+    u32 ok;
     if (!bread(blk, blk_buf)) return 0;
     for (i = 0; i < 128; i++) blk_buf[off + i] = raw[i];
-    return bwrite(blk, blk_buf);
+    ok = bwrite(blk, blk_buf);
+    if (ok) jl_desc_add(blk);
+    return ok;
 }
 
 
@@ -1259,6 +1491,10 @@ u32 ext2_mount(void) {
         }
         if (!jl_jblk_sane(jl_jblk)) {
             jl_jblk = 0;
+        } else {
+            /* Load ring map before commit-recover (ctrl may be absent on
+             * pre-ring images — jl_try_commit_recover still handles that). */
+            jl_load_ctrl();
         }
         if (st != EXT2_VALID_FS || jl_flags == JL_META_PENDING) {
             if (jl_try_commit_recover()) {
@@ -1279,16 +1515,16 @@ u32 ext2_mount(void) {
     /* Hardening: mark filesystem not-valid until sync (s_state=ERROR). */
     sb_write_counts(EXT2_ERROR_FS);
     if (!jl_ensure_jblk()) {
-        kprintf("[EXT2] [FAIL] journal commit block setup\n");
+        kprintf("[EXT2] [FAIL] journal ring setup\n");
         sb.mounted = 0;
         return 0;
     }
     bg0 = sb.bg_block;
-    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u jl_gen=%u jblk=%u /mnt+/home ready\n",
+    kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u jl_gen=%u jblk=%u ring=%u /mnt+/home ready\n",
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen,
-            (u64)jl_jblk);
-    kprintf("[EXT2] journal-lite %s writeback + commit-block online (not a full journal)\n",
+            (u64)jl_jblk, (u64)jl_ring_len);
+    kprintf("[EXT2] journal-lite %s + descriptor/revoke ring online (not a full journal)\n",
             jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback");
     return 1;
 }
@@ -2193,6 +2429,76 @@ void ext2_selftest(void) {
         ext2_sync();
         jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] journal commit-block recover\n");
+    }
+
+    /* Descriptor/revoke tags + multi-txn ring: two commits leave DESC/REVOKE/
+     * COMMIT records for distinct gens; revoke scan finds the tagged block. */
+    {
+        u32 saved_mode = jl_mode;
+        u32 g1;
+        u32 g2;
+        u32 nd;
+        u32 nr;
+        u32 nc;
+        u32 rev_blk;
+        jl_set_mode(JL_MODE_ORDERED);
+        if (jl_ring_len < 4) {
+            kprintf("[EXT2] [FAIL] journal ring too small (%u)\n",
+                    (u64)jl_ring_len);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        rev_blk = sb.blocks_count - 1;
+        if (rev_blk <= sb.bg_block) rev_blk = sb.bg_block + 1;
+
+        jl_begin();
+        g1 = jl_gen;
+        jl_desc_add(sb.bg_block);
+        jl_revoke_add(rev_blk);
+        if (jl_desc_n == 0 || jl_rev_n == 0) {
+            kprintf("[EXT2] [FAIL] journal ring tag capture\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        jl_commit();
+        jl_ring_count_gen(g1, &nd, &nr, &nc);
+        if (nd == 0 || nr == 0 || nc == 0) {
+            kprintf("[EXT2] [FAIL] journal ring txn1 d=%u r=%u c=%u\n",
+                    (u64)nd, (u64)nr, (u64)nc);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!jl_ring_revoked(rev_blk)) {
+            kprintf("[EXT2] [FAIL] journal ring revoke missing\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+
+        jl_begin();
+        g2 = jl_gen;
+        jl_desc_add(sb.bg_block);
+        jl_commit();
+        if (g2 == g1) {
+            kprintf("[EXT2] [FAIL] journal ring gen did not advance\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        jl_ring_count_gen(g2, &nd, &nr, &nc);
+        if (nd == 0 || nc == 0) {
+            kprintf("[EXT2] [FAIL] journal ring txn2 d=%u c=%u\n",
+                    (u64)nd, (u64)nc);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        /* Both commits still visible (ring holds multi-txn history). */
+        if (!jl_ring_find_commit(g1) || !jl_ring_find_commit(g2)) {
+            kprintf("[EXT2] [FAIL] journal ring multi-txn commits\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal descriptor/revoke + multi-txn ring\n");
     }
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to

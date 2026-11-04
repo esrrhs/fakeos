@@ -16,7 +16,7 @@ the in-tree drivers already speak.
 | **VirtIO-net (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_net.c` | Same cap map as blk; multi-vector MSI-X RX=40/TX=43 (per-queue); single MSI/MSI-X or INTx fallback; TX `sched_sleep` when multi |
 
 `drivers/blk.c` preference: **virtio-blk → AHCI → ATA**. Ext2 rides on that
-block layer (journal-lite markers, multi-bg, triple-indirect).
+block layer (journal-lite descriptor/revoke ring, multi-bg, triple-indirect).
 
 ## Modern virtio status
 
@@ -40,9 +40,9 @@ block layer (journal-lite markers, multi-bg, triple-indirect).
 
 ## Suggested next steps
 
-1. Journal descriptor/revoke + multi-txn ring (still not full jbd).
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0).
-3. Wire Ext2/journal ordered path onto blk_async where a coherent slice fits.
+1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0).
+2. Wire Ext2/journal ordered path onto blk_async where a coherent slice fits.
+3. Journal metadata-copy replay on top of descriptor/revoke ring (still not full jbd).
 
 Until then, Makefile default keeps `disable-modern=on` for blk and net; use
 `make qemu-modern` to exercise the MMIO + MSI-X path.
