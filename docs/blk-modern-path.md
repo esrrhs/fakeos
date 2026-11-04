@@ -481,6 +481,15 @@ whitespace-run split; `-s` treats each SEP char as a separator). Glued
 Focused virtio login smoke covers `pr -t`/`-n`/`-w`/`-l`/`-h`, `column -t`/
 `-s`/`-ts:`, plus prior interactive greens (smp 1/2).
 
+## /bin/md5sum + /bin/sha1sum — landed
+
+Checksum follow-on with real digests (not zero stubs). `md5sum [FILE...]`
+prints RFC 1321 MD5 as `DIGEST  FILE` (two spaces; `-` for stdin/`-`).
+`sha1sum [FILE...]` prints FIPS 180-1 SHA-1 the same way. Streaming 64-byte
+blocks; compact argv (no flags). Focused virtio login smoke covers empty/
+`abc`/`hello` stdin digests, file operand, plus prior interactive greens
+(smp 1/2). Ramfs `/bin` dents 77/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -488,6 +497,6 @@ Focused virtio login smoke covers `pr -t`/`-n`/`-w`/`-l`/`-h`, `column -t`/
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `pr`/`column`/`strings` already present; consider `md5sum`/`sha1sum`
-   thin stubs) — prefer small coherent chunks. Avoid deep
+   (e.g. `md5sum`/`sha1sum` already present; consider `sha256sum`, `base64`,
+   `factor`, `yes` already present) — prefer small coherent chunks. Avoid deep
    jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.

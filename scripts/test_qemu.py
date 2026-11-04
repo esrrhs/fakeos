@@ -453,6 +453,8 @@ def main():
         "[FS] published /bin/strings (",
         "[FS] published /bin/pr (",
         "[FS] published /bin/column (",
+        "[FS] published /bin/md5sum (",
+        "[FS] published /bin/sha1sum (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

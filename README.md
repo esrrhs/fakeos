@@ -243,6 +243,7 @@ flowchart TD
 - [x] **/bin/cksum + /bin/sum**：外部 `cksum` POSIX CRC+长度、`sum [-r|-s]` BSD/SysV 校验和；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/strings**：外部 `strings [-a] [-n N]` 提取可打印串（默认长度 4，`-nN` 粘连）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/pr + /bin/column**：外部 `pr [-n][-t][-w N][-l N][-h HDR]` 分页抬头、`column -t [-s SEP]` 表格式对齐；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/md5sum + /bin/sha1sum**：外部 `md5sum`/`sha1sum` 真实摘要（RFC 1321 / FIPS 180-1）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
