@@ -1,8 +1,10 @@
 /* fakeos userland - xargs: build argv from stdin and exec (thin).
- * Forms: xargs [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]
+ * Forms: xargs [-0] [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]
  * Default: whitespace-split stdin words; default COMMAND prints args.
- * -I REPLACE: line-oriented; substitute REPLACE in initial ARGS per line
- * (one exec per line; empty lines skipped). Batches honor EXEC_MAX_ARGC=8.
+ * -0: NUL-separated input (find -print0 style); whitespace stays inside items.
+ * -I REPLACE: line-oriented (or NUL records with -0); substitute REPLACE in
+ * initial ARGS per record (one exec per record; empty records skipped).
+ * Batches honor EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -24,7 +26,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: xargs [-n N] [-r] [-I R] [COMMAND [ARGS...]]\n", 52);
+    u_write(2, "usage: xargs [-0] [-n N] [-r] [-I R] [COMMAND [ARGS...]]\n", 57);
 }
 
 static int is_ws(char c) {
@@ -175,6 +177,7 @@ int main(int argc, char **argv) {
     int rc = 0;
     int saw_word = 0;
     int use_replace = 0;
+    int null_sep = 0;
     char replstr[ARG_SLOT];
 
     replstr[0] = 0;
@@ -183,6 +186,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[ai], "--") == 0) {
             ai++;
             break;
+        }
+        if (strcmp(argv[ai], "-0") == 0) {
+            null_sep = 1;
+            ai++;
+            continue;
         }
         if (strcmp(argv[ai], "-r") == 0) {
             no_run_empty = 1;
@@ -266,12 +274,16 @@ int main(int argc, char **argv) {
     }
 
     if (use_replace) {
-        /* Line mode: one invocation per non-empty line; substitute REPLACE. */
+        /* Record mode: one invocation per non-empty record; substitute REPLACE.
+         * Default delimiter newline; -0 uses NUL (newlines stay in data). */
         wi = 0;
         while ((n = u_read(0, rbuf, sizeof(rbuf))) > 0) {
             for (i = 0; i < (int)n; i++) {
                 char c = rbuf[i];
-                if (c == '\n' || c == '\r') {
+                int delim;
+                if (null_sep) delim = (c == 0);
+                else delim = (c == '\n' || c == '\r');
+                if (delim) {
                     if (wi > 0) {
                         word[wi] = 0;
                         saw_word = 1;
@@ -327,7 +339,10 @@ int main(int argc, char **argv) {
     while ((n = u_read(0, rbuf, sizeof(rbuf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = rbuf[i];
-            if (is_ws(c)) {
+            int delim;
+            if (null_sep) delim = (c == 0);
+            else delim = is_ws(c);
+            if (delim) {
                 if (wi > 0) {
                     word[wi] = 0;
                     strcpy(slots[base + filled], word);
