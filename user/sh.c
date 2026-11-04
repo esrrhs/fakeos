@@ -5,7 +5,7 @@
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
  * Expand scans $? / $0..$9 / $# / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
- * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators).
+ * Thin for/while/until/if/elif/case/esac + break[N]/continue[N] (per-iteration $ re-expand; ; or keyword separators).
  * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL).
  * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
  * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4).
@@ -131,8 +131,9 @@ static long shell_pgid;
 static int shell_opt_e; /* set -e errexit */
 static int shell_opt_u; /* set -u nounset */
 static int expand_err;  /* set by expand when -u hits unbound */
-static int loop_depth;  /* for/while/until nesting (thin; no compound nesting) */
+static int loop_depth;  /* for/while/until nesting */
 static int loop_ctrl;   /* 0 none, 1 break, 2 continue */
+static int loop_ctrl_n; /* levels left for break/continue (POSIX N; default 1) */
 static int func_depth;  /* function call nesting */
 static int func_returning; /* return builtin fired */
 static long func_ret_rc;
@@ -2671,8 +2672,8 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "shift", "shift [N]" },
     { "local", "local [-rx] NAME[=VALUE]..." },
     { "return", "return [N]" },
-    { "break", "break" },
-    { "continue", "continue" },
+    { "break", "break [N]" },
+    { "continue", "continue [N]" },
     { "[[", "[[ EXPR ]]  (==/!= *?; </> lex; -eq…; -z/-n; file; &&/||)" },
     { "help", "help [NAME]" },
     { "exit", "exit [N]" },
@@ -3278,28 +3279,46 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         return 0;
     }
-    if (eq(tokens[0], "break")) {
-        if (tokens[1] != 0) {
-            puts("sh: break: too many arguments");
-            return 1;
-        }
+    if (eq(tokens[0], "break") || eq(tokens[0], "continue")) {
+        /* break [N] / continue [N] — N enclosing loops (default 1; clamp to depth). */
+        int is_br = eq(tokens[0], "break");
+        long n = 1;
+        int i;
         if (loop_depth <= 0) {
-            puts("sh: break: only meaningful in a for/while/until loop");
+            if (is_br) puts("sh: break: only meaningful in a for/while/until loop");
+            else puts("sh: continue: only meaningful in a for/while/until loop");
             return 1;
         }
-        loop_ctrl = 1;
-        return 0;
-    }
-    if (eq(tokens[0], "continue")) {
         if (tokens[1] != 0) {
-            puts("sh: continue: too many arguments");
-            return 1;
+            const char *s = tokens[1];
+            if (tokens[2] != 0) {
+                if (is_br) puts("sh: break: too many arguments");
+                else puts("sh: continue: too many arguments");
+                return 1;
+            }
+            if (s[0] == 0) {
+                if (is_br) puts("sh: break: numeric argument required");
+                else puts("sh: continue: numeric argument required");
+                return 1;
+            }
+            for (i = 0; s[i] != 0; i++) {
+                if (s[i] < '0' || s[i] > '9') {
+                    if (is_br) puts("sh: break: numeric argument required");
+                    else puts("sh: continue: numeric argument required");
+                    return 1;
+                }
+            }
+            n = strtol_dec(s);
+            if (n < 1) {
+                if (is_br) puts("sh: break: numeric argument required");
+                else puts("sh: continue: numeric argument required");
+                return 1;
+            }
         }
-        if (loop_depth <= 0) {
-            puts("sh: continue: only meaningful in a for/while/until loop");
-            return 1;
-        }
-        loop_ctrl = 2;
+        /* POSIX: N greater than enclosing loops acts on the outermost. */
+        if (n > loop_depth) n = loop_depth;
+        loop_ctrl = is_br ? 1 : 2;
+        loop_ctrl_n = (int)n;
         return 0;
     }
     if (eq(tokens[0], "help")) {
@@ -3308,9 +3327,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -5638,23 +5657,39 @@ static int find_closing(char **tokens, int start, const char *closer) {
 }
 
 
-/* Run loop body; honor break/continue. Returns 1=break, 2=continue, 0=normal. */
+/* Run loop body; honor break/continue [N]. Returns 1=break this level,
+ * 2=continue this level, 0=normal. Multi-level: leave loop_ctrl/_n for outer. */
 static int run_loop_body(char **body, long *rcp) {
     loop_ctrl = 0;
+    loop_ctrl_n = 0;
     if (body[0] != 0) {
         *rcp = expand_and_run(body, *rcp);
     } else {
         *rcp = 0;
     }
     if (func_returning) {
+        loop_ctrl = 0;
+        loop_ctrl_n = 0;
         return 1; /* treat like break out of loop; caller sees func_returning */
     }
     if (loop_ctrl == 1) {
-        loop_ctrl = 0;
+        if (loop_ctrl_n > 1) {
+            loop_ctrl_n--;
+            /* keep loop_ctrl=1 so outer run_seq/run_loop_body still sees it */
+        } else {
+            loop_ctrl = 0;
+            loop_ctrl_n = 0;
+        }
         return 1;
     }
     if (loop_ctrl == 2) {
+        if (loop_ctrl_n > 1) {
+            /* continue N: leave this loop (break) and continue outer with N-1 */
+            loop_ctrl_n--;
+            return 1;
+        }
         loop_ctrl = 0;
+        loop_ctrl_n = 0;
         return 2;
     }
     return 0;
@@ -6681,7 +6716,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, let/declare/typeset, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash[-rplt]/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break[N]/continue[N], [[ ]], :/true/false, let/declare/typeset, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash[-rplt]/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

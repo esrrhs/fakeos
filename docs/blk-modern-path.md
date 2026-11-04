@@ -1458,6 +1458,16 @@ Thin `local [-rx] NAME[=VAL]…` (glued `-rx` ok) inside functions. Reuses
 Focused virtio login smoke covers `-r`/`-x`/restore + prior greens
 including test lex (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell break/continue [N] — landed
+
+`break [N]` / `continue [N]` (default 1). `loop_ctrl_n` carries remaining
+levels; `run_loop_body` decrements on the way out (continue N>1 breaks the
+inner loop and continues the outer). N above `loop_depth` clamps to the
+outermost (POSIX). Existing `run_seq`/`run_list` early-return on
+`loop_ctrl` propagates across nesting. No new `/bin` dent. Focused virtio
+login smoke covers nested `break 2` / `continue 2` + prior greens (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1465,8 +1475,7 @@ including test lex (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `break N`/`continue N` if loop_ctrl levels
-   are bite-sized, or other small `/bin`/shell bites (`set --` still
-   deferred; skip large `getopts` / here-doc / trap / `fc` / `bind` /
-   `=~`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
+   deferred. Next thin polish: other small `/bin`/shell bites (`set --`
+   still deferred; skip large `getopts` / here-doc / trap / `fc` / `bind`
+   / `=~`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
    multi-nc / CFS / jbd alone.
