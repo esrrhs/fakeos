@@ -848,14 +848,36 @@ decimal with optional `k`/`K`=1024, `m`/`M`=1MiB, `b`/`B`=512); `-l`/`-b` last
 wins. Focused virtio login smoke covers wrap/decode, byte-split pieces, Ext2,
 prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
 
+## cal -y + uname -s/-n/-r/-m — landed
+
+Thin display polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/cal` gains `-y YEAR`
+(no RTC, so bare `-y` is rejected; existing `cal YEAR` / `MONTH YEAR`
+unchanged). `/bin/uname` and the shell builtin gain `-s`/`-n`/`-r`/`-v`/`-m`/`-a`
+(glued short options; multi-field POSIX snrvm order). Focused virtio login
+smoke covers both plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
+
+## chmod -R thin — landed
+
+Thin recursive mode polish (no new `/bin` dent; no kernel work). Inventory:
+still no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/chmod` and the shell
+builtin accept `chmod [-R|-r] MODE FILE...` (glued `-R`/`-r` ok). Depth-limited
+tree walk (max 16) via `lstat`+`getdents`; post-order so a restrictive MODE
+still reaches leaves; does not descend through symlink directories; entry cap
+64/dir. Focused virtio login smoke covers builtin + `/bin/chmod -R` on Ramfs
+trees plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`base64 -w` + `split -b` + …):
-   prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
-   `touch -r`/`-d` if utimens arrive. Candidates: `chmod -R` thin (careful);
-   `cal -y`; `uname -s/-n/-r/-m`; `ps`/`uptime`/`free` only if `/proc` grows;
-   skip `mkfifo` until `mknod`; leave Ext2-redirect duplex / multi-nc SMP races
-   and CFS/jbd alone unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`chmod -R` + `cal -y` + …): prefer
+   small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
+   `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only if
+   `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex /
+   multi-nc SMP races and CFS/jbd alone unless a clear bite-sized fix. Other
+   thin polish if still missing after inventory (prefer not already-landed
+   find/od/dd/tee/fold/paste/strings/uniq/cut/base64).

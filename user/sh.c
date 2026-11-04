@@ -33,6 +33,8 @@ extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
 extern long u_stat(const char *path, void *statbuf);
+extern long u_lstat(const char *path, void *statbuf);
+extern long u_getdents(long fd, void *buf, unsigned long n);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_link(const char *oldpath, const char *newpath);
@@ -222,7 +224,13 @@ enum {
     SH_ST_BYTES = 144,
     SH_S_IFMT = 0xF000,
     SH_S_IFDIR = 0x4000,
-    SH_PATH_CAP = 128
+    SH_PATH_CAP = 128,
+    SH_DENT_BUF = 1920,
+    SH_DENT_REC = 48,
+    SH_NAME_OFF = 19,
+    SH_NAME_LEN = 30,
+    SH_MAX_NAMES = 64,
+    SH_CHMOD_DEPTH = 16
 };
 
 static unsigned int sh_load_u32(const char *p) {
@@ -238,6 +246,104 @@ static int sh_is_dir(const char *path) {
     if (u_stat(path, st) != 0) return 0;
     mode = sh_load_u32(st + SH_ST_MODE);
     return (mode & SH_S_IFMT) == SH_S_IFDIR;
+}
+
+static void sh_join_path(char *out, unsigned long cap, const char *dir,
+                         const char *name) {
+    unsigned long i = 0;
+    unsigned long j = 0;
+    if (cap < 2) {
+        out[0] = 0;
+        return;
+    }
+    while (dir[i] != 0 && i + 1 < cap) {
+        out[i] = dir[i];
+        i++;
+    }
+    if (i > 0 && out[i - 1] != '/' && i + 1 < cap) out[i++] = '/';
+    while (name[j] != 0 && i + 1 < cap) out[i++] = name[j++];
+    out[i] = 0;
+}
+
+static int sh_chmod_path(const char *path, unsigned int mode, int recursive,
+                         int depth);
+
+/* Depth-first post-order so a restrictive MODE still reaches leaves. */
+static int sh_chmod_dir_rec(const char *path, unsigned int mode, int depth) {
+    char dent[SH_DENT_BUF];
+    char child[SH_PATH_CAP];
+    char names[SH_MAX_NAMES][SH_NAME_LEN];
+    int nnames;
+    long fd;
+    long n;
+    int i;
+    int rc = 0;
+
+    fd = u_open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        printf("sh: chmod: %s: cannot open directory\n", path);
+        return 1;
+    }
+    nnames = 0;
+    for (;;) {
+        long off;
+        n = u_getdents(fd, dent, sizeof(dent));
+        if (n <= 0) break;
+        for (off = 0; off + SH_DENT_REC <= n; off += SH_DENT_REC) {
+            char name[SH_NAME_LEN];
+            unsigned long k = 0;
+            while (k + 1 < SH_NAME_LEN && dent[off + SH_NAME_OFF + k] != 0) {
+                name[k] = dent[off + SH_NAME_OFF + k];
+                k++;
+            }
+            name[k] = 0;
+            if (name[0] == 0) continue;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+            if (nnames >= SH_MAX_NAMES) {
+                printf("sh: chmod: %s: too many entries\n", path);
+                u_close(fd);
+                return 1;
+            }
+            strcpy(names[nnames], name);
+            nnames++;
+        }
+    }
+    u_close(fd);
+
+    for (i = 0; i < nnames; i++) {
+        sh_join_path(child, SH_PATH_CAP, path, names[i]);
+        if (child[0] == 0) continue;
+        if (sh_chmod_path(child, mode, 1, depth + 1) != 0) rc = 1;
+    }
+    if (u_chmod(path, (long)mode) != 0) {
+        printf("sh: chmod: %s: failed\n", path);
+        rc = 1;
+    }
+    return rc;
+}
+
+static int sh_chmod_path(const char *path, unsigned int mode, int recursive,
+                         int depth) {
+    char st[SH_ST_BYTES];
+    unsigned int st_mode;
+
+    if (u_lstat(path, st) != 0) {
+        printf("sh: chmod: %s: failed\n", path);
+        return 1;
+    }
+    st_mode = sh_load_u32(st + SH_ST_MODE);
+    if (recursive && (st_mode & SH_S_IFMT) == SH_S_IFDIR) {
+        if (depth >= SH_CHMOD_DEPTH) {
+            printf("sh: chmod: %s: max depth\n", path);
+            return 1;
+        }
+        return sh_chmod_dir_rec(path, mode, depth);
+    }
+    if (u_chmod(path, (long)mode) != 0) {
+        printf("sh: chmod: %s: failed\n", path);
+        return 1;
+    }
+    return 0;
 }
 
 /* Create one directory; with parents, create each missing component.
@@ -1144,7 +1250,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -1373,13 +1479,29 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         unsigned int mode = 0;
         const char *s;
         int j;
-        int ai;
+        int ai = 1;
         int bad = 0;
-        if (tokens[1] == 0 || tokens[2] == 0) {
-            puts("usage: chmod MODE FILE...");
+        int recursive = 0;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int k;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (k = 0; o[k] != 0; k++) {
+                if (o[k] == 'R' || o[k] == 'r') {
+                    recursive = 1;
+                } else {
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad) break;
+            ai++;
+        }
+        if (bad || tokens[ai] == 0 || tokens[ai + 1] == 0) {
+            puts("usage: chmod [-R] MODE FILE...");
             rc = 1;
         } else {
-            s = tokens[1];
+            s = tokens[ai];
             for (j = 0; s[j] != 0; j++) {
                 if (s[j] < '0' || s[j] > '7') {
                     bad = 1;
@@ -1392,9 +1514,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 rc = 1;
             } else {
                 rc = 0;
-                for (ai = 2; tokens[ai] != 0; ai++) {
-                    if (u_chmod(tokens[ai], (long)mode) != 0) {
-                        printf("sh: chmod: %s: failed\n", tokens[ai]);
+                for (ai = ai + 1; tokens[ai] != 0; ai++) {
+                    if (sh_chmod_path(tokens[ai], mode, recursive, 0) != 0) {
                         rc = 1;
                         break;
                     }
