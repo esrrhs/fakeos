@@ -1487,6 +1487,16 @@ Focused virtio login smoke uses pipeline/child forms so the login shell
 survives (`exec /bin/echo … | cat`) plus redirect-stick/`/dev/tty` restore
 and prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## sort -u — landed
+
+`/bin/sort` gains `-u` (unique: after sort, skip consecutive equal keys).
+Key equality mirrors sort rules (`-n` / `-k`; no `-r`; no full-line
+tiebreak under `-k`). Glued with `-rnu`. No new `/bin` dent. Inventory:
+sed `-n`, uniq `-c`, head `-n`, cut `-f/-d`, tr `-d`, sort `-r/-n/-k`
+already present — `-u` was the clear gap. Focused virtio login smoke
+covers `sort -u` / `-nu` + prior greens (smp 1/2). Ramfs `/bin` dents
+~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1494,7 +1504,8 @@ and prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: util flag gaps or thin `/bin` with dent
-   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
-   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `grep -l`/`-L`, `cat -s`, `kill -l`, or
+   other util flags / thin `/bin` with dent room (`set --` still deferred;
+   skip large `getopts` / here-doc / trap / `fc` / `bind` / `=~` /
+   `select` / `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.

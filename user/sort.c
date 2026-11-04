@@ -1,6 +1,7 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-r] [-n] [-k N|-kN] [FILE...]
- * -r reverse; -n numeric (leading optional sign/digits); -k N sort by
+ * Forms: sort [-r] [-n] [-u] [-k N|-kN] [FILE...]
+ * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
+ * (suppress consecutive equal keys after sort); -k N sort by
  * blank-separated field N (1-based; missing field sorts as empty / 0).
  * Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
  */
@@ -25,12 +26,13 @@ enum {
 
 static int opt_r;
 static int opt_n;
+static int opt_u;
 static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-r] [-n] [-k N] [FILE...]\n", 39);
+    u_write(2, "usage: sort [-rnu] [-k N] [FILE...]\n", 36);
 }
 
 static int is_digits(const char *s) {
@@ -132,6 +134,31 @@ static int cmp_lines(const char *a, const char *b) {
     return c;
 }
 
+/* Equality for -u: same key rules as cmp_lines, without -r or line tiebreak. */
+static int key_cmp(const char *a, const char *b) {
+    if (opt_k > 0) {
+        int al, bl;
+        const char *fa = field_at(a, opt_k, &al);
+        const char *fb = field_at(b, opt_k, &bl);
+        if (opt_n) {
+            long na = parse_num_n(fa, al);
+            long nb = parse_num_n(fb, bl);
+            if (na < nb) return -1;
+            if (na > nb) return 1;
+            return 0;
+        }
+        return cmp_key_str(fa, al, fb, bl);
+    }
+    if (opt_n) {
+        long na = parse_num(a);
+        long nb = parse_num(b);
+        if (na < nb) return -1;
+        if (na > nb) return 1;
+        return 0;
+    }
+    return strcmp(a, b);
+}
+
 static void sort_lines(void) {
     /* Insertion sort — fine for thin daily-driver smoke sizes. */
     int i;
@@ -193,6 +220,7 @@ static int read_fd(long fd) {
 static void emit_all(void) {
     int i;
     for (i = 0; i < nlines; i++) {
+        if (opt_u && i > 0 && key_cmp(lines[i - 1], lines[i]) == 0) continue;
         u_write(1, lines[i], strlen(lines[i]));
         u_write(1, "\n", 1);
     }
@@ -234,6 +262,7 @@ int main(int argc, char **argv) {
             char o = argv[i][j];
             if (o == 'r') opt_r = 1;
             else if (o == 'n') opt_n = 1;
+            else if (o == 'u') opt_u = 1;
             else {
                 usage();
                 return 1;
