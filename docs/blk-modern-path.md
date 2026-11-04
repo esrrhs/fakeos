@@ -187,9 +187,19 @@ seeds `USER`/`HOME`/`FAKECC_PKG`). Shell `id` prints `groups=`; thin `setuid` /
 Init smoke: `[U][PASS] setuid/seteuid/groups`. Focused virtio login smoke covers
 id/groups/`seteuid`/`setuid` plus login/`uname`/`ls -l`/`udptest`/`env` (smp 1/2).
 
+## TTY Double-Tab match listing — landed
+
+Ambiguous Tab with no common-prefix progress still rings BEL on the first press
+and sets a pending flag; a second Tab prints the match list (directories marked
+with a trailing `/`, wrapped near 72 columns) then redisplays the edit buffer
+(shell prompt is userspace-owned and not reprinted). Any other line edit clears
+pending. Unique / progressing completions unchanged. Focused virtio login smoke
+covers Double-Tab on `/bin/l` (lists `ldfake`/`login`/`ls`) plus prior Tab bites
+and login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
-1. Double-Tab match listing / more TTY line-edit polish.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Utils if thin: head/wc; history persistence; net user tools.
+1. Utils if thin: head/wc; history persistence; net user tools.
+2. More TTY line-edit polish (Ctrl-W/K, quoted Tab) if needed.
+3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 4. Deep jbd — avoid unless needed.

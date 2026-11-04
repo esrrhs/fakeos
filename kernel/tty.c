@@ -19,7 +19,9 @@ typedef types.uint64_t u64;
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
  * provide basic readline-style editing. Tab completes the word at the cursor
  * against cwd / absolute paths, /bin (command position), and a small builtin
- * name table; unique directory matches get a trailing '/'. ISIG: Ctrl-C/Ctrl-Z
+ * name table; unique directory matches get a trailing '/'. Ambiguous Tab with
+ * no common-prefix progress rings BEL; a second Tab lists matches (dirs get
+ * a trailing '/') then redisplays the edit buffer. ISIG: Ctrl-C/Ctrl-Z
  * are intercepted
  * on input (UART IRQ + PS/2) even while the shell is blocked in wait4 when
  * termios c_lflag has ISIG. TCGETS/TCSETS expose ICANON/ECHO/ISIG/ICRNL +
@@ -36,6 +38,7 @@ static u32 tty_editing;
 static u32 tty_cursor;          /* insertion point within tty_editing */
 static u32 tty_line_len;
 static u32 tty_pos;
+static u32 tab_list_pending;    /* ambiguous Tab BEL; next Tab lists matches */
 
 /* Shared input ring for PS/2 (and any non-UART source). UART still has its
  * own ring in drivers/uart.c; both feed tty_getc_block. */
@@ -468,6 +471,7 @@ static void tty_clear_edit(void) {
         tty_editing--;
     }
     tty_cursor = 0;
+    tab_list_pending = 0;
 }
 
 static void tty_move_cursor_to(u32 pos) {
@@ -528,7 +532,9 @@ static void tty_hist_apply(int view) {
  * On Tab, complete the token under the cursor. Relative words use cwd;
  * absolute words use the directory prefix. Command-position tokens (no
  * slash, at column 0 of the line) also search /bin and a builtin table.
- * Unique directory hits append '/'. No match / no progress -> BEL.
+ * Unique directory hits append '/'. No match -> BEL. Ambiguous with no
+ * common-prefix progress -> BEL; a second Tab lists matches (dirs marked
+ * with '/') and redisplays the edit buffer (shell prompt is not known here).
  * Skipped when ECHO is off (hidden password-style input).
  * ---------------------------------------------------------------------- */
 enum {
@@ -773,6 +779,51 @@ static u32 tab_build_dir(char *dirpath, u32 cap, const char *word, u32 dir_end) 
     return 1;
 }
 
+static void tty_tab_list_matches(void) {
+    u32 i;
+    u32 j;
+    u32 col;
+    u32 save_cursor;
+    u32 n;
+    u32 need;
+
+    save_cursor = tty_cursor;
+    tty_echo_ch('\n');
+    col = 0;
+    for (i = 0; i < tab_nmatch; i++) {
+        n = tab_strlen(tab_matches[i]);
+        need = n + (tab_isdir[i] != 0 ? 1u : 0u);
+        if (col > 0 && col + need + 2 > 72) {
+            tty_echo_ch('\n');
+            col = 0;
+        }
+        if (col > 0) {
+            tty_echo_ch(' ');
+            tty_echo_ch(' ');
+            col += 2;
+        }
+        for (j = 0; j < n; j++) {
+            tty_echo_ch(tab_matches[i][j]);
+        }
+        if (tab_isdir[i] != 0) {
+            tty_echo_ch('/');
+        }
+        col += need;
+    }
+    tty_echo_ch('\n');
+    /* Redisplay the edit buffer; the shell prompt is userspace-owned. */
+    for (i = 0; i < tty_editing; i++) {
+        tty_echo_ch(tty_buf[i]);
+    }
+    i = tty_editing;
+    while (i > save_cursor) {
+        drivers.uart_putc('\b');
+        drivers.vga_putc('\b');
+        i--;
+    }
+    tty_cursor = save_cursor;
+}
+
 static void tty_tab_complete(void) {
     u32 ws;
     u32 we;
@@ -794,6 +845,7 @@ static void tty_tab_complete(void) {
     }
     we = tty_cursor;
     if (we < ws || (we - ws) >= TAB_PATH_MAX) {
+        tab_list_pending = 0;
         tty_beep();
         return;
     }
@@ -819,6 +871,7 @@ static void tty_tab_complete(void) {
     pfx_n = i;
 
     if (!tab_build_dir(dirpath, TAB_PATH_MAX, word, dir_end)) {
+        tab_list_pending = 0;
         tty_beep();
         return;
     }
@@ -832,14 +885,22 @@ static void tty_tab_complete(void) {
     tab_scan_dir(dirpath, prefix, pfx_n);
 
     if (tab_nmatch == 0) {
+        tab_list_pending = 0;
         tty_beep();
         return;
     }
     common = tab_common_len();
     if (common <= pfx_n && tab_nmatch > 1) {
-        tty_beep();
+        if (tab_list_pending != 0) {
+            tty_tab_list_matches();
+            /* Stay pending so further Tabs re-list without another BEL. */
+        } else {
+            tab_list_pending = 1;
+            tty_beep();
+        }
         return;
     }
+    tab_list_pending = 0;
     if (common > pfx_n) {
         tty_insert_range(tab_matches[0], pfx_n, common);
     }
@@ -855,6 +916,7 @@ static void tty_recv_line(void) {
     u32 esc_state = 0; /* 0=normal 1=saw ESC 2=saw ESC [ 3=CSI digits */
     u32 csi_num = 0;
     tty_hist_view = -1;
+    tab_list_pending = 0;
     tty_cursor = 0;
     for (;;) {
         int c = tty_getc_block();
@@ -985,6 +1047,7 @@ static void tty_recv_line(void) {
                 drivers.vga_putc('\b');
                 tty_redraw_tail();
                 tty_hist_view = -1;
+                tab_list_pending = 0;
             }
             continue;
         }
@@ -996,6 +1059,7 @@ static void tty_recv_line(void) {
             if (tty_editing < LINE_MAX - 1) {
                 tty_insert_char((char)c);
                 tty_hist_view = -1;
+                tab_list_pending = 0;
             } else {
                 tty_move_cursor_to(tty_editing);
                 tty_buf[tty_editing] = '\n';
