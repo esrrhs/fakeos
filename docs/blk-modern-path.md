@@ -1468,6 +1468,14 @@ outermost (POSIX). Existing `run_seq`/`run_list` early-return on
 login smoke covers nested `break 2` / `continue 2` + prior greens (smp 1/2).
 Ramfs `/bin` dents ~114/128.
 
+## grep -q — landed
+
+`/bin/grep` gains `-q` (quiet: no stdout; exit 0/1 by match; glued with
+`-ivncFE`; suppresses `-c` counts; may stop at first hit). No new `/bin`
+dent. Inventory: shell mostly saturated (`exec`/`select`/`coproc` deferred
+or larger); picked clear util flag gap. Focused virtio login smoke covers
+`grep -q` + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1475,7 +1483,8 @@ Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (`set --`
-   still deferred; skip large `getopts` / here-doc / trap / `fc` / `bind`
-   / `=~`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: shell `exec` if bite-sized, other util flag
+   gaps, or a thin `/bin` with dent room (`set --` still deferred; skip
+   large `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.
