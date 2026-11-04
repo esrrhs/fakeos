@@ -294,4 +294,25 @@ u_exit:
     hlt
     jmp     .hang
 
+; ---- userland atomics (for pthread_mutex on futex) -----------------------
+; unsigned int atomic_xchg(volatile unsigned int *p [RDI], unsigned int v [ESI])
+; returns previous *p
+global atomic_xchg
+align 16
+atomic_xchg:
+    mov     eax, esi
+    xchg    dword [rdi], eax
+    ret
+
+; unsigned int atomic_cmpxchg(volatile unsigned int *p [RDI],
+;                             unsigned int expected [ESI],
+;                             unsigned int desired [EDX])
+; returns previous *p (compare-and-swap with LOCK CMPXCHG)
+global atomic_cmpxchg
+align 16
+atomic_cmpxchg:
+    mov     eax, esi
+    lock cmpxchg dword [rdi], edx
+    ret
+
 section .note.GNU-stack noalloc noexec nowrite progbits

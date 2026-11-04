@@ -993,3 +993,74 @@ long futex(volatile unsigned int *uaddr, int op, unsigned int val,
            void *timeout, volatile unsigned int *uaddr2, unsigned int val3) {
     return u_futex(uaddr, op, val, timeout, uaddr2, val3);
 }
+
+/* ---- pthread_mutex on futex (NPTL-style 0/1/2 word) ---------------------- */
+extern unsigned int atomic_xchg(volatile unsigned int *p, unsigned int v);
+extern unsigned int atomic_cmpxchg(volatile unsigned int *p, unsigned int expected,
+                                  unsigned int desired);
+
+typedef struct {
+    volatile unsigned int state; /* 0 unlocked, 1 locked, 2 contended */
+} pthread_mutex_t;
+
+int pthread_mutex_init(pthread_mutex_t *m, void *attr) {
+    (void)attr;
+    if (m == 0) {
+        return -1;
+    }
+    m->state = 0;
+    return 0;
+}
+
+int pthread_mutex_destroy(pthread_mutex_t *m) {
+    if (m == 0) {
+        return -1;
+    }
+    m->state = 0;
+    return 0;
+}
+
+int pthread_mutex_trylock(pthread_mutex_t *m) {
+    unsigned int old;
+    if (m == 0) {
+        return -1;
+    }
+    old = atomic_cmpxchg(&m->state, 0, 1);
+    return old == 0 ? 0 : -1;
+}
+
+int pthread_mutex_lock(pthread_mutex_t *m) {
+    unsigned int old;
+    long r;
+    if (m == 0) {
+        return -1;
+    }
+    old = atomic_cmpxchg(&m->state, 0, 1);
+    if (old == 0) {
+        return 0;
+    }
+    for (;;) {
+        if (old == 2 || atomic_cmpxchg(&m->state, 1, 2) != 0) {
+            r = futex(&m->state, FUTEX_WAIT, 2, 0, 0, 0);
+            while (r == -4) {
+                r = futex(&m->state, FUTEX_WAIT, 2, 0, 0, 0);
+            }
+        }
+        old = atomic_cmpxchg(&m->state, 0, 2);
+        if (old == 0) {
+            return 0;
+        }
+    }
+}
+
+int pthread_mutex_unlock(pthread_mutex_t *m) {
+    unsigned int old;
+    if (m == 0) {
+        return -1;
+    }
+    old = atomic_xchg(&m->state, 0);
+    if (old == 2) {
+        futex(&m->state, FUTEX_WAKE, 1, 0, 0, 0);
+    }
+    return 0;
+}

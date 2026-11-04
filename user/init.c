@@ -29,6 +29,14 @@ extern long futex(volatile unsigned int *uaddr, int op, unsigned int val,
                   void *timeout, volatile unsigned int *uaddr2,
                   unsigned int val3);
 
+typedef struct {
+    volatile unsigned int state;
+} pthread_mutex_t;
+extern int pthread_mutex_init(pthread_mutex_t *m, void *attr);
+extern int pthread_mutex_lock(pthread_mutex_t *m);
+extern int pthread_mutex_unlock(pthread_mutex_t *m);
+extern int pthread_mutex_trylock(pthread_mutex_t *m);
+
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
 extern void printf(const char *fmt, ...);
@@ -418,6 +426,78 @@ static void shm_test(void) {
 }
 
 
+
+static void mutex_test(void) {
+    /* Shared page: [0]=mutex.state, [1]=counter, [2]=child_done */
+    volatile unsigned int *page;
+    pthread_mutex_t *mu;
+    volatile unsigned int *counter;
+    volatile unsigned int *child_done;
+    long pid;
+    long st;
+    unsigned int i;
+    unsigned int n = 2000;
+
+    page = (volatile unsigned int *)u_mmap(0, 4096, 3, 0x21, -1, 0);
+    if (page == (volatile unsigned int *)-1 || page == 0) {
+        puts("[U][FAIL] mutex mmap shared");
+        return;
+    }
+    mu = (pthread_mutex_t *)page;
+    counter = page + 1;
+    child_done = page + 2;
+    if (pthread_mutex_init(mu, 0) != 0) {
+        puts("[U][FAIL] mutex init");
+        return;
+    }
+    *counter = 0;
+    *child_done = 0;
+
+    if (pthread_mutex_trylock(mu) != 0) {
+        puts("[U][FAIL] mutex trylock free");
+        return;
+    }
+    if (pthread_mutex_trylock(mu) == 0) {
+        puts("[U][FAIL] mutex trylock held");
+        return;
+    }
+    pthread_mutex_unlock(mu);
+
+    pid = u_fork();
+    if (pid < 0) {
+        puts("[U][FAIL] mutex fork");
+        return;
+    }
+    if (pid == 0) {
+        for (i = 0; i < n; i++) {
+            pthread_mutex_lock(mu);
+            *counter = *counter + 1;
+            pthread_mutex_unlock(mu);
+        }
+        *child_done = 1;
+        u_exit(0);
+    }
+    for (i = 0; i < n; i++) {
+        pthread_mutex_lock(mu);
+        *counter = *counter + 1;
+        pthread_mutex_unlock(mu);
+    }
+    u_wait4(pid, &st, 0, 0);
+    if (((st >> 8) & 0xff) != 0) {
+        puts("[U][FAIL] mutex child status");
+        return;
+    }
+    if (*child_done != 1) {
+        puts("[U][FAIL] mutex child_done");
+        return;
+    }
+    if (*counter != n + n) {
+        printf("[U][FAIL] mutex counter=%u want %u\n", *counter, n + n);
+        return;
+    }
+    puts("[U][PASS] pthread_mutex futex lock/unlock");
+}
+
 static void futex_test(void) {
     volatile unsigned int *p;
     long pid;
@@ -498,6 +578,7 @@ int main(int argc, char **argv) {
     mmap_test();
     shm_test();
     futex_test();
+    mutex_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

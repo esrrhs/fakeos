@@ -327,6 +327,7 @@ def main():
         "[PASS] MAP_SHARED anon",
         "[U][PASS] POSIX shm_open/mmap/unlink",
         "[U][PASS] futex WAIT/WAKE",
+        "[U][PASS] pthread_mutex futex lock/unlock",
         "[PASS] Cooperative threads",
         "[PASS] Timer preemption",
         "[PASS] CFS-lite",
@@ -390,7 +391,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: futex + Ext2 ftruncate + AP trampoline online!",
+        "[SUCCESS] fakeos: pthread_mutex + futex + Ext2 ftruncate + AP trampoline online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
