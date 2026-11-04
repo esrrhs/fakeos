@@ -1,12 +1,14 @@
 /* fakeos userland - install: copy files / create dirs (thin POSIX/GNU subset).
  * Forms:
- *   install [-m MODE|-mMODE] SOURCE DEST
- *   install [-m MODE|-mMODE] SOURCE... DIRECTORY
- *   install -t DIR|-tDIR [-m MODE|-mMODE] SOURCE...
+ *   install [-D] [-m MODE|-mMODE] SOURCE DEST
+ *   install [-D] [-m MODE|-mMODE] SOURCE... DIRECTORY
+ *   install [-D] -t DIR|-tDIR [-m MODE|-mMODE] SOURCE...
  *   install -d [-m MODE|-mMODE] DIR...
- * Default MODE is 0755. -d is mkdir -p style, then chmod. -t names the
- * destination directory (GNU). Copy path reuses open/read/write + chmod.
- * Glued -mMODE / -tDIR / -dmMODE keep argv under EXEC_MAX_ARGC=8.
+ * Default MODE is 0755. -d is mkdir -p style, then chmod. -D creates leading
+ * path components of the destination (GNU): parents of DEST for file copy,
+ * or DIRECTORY itself when installing into a dir / with -t. -t names the
+ * destination directory. Copy path reuses open/read/write + chmod.
+ * Glued -DmMODE / -tDIR / -dmMODE keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -98,6 +100,28 @@ static int mkdir_one(const char *path) {
     return 0;
 }
 
+/* Create parent directories of PATH (everything before the last slash). */
+static int mkdir_parents_of(const char *path) {
+    char buf[PATH_CAP];
+    unsigned long n;
+    long last = -1;
+    unsigned long i;
+    if (path == 0 || path[0] == 0) return 0;
+    n = strlen(path);
+    if (n >= PATH_CAP) return -1;
+    strcpy(buf, path);
+    for (i = 0; i < n; i++) {
+        if (buf[i] == '/' && i + 1 < n) last = (long)i;
+    }
+    if (last < 0) return 0; /* no directory component */
+    if (last == 0) {
+        /* "/file" — root already exists */
+        return 0;
+    }
+    buf[last] = 0;
+    return mkdir_one(buf);
+}
+
 static const char *basename_of(const char *path) {
     const char *base = path;
     unsigned long i = 0;
@@ -160,11 +184,12 @@ static int copy_file(const char *src, const char *dst, unsigned int mode) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: install [-d] [-t DIR] [-m MODE] SRC...\n", 47);
+    u_write(2, "usage: install [-Dd] [-t DIR] [-m MODE] SRC...\n", 49);
 }
 
 int main(int argc, char **argv) {
     int dirs = 0;
+    int opt_D = 0; /* create leading destination components */
     unsigned int mode = DEFAULT_MODE;
     const char *tdir = 0;
     int ai = 1;
@@ -182,6 +207,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'd') {
                 dirs = 1;
+            } else if (o[j] == 'D') {
+                opt_D = 1;
             } else if (o[j] == 't') {
                 if (o[j + 1] != 0) {
                     tdir = o + j + 1;
@@ -246,6 +273,12 @@ int main(int argc, char **argv) {
 
     if (tdir != 0) {
         /* -t DIR SRC... : all remaining operands are sources. */
+        if (opt_D && !is_dir(tdir)) {
+            if (mkdir_one(tdir) < 0) {
+                printf("install: %s: cannot create directory\n", tdir);
+                return 1;
+            }
+        }
         if (!is_dir(tdir)) {
             printf("install: %s: not a directory\n", tdir);
             return 1;
@@ -277,6 +310,11 @@ int main(int argc, char **argv) {
                 return 1;
             }
             dst = joined;
+        } else if (opt_D) {
+            if (mkdir_parents_of(dst) < 0) {
+                printf("install: %s: cannot create directory\n", dst);
+                return 1;
+            }
         }
         if (copy_file(src, dst, mode) < 0) rc = 1;
         return rc;
@@ -285,6 +323,12 @@ int main(int argc, char **argv) {
     /* Multiple sources into directory. */
     {
         const char *dir = argv[argc - 1];
+        if (opt_D && !is_dir(dir)) {
+            if (mkdir_one(dir) < 0) {
+                printf("install: %s: cannot create directory\n", dir);
+                return 1;
+            }
+        }
         if (!is_dir(dir)) {
             printf("install: %s: not a directory\n", dir);
             return 1;
