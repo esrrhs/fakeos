@@ -2,11 +2,14 @@
  * Forms:
  *   expr INTEGER1 +|-|*|/|% INTEGER2
  *   expr INTEGER1 =|!=|<|>|<=|>= INTEGER2
+ *   expr STRING : RE          (anchored thin BRE; match length; 0 if none)
  *   expr length STRING
  *   expr index STRING CHARS   (1-based; 0 if none)
  *   expr substr STRING POS LEN  (1-based POS; empty if POS/LEN invalid)
  *   expr ARG   (print ARG; exit 0 if non-empty/non-zero)
- * Exit: 0 if result non-zero/non-empty, 1 if zero/empty, 2 on error.
+ * : RE is a thin BRE (implicit ^): literals, '.', '*', '\' escapes, optional
+ * trailing '$'. No groups/brackets — length only (no \( \) capture). Exit: 0
+ * if result non-zero/non-empty, 1 if zero/empty, 2 on error.
  * Quote '*' in the shell: expr 3 '*' 4
  */
 package user;
@@ -17,7 +20,7 @@ extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 
 static void usage(void) {
-    u_write(2, "usage: expr INTEGER OP INTEGER | length|index|substr ...\n", 58);
+    u_write(2, "usage: expr INTEGER OP INTEGER | STRING : RE | length|index|substr ...\n", 71);
 }
 
 static int is_digit(char c) {
@@ -68,6 +71,68 @@ static int finish_str(const char *s) {
         return v == 0 ? 1 : 0;
     }
     return 0;
+}
+
+static int atom_eq(char atom, int esc, char c) {
+    if (!esc && atom == '.') return 1;
+    return atom == c;
+}
+
+/* Parse one atom from *re; advance *re. Returns 0 on failure. */
+static int take_atom(const char **re, char *atom, int *esc) {
+    const char *p = *re;
+    if (p[0] == 0) return 0;
+    if (p[0] == '*') return 0;
+    if (p[0] == '\\') {
+        if (p[1] == 0) return 0;
+        *atom = p[1];
+        *esc = 1;
+        *re = p + 2;
+        return 1;
+    }
+    *atom = p[0];
+    *esc = 0;
+    *re = p + 1;
+    return 1;
+}
+
+static const char *match_here(const char *re, const char *text);
+
+static const char *match_star(char atom, int esc, const char *re, const char *text) {
+    const char *t = text;
+    const char *r;
+    while (*t && atom_eq(atom, esc, *t)) t++;
+    while (1) {
+        r = match_here(re, t);
+        if (r) return r;
+        if (t == text) return 0;
+        t--;
+    }
+}
+
+/* Thin BRE from re against text; returns end pointer or 0. */
+static const char *match_here(const char *re, const char *text) {
+    char atom;
+    int esc;
+    if (re[0] == '^') re++; /* expr is already anchored; allow leading ^ */
+    if (re[0] == 0) return text;
+    if (re[0] == '$' && re[1] == 0) return (*text == 0) ? text : 0;
+    if (!take_atom(&re, &atom, &esc)) return 0;
+    if (re[0] == '*') {
+        return match_star(atom, esc, re + 1, text);
+    }
+    if (*text == 0) return 0;
+    if (!atom_eq(atom, esc, *text)) return 0;
+    return match_here(re, text + 1);
+}
+
+/* Anchored match length, or -1 if no match. */
+static long match_colon(const char *text, const char *re) {
+    const char *end;
+    if (text == 0 || re == 0) return -1;
+    end = match_here(re, text);
+    if (end == 0) return -1;
+    return (long)(end - text);
 }
 
 static int do_arith(long a, const char *op, long b, long *out) {
@@ -173,6 +238,13 @@ int main(int argc, char **argv) {
     /* expr ARG */
     if (argc == 2) {
         return finish_str(argv[1]);
+    }
+
+    /* expr STRING : RE  (thin BRE match length) */
+    if (argc == 4 && strcmp(argv[2], ":") == 0) {
+        r = match_colon(argv[1], argv[3]);
+        if (r < 0) r = 0;
+        return finish_num(r);
     }
 
     /* expr INTEGER OP INTEGER */

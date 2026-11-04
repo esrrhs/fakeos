@@ -1861,6 +1861,15 @@ login smoke covers `dd conv=lcase|ucase` + prior greens including comm -z
 dent. Focused virtio login smoke covers `od -t a` + prior greens including
 dd conv=lcase (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## expr : — landed
+
+`/bin/expr STRING : RE` returns the anchored thin-BRE match length (0 if no
+match). RE supports literals, `.`, `*`, `\` escapes, optional trailing `$`
+(and a redundant leading `^`). No `\(`/`\)` capture yet. Keeps arith /
+compare / length / index / substr. No new `/bin` dent. Focused virtio login
+smoke covers `expr :` + prior greens including od -t a (smp 1/2). Ramfs
+`/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1868,6 +1877,6 @@ dd conv=lcase (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `expr :` / other util flags on existing `/bin`
-   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
-   Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (`cp -p`
+   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.
