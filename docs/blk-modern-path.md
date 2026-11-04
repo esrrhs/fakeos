@@ -675,14 +675,24 @@ work. Focused virtio login smoke covers touch `-c`, `/bin/kill -0` probe /
 SIGTERM of background sleep, Ext2 touch, prior greens (smp 1/2). Ramfs `/bin`
 dents 102/128.
 
+## /bin/diff — landed
+
+Thin line-oriented compare (companion to byte-wise `/bin/cmp`). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred). New `/bin/diff [-uq] FILE1 FILE2`: classic a/c/d hunks by default,
+`-u` unified (3 lines context), `-q` brief; exit 0 identical / 1 differ / 2
+error; `-` stdin at most once. LCS over loaded lines (MAX_LINES=1024). No
+kernel work. Focused virtio login smoke covers identical/`-q`/classic/`-u` on
+Ramfs+Ext2 plus prior greens (smp 1/2). Ramfs `/bin` dents 103/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`touch -c` + `/bin/kill` + `wc -L` +
-   `dirname` multi + `shuf` + head/tail `-c` + `find`/`du` + …): prefer small
-   coherent chunks such as thin `df` **only if** `statfs(2)` is added, or other
-   missing thin POSIX (e.g. thin `diff`, `touch -r`/`-d` if utimens arrive).
+3. More daily-driver gaps after inventory (`diff` + `touch -c` + `/bin/kill` +
+   `wc -L` + `dirname` multi + `shuf` + head/tail `-c` + `find`/`du` + …):
+   prefer small coherent chunks such as thin `df` **only if** `statfs(2)` is
+   added, or `touch -r`/`-d` if utimens arrive, or other missing thin POSIX.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.

@@ -480,6 +480,7 @@ def main():
         "[FS] published /bin/du (",
         "[FS] published /bin/shuf (",
         "[FS] published /bin/kill (",
+        "[FS] published /bin/diff (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
