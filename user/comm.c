@@ -1,7 +1,9 @@
 /* fakeos userland - comm: compare two sorted files line-by-line (thin POSIX).
- * Forms: comm [-123] FILE1 FILE2
+ * Forms: comm [-123z] FILE1 FILE2
  * Three columns: unique to FILE1, unique to FILE2, common. Leading tabs only
- * between columns that are actually printed. "-" is stdin (at most one).
+ * between columns that are actually printed. -z NUL-terminated records
+ * (input+output; pairs with sort -z / xargs -0). "-" is stdin (at most one).
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -17,9 +19,10 @@ enum { LINE_MAX = 512 };
 static int show1 = 1;
 static int show2 = 1;
 static int show3 = 1;
+static int opt_z; /* NUL-terminated records */
 
 static void usage(void) {
-    u_write(2, "usage: comm [-123] FILE1 FILE2\n", 31);
+    u_write(2, "usage: comm [-123z] FILE1 FILE2\n", 32);
 }
 
 static int read_line(long fd, char *out, int *len_out) {
@@ -33,7 +36,7 @@ static int read_line(long fd, char *out, int *len_out) {
             *len_out = li;
             return li > 0 ? 1 : 0;
         }
-        if (c == '\n') {
+        if (opt_z ? (c == 0) : (c == '\n')) {
             out[li] = 0;
             *len_out = li;
             return 1;
@@ -53,7 +56,12 @@ static void emit_line(int col, const char *line, int len) {
     if (col >= 3 && show2) tabs++;
     emit_tabs(tabs);
     if (len > 0) u_write(1, line, (unsigned long)len);
-    u_write(1, "\n", 1);
+    if (opt_z) {
+        char z = 0;
+        u_write(1, &z, 1);
+    } else {
+        u_write(1, "\n", 1);
+    }
 }
 
 static int open_in(const char *path, long *fd_out) {
@@ -78,6 +86,7 @@ static int parse_suppress(const char *a) {
         if (a[i] == '1') show1 = 0;
         else if (a[i] == '2') show2 = 0;
         else if (a[i] == '3') show3 = 0;
+        else if (a[i] == 'z') opt_z = 1;
         else return 0;
     }
     return 1;
@@ -96,6 +105,7 @@ int main(int argc, char **argv) {
     int r;
     int stdin_used = 0;
 
+    opt_z = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
             i++;
