@@ -204,9 +204,17 @@ Thin coreutils: `tail [-n N]|-N` (ring of last N lines, stdin OK), fixed-string
 `%s/%d/%u/%x/%c/%%`. Focused virtio login smoke covers the three plus
 login/`uname`/`ls -l`/`udptest`/`id`/`head`/`wc` (smp 1/2).
 
+## TTY Ctrl-W/K + quoted Tab — landed
+
+Canonical line edit: Ctrl-W werases the word left of the cursor, Ctrl-K kills
+to EOL, and Ctrl-V quotes the next key so Tab inserts a literal TAB (echoed as
+one blank cell for 1:1 cursor math). Focused virtio login smoke covers the
+three plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
-1. More TTY line-edit polish (Ctrl-W/K, quoted Tab) if needed.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
+   coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — separate if large.
+4. Scan README for other interactive/kernel gaps toward daily-driver.

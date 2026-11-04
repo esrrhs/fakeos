@@ -176,7 +176,7 @@ flowchart TD
 - [x] **TCP retransmit timer**：100Hz 节拍上对未确认 SYN/数据段重传；shell `PATH`（`/bin:.:...`）与引号分词；`kill` builtin。
 - [x] **sigaction + 用户态投递帧**：`rt_sigaction`（nr 13）保存 handler/restorer/sa_flags；syscall 返回路径可把用户栈改写成最小 sigframe 并跳入 handler；`rt_sigreturn`（nr 15）+ libc `__sig_restorer`。无 restorer 的自定义 handler 仍按 DFL 终止。
 - [x] **SA_RESTART**：`sa_flags` 存入 TCB；`wait4`/TTY 阻塞在自定义 handler 且带 `SA_RESTART` 时不因该信号返回 EINTR（继续睡眠，handler 在 syscall 自然返回时投递）。
-- [x] **shell history / `!!` + readline**：环形 32 条；`history`/`!!`；TTY CSI A/B 历史、Left/Right、Home/End、Ctrl-A/E/U。
+- [x] **shell history / `!!` + readline**：环形 32 条；`history`/`!!`；TTY CSI A/B 历史、Left/Right、Home/End、Ctrl-A/E/U/W/K、Ctrl-V quoted Tab。
 - [x] **auth crypt stub**：`/etc/passwd` 支持 `$fake$salt$hash`（FNV-1a）；libc `crypt`/`crypt_check`；默认 root 口令 `root`。
 - [x] **fakecc M5 tip pin 文档**：`docs/ldfake-order3-diagnosis.md` + Makefile/`m5_stage.sh` 明确要求 restage 钉在 `2c1f4525`。
 - [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags/mode/jblk 作恢复标记 + control/ring；DESCRIPTOR/REVOKE/COMMIT 多 txn；脏挂载或无 COMMIT 的 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc`/`rename` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
@@ -211,6 +211,7 @@ flowchart TD
 - [x] **ls -l mtime + getuid/chown stubs**：`struct stat` 填 `st_uid`/`st_gid`/`st_mtime`（boot-relative 秒，同 `clock_gettime(REALTIME)`）；Ramfs inode 与 Ext2 `i_uid`/`i_gid`/`i_mtime` 在 create/write 打戳；`getuid`/`geteuid`/`getgid`/`getegid` + `chown(2)`；shell `id` / `chown UID[:GID] FILE...`；`ls -l` 显示 `mode uid gid size mtime name`。自测 `[U][PASS] getuid/chown/mtime`；virtio login smoke（smp 1/2）。
 - [x] **TTY Tab completion**：ICANON 行编辑下 Tab 补全光标处单词；相对路径相对 cwd，绝对路径用目录前缀；命令位（行首、无 `/`）另搜 `/bin` + 内建名表；唯一目录命中追加 `/`；无匹配/无进展响 BEL；ECHO 关闭时跳过。virtio login smoke（smp 1/2）。
 - [x] **TTY Double-Tab match listing**：歧义且无公共前缀进展时首次 Tab 响 BEL，再次 Tab 列出候选（目录名尾加 `/`）并回显当前编辑缓冲（内核不知 shell 提示符）。其它编辑清 pending。virtio login smoke（smp 1/2）。
+- [x] **TTY Ctrl-W/K + quoted Tab**：ICANON 下行编辑 Ctrl-W 删光标前一词、Ctrl-K 删至行尾；Ctrl-V 引用下一键（Tab 插入字面 `\t`，回显占一格以保持光标 1:1）。virtio login smoke（smp 1/2）。
 - [x] **/bin/head + /bin/wc**：`head [-n N]|-N` 默认 10 行；`wc [-lwc]` 计行/词/字节（多文件带 total）；stdin/`-` 可用。virtio login smoke（smp 1/2）。
 - [x] **shell history 持久化**：环形 32 条写入 `/home/.sh_history`（Ext2）；启动 `hist_load`，每条命令后 `hist_save`+`fsync`；`!!`/`history`/CSI 上下跨重启仍可用。virtio login smoke（smp 1/2）。
 - [x] **/bin/getent**：`getent passwd|group|hosts [key...]`；无 key 时 dump；passwd/group 按名或 uid/gid 过滤；hosts 先扫 `/etc/hosts`，否则 `resolve_host`（含 DNS）。virtio login smoke（smp 1/2）。

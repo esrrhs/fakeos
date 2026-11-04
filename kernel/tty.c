@@ -17,7 +17,9 @@ typedef types.uint64_t u64;
  * so unlock+sleep is atomic under the run lock (same pattern as pipes).
  * Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
- * provide basic readline-style editing. Tab completes the word at the cursor
+ * + Ctrl-W (werase) + Ctrl-K (kill-to-EOL) provide readline-style editing.
+ * Ctrl-V quotes the next key (Tab inserts a literal TAB; echoed as one
+ * blank cell so cursor math stays 1:1). Tab completes the word at the cursor
  * against cwd / absolute paths, /bin (command position), and a small builtin
  * name table; unique directory matches get a trailing '/'. Ambiguous Tab with
  * no common-prefix progress rings BEL; a second Tab lists matches (dirs get
@@ -39,6 +41,7 @@ static u32 tty_cursor;          /* insertion point within tty_editing */
 static u32 tty_line_len;
 static u32 tty_pos;
 static u32 tab_list_pending;    /* ambiguous Tab BEL; next Tab lists matches */
+static u32 tty_quote_next;      /* Ctrl-V: next char inserted literally */
 
 /* Shared input ring for PS/2 (and any non-UART source). UART still has its
  * own ring in drivers/uart.c; both feed tty_getc_block. */
@@ -433,6 +436,13 @@ static void tty_echo_ch(char c) {
     if ((tty_lflag & TTY_ECHO) == 0) {
         return;
     }
+    /* Literal TAB (quoted-insert) still occupies one cell so rubout/redraw
+     * stay 1:1 with tty_buf indices; the buffer keeps the real '\t'. */
+    if (c == '\t') {
+        drivers.uart_putc(' ');
+        drivers.vga_putc(' ');
+        return;
+    }
     drivers.uart_putc(c);
     drivers.vga_putc(c);
 }
@@ -472,6 +482,7 @@ static void tty_clear_edit(void) {
     }
     tty_cursor = 0;
     tab_list_pending = 0;
+    tty_quote_next = 0;
 }
 
 static void tty_move_cursor_to(u32 pos) {
@@ -702,6 +713,63 @@ static u32 tab_common_len(void) {
     }
 }
 
+/* Delete one character left of the cursor (Backspace / building block for
+ * Ctrl-W). No-op at column 0. */
+static void tty_delete_left(void) {
+    u32 i;
+    if (tty_cursor == 0) {
+        return;
+    }
+    for (i = tty_cursor - 1; i + 1 < tty_editing; i++) {
+        tty_buf[i] = tty_buf[i + 1];
+    }
+    tty_editing--;
+    tty_cursor--;
+    drivers.uart_putc('\b');
+    drivers.vga_putc('\b');
+    tty_redraw_tail();
+}
+
+/* Ctrl-W: erase the word left of the cursor (spaces, then non-spaces). */
+static void tty_werase(void) {
+    if (tty_cursor == 0) {
+        return;
+    }
+    while (tty_cursor > 0
+           && (tty_buf[tty_cursor - 1] == ' '
+               || tty_buf[tty_cursor - 1] == '\t')) {
+        tty_delete_left();
+    }
+    while (tty_cursor > 0
+           && tty_buf[tty_cursor - 1] != ' '
+           && tty_buf[tty_cursor - 1] != '\t') {
+        tty_delete_left();
+    }
+    tab_list_pending = 0;
+    tty_hist_view = -1;
+}
+
+/* Ctrl-K: kill from cursor to end of line. */
+static void tty_kill_eol(void) {
+    u32 i;
+    u32 n;
+    if (tty_cursor >= tty_editing) {
+        return;
+    }
+    n = tty_editing - tty_cursor;
+    for (i = 0; i < n; i++) {
+        drivers.uart_putc(' ');
+        drivers.vga_putc(' ');
+    }
+    for (i = 0; i < n; i++) {
+        drivers.uart_putc('\b');
+        drivers.vga_putc('\b');
+    }
+    tty_editing = tty_cursor;
+    tab_list_pending = 0;
+    tty_hist_view = -1;
+}
+
 static void tty_insert_char(char ch) {
     u32 i;
     if (tty_editing >= LINE_MAX - 1) return;
@@ -917,6 +985,7 @@ static void tty_recv_line(void) {
     u32 csi_num = 0;
     tty_hist_view = -1;
     tab_list_pending = 0;
+    tty_quote_next = 0;
     tty_cursor = 0;
     for (;;) {
         int c = tty_getc_block();
@@ -955,6 +1024,22 @@ static void tty_recv_line(void) {
             /* Do not abort the reader's line; parent wait4(WUNTRACED) observes stop. */
             continue;
         }
+        if (tty_quote_next != 0) {
+            /* Ctrl-V: insert the next key literally (including Tab). */
+            tty_quote_next = 0;
+            tab_list_pending = 0;
+            if (c == '\n' || c == '\r') {
+                /* Still end the line; quoting does not create multi-line. */
+            } else if (c >= 0x01 && c < 0x7F) {
+                if (tty_editing < LINE_MAX - 1) {
+                    tty_insert_char((char)c);
+                    tty_hist_view = -1;
+                }
+                continue;
+            } else {
+                continue;
+            }
+        }
         if (c == 0x01) { /* Ctrl-A home */
             tty_move_cursor_to(0);
             continue;
@@ -966,6 +1051,18 @@ static void tty_recv_line(void) {
         if (c == 0x15) { /* Ctrl-U kill line */
             tty_clear_edit();
             tty_hist_view = -1;
+            continue;
+        }
+        if (c == 0x17) { /* Ctrl-W werase */
+            tty_werase();
+            continue;
+        }
+        if (c == 0x0B) { /* Ctrl-K kill-to-EOL */
+            tty_kill_eol();
+            continue;
+        }
+        if (c == 0x16) { /* Ctrl-V quoted-insert */
+            tty_quote_next = 1;
             continue;
         }
         if (c == '\n' || c == '\r') {
@@ -1037,15 +1134,7 @@ static void tty_recv_line(void) {
         }
         if (c == 0x7F || c == 0x08) {
             if (tty_cursor > 0) {
-                u32 i;
-                for (i = tty_cursor - 1; i + 1 < tty_editing; i++) {
-                    tty_buf[i] = tty_buf[i + 1];
-                }
-                tty_editing--;
-                tty_cursor--;
-                drivers.uart_putc('\b');
-                drivers.vga_putc('\b');
-                tty_redraw_tail();
+                tty_delete_left();
                 tty_hist_view = -1;
                 tab_list_pending = 0;
             }
