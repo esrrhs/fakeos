@@ -218,11 +218,18 @@ Thin coreutils: `tee [-a] [FILE...]` copies stdin to stdout and up to 8 files
 strip path components (trailing-slash aware; `/` stays `/`). Focused virtio
 login smoke covers the three plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
+## /bin/true + /bin/false + /bin/seq — landed
+
+Thin coreutils: `true` exits 0, `false` exits 1; `seq [-s SEP] LAST` /
+`FIRST LAST` / `FIRST INCREMENT LAST` prints integer sequences (empty range
+OK; always trailing newline). Focused virtio login smoke covers the three
+plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: `true`/`false`/`seq`/`cut`/`tr`, hard `link(2)`,
-   TTY Ctrl-L redraw, or other thin coreutils / kernel POSIX after README scan.
+4. More daily-driver gaps: `cut`/`tr`, hard `link(2)`, TTY Ctrl-L redraw, or
+   other thin coreutils / kernel POSIX after README scan.
