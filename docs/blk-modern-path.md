@@ -197,9 +197,16 @@ pending. Unique / progressing completions unchanged. Focused virtio login smoke
 covers Double-Tab on `/bin/l` (lists `ldfake`/`login`/`ls`) plus prior Tab bites
 and login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
+## /bin/tail + /bin/grep + /bin/printf — landed
+
+Thin coreutils: `tail [-n N]|-N` (ring of last N lines, stdin OK), fixed-string
+`grep [-ivnF]` (no BRE), and `printf` with `\n/\t/\r/...` escapes plus
+`%s/%d/%u/%x/%c/%%`. Focused virtio login smoke covers the three plus
+login/`uname`/`ls -l`/`udptest`/`id`/`head`/`wc` (smp 1/2).
+
 ## Suggested next steps
 
-1. Utils if thin: head/wc; history persistence; net user tools.
-2. More TTY line-edit polish (Ctrl-W/K, quoted Tab) if needed.
-3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-4. Deep jbd — avoid unless needed.
+1. More TTY line-edit polish (Ctrl-W/K, quoted Tab) if needed.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Deep jbd — avoid unless needed.
+4. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — separate if large.
