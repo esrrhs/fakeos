@@ -211,10 +211,18 @@ to EOL, and Ctrl-V quotes the next key so Tab inserts a literal TAB (echoed as
 one blank cell for 1:1 cursor math). Focused virtio login smoke covers the
 three plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
+## /bin/tee + /bin/basename + /bin/dirname — landed
+
+Thin coreutils: `tee [-a] [FILE...]` copies stdin to stdout and up to 8 files
+(`-a` appends with `O_APPEND`); `basename PATH [SUFFIX]` and `dirname PATH`
+strip path components (trailing-slash aware; `/` stays `/`). Focused virtio
+login smoke covers the three plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. Scan README for other interactive/kernel gaps toward daily-driver.
+4. More daily-driver gaps: `true`/`false`/`seq`/`cut`/`tr`, hard `link(2)`,
+   TTY Ctrl-L redraw, or other thin coreutils / kernel POSIX after README scan.
