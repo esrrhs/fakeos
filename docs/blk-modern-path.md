@@ -1353,6 +1353,15 @@ avoid clashing with C `printf`. Specs: `%s/%c/%d/%i/%u/%x/%X/%o/%b/%%` with
 login smoke covers builtin width cases + prior greens (smp 1/2). Ramfs
 `/bin` dents ~114/128.
 
+## shell alias -p — landed
+
+Thin `alias [-p]` portable list form (no new `/bin` dent). Inventory:
+`unalias -a` already present — left alone. `set --` deferred (positionals
+are function-scoped; no top-level argv frame yet). `-p` lists/prints
+`alias NAME='VAL'`; bare `alias` keeps `NAME='VAL'`. Focused virtio login
+smoke covers `-p` list + `unalias -a` + prior greens (smp 1/2). Ramfs
+`/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1360,6 +1369,7 @@ login smoke covers builtin width cases + prior greens (smp 1/2). Ramfs
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (skip large
-   `getopts` / here-doc / trap unless bite-sized; `ulimit` still needs
-   kernel rlimit). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `set --` if positional frames grow, help for
+   one builtin, or other small `/bin`/shell bites (skip large `getopts` /
+   here-doc / trap unless bite-sized; `ulimit` still needs kernel rlimit).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
