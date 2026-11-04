@@ -1044,13 +1044,29 @@ until/while/if conditions; iteration cap 256. Focused virtio login smoke
 covers until / elif chain / break+continue in for|while / Ext2 prior greens
 (smp 1/2). Ramfs `/bin` dents ~110/128.
 
+## shell case/esac — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. `watch` deferred. Left Ext2-redirect
+duplex / multi-nc SMP races, CFS, deep jbd alone.
+
+Forms: `case WORD in PAT) LIST ;; … esac`. Fixed patterns and simple `*`/`?`
+globs (same thin matcher as `find -name`). Alternatives via glued `a|b)` or
+spaced `a | b)`. WORD expanded once; each pattern alt expands `$` then glob-
+matches. Nesting-aware `esac` alongside `done`/`fi`. No match → status 0;
+matched clause returns last body status. `;;` is two `;` tokens from
+`strtok_sh`. Focused virtio login smoke covers exact / `*` / `?` / `|` /
+`$VAR` / default `*` / no-match + prior greens (smp 1/2). Ramfs `/bin`
+dents ~110/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`until`/`elif`/`break`/`continue` +
-   `for`/`while`/`if` + stty/tput/reset + …): prefer small coherent chunks.
-   Thin `case`/`esac` if still thin; `/bin/watch` only if bite-sized. Keep
+3. More daily-driver gaps after inventory (`case`/`esac` + `until`/`elif`/
+   `break`/`continue` + `for`/`while`/`if` + stty/tput/reset + …): prefer
+   small coherent chunks. `/bin/watch` only if bite-sized. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Leave Ext2 duplex / multi-nc / CFS / jbd alone.

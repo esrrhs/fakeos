@@ -282,6 +282,7 @@ flowchart TD
 - [x] **shell $(( )) arithmetic expand**：token 扫描展开 `$?` / `$NAME` / `$((...))`（`+ - * / %`、括号、一元`+/-`；arith 内 `$NAME` 或裸 `NAME`，未绑定在非 `-u` 下为 0；除零/语法错误跳过该行）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **TIOCGWINSZ + /bin/stty + /bin/tput + /bin/reset**：`ioctl(TIOCGWINSZ)` 固定 VGA 80×25（无 SIGWINCH）；`stty size|sane|echo|-echo|raw|-raw|[-a]`；`tput cols|lines|clear|cup ROW COL`；`reset` = sane termios + ANSI clear。virtio login smoke（smp 1/2）。
 - [x] **shell until/elif/break/continue**：薄 `until LIST; do LIST; done`、`if …; elif …; then …; [else …;] fi`、`break`/`continue`；`run_seq` 按段 `$` 再展开且 compound 嵌套感知 `done`/`fi`（循环体可含 `if`）；条件不受 `set -e`；until/while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **shell case/esac**：薄 `case WORD in PAT) LIST ;; … esac`；固定模式与简单 `*`/`?` glob；`a|b` 或 `a | b)` 分支；WORD/`$` 一次展开；嵌套感知 `esac`；无匹配退出 0。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

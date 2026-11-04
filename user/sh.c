@@ -5,7 +5,7 @@
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
  * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
- * Thin for/while/until/if/elif + break/continue (per-iteration $ re-expand; ; or keyword separators). */
+ * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators). */
 package user;
 
 typedef unsigned long u64;
@@ -1577,7 +1577,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif; break/continue; ; seq; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2606,7 +2606,8 @@ static long run_seq(char **tokens, long rc_in);
 static long run_list(char **tokens, long rc_in);
 
 static int is_compound_kw(const char *s) {
-    return eq(s, "for") || eq(s, "while") || eq(s, "until") || eq(s, "if");
+    return eq(s, "for") || eq(s, "while") || eq(s, "until") || eq(s, "if")
+        || eq(s, "case");
 }
 
 /* Run orig with per-;-segment $ re-expand (mid-body export visible to later if). */
@@ -2649,9 +2650,11 @@ static int find_closing(char **tokens, int start, const char *closer) {
     int i = start;
     while (tokens[i] != 0) {
         if (eq(tokens[i], "for") || eq(tokens[i], "while") ||
-            eq(tokens[i], "until") || eq(tokens[i], "if")) {
+            eq(tokens[i], "until") || eq(tokens[i], "if") ||
+            eq(tokens[i], "case")) {
             depth++;
-        } else if (eq(tokens[i], "done") || eq(tokens[i], "fi")) {
+        } else if (eq(tokens[i], "done") || eq(tokens[i], "fi") ||
+                   eq(tokens[i], "esac")) {
             depth--;
             if (depth == 0) {
                 if (eq(tokens[i], closer)) {
@@ -3037,9 +3040,11 @@ static long run_if(char **tokens, long rc_in) {
             int d = 0;
             while (tokens[sep] != 0 && sep < fi_i) {
                 if (eq(tokens[sep], "for") || eq(tokens[sep], "while") ||
-                    eq(tokens[sep], "until") || eq(tokens[sep], "if")) {
+                    eq(tokens[sep], "until") || eq(tokens[sep], "if") ||
+                    eq(tokens[sep], "case")) {
                     d++;
-                } else if (eq(tokens[sep], "done") || eq(tokens[sep], "fi")) {
+                } else if (eq(tokens[sep], "done") || eq(tokens[sep], "fi") ||
+                           eq(tokens[sep], "esac")) {
                     d--;
                 } else if (d == 0 && (eq(tokens[sep], "elif") || eq(tokens[sep], "else"))) {
                     break;
@@ -3112,6 +3117,232 @@ static long run_if(char **tokens, long rc_in) {
     }
 }
 
+/* Thin glob for case patterns: only '*' and '?' meta; match whole string. */
+static int case_glob(const char *pat, const char *s) {
+    for (;;) {
+        if (pat[0] == 0) return s[0] == 0;
+        if (pat[0] == '*') {
+            while (pat[0] == '*') pat++;
+            if (pat[0] == 0) return 1;
+            while (*s) {
+                if (case_glob(pat, s)) return 1;
+                s++;
+            }
+            return 0;
+        }
+        if (pat[0] == '?') {
+            if (s[0] == 0) return 0;
+            pat++;
+            s++;
+            continue;
+        }
+        if (s[0] == 0 || pat[0] != s[0]) return 0;
+        pat++;
+        s++;
+    }
+}
+
+/* Match WORD against one pattern token that may contain '|' alternatives.
+ * Pattern is already stripped of trailing ')'. Expands $ in each alt. */
+static int case_pat_match(const char *pat, const char *word, long rc_in) {
+    static char altbuf[128];
+    static char expbuf[128];
+    int i = 0;
+    int n;
+    while (pat[i] != 0) {
+        n = 0;
+        while (pat[i] != 0 && pat[i] != '|' && n + 1 < 128) {
+            altbuf[n++] = pat[i++];
+        }
+        altbuf[n] = 0;
+        if (pat[i] == '|') i++;
+        expand_err = 0;
+        expand_token(altbuf, expbuf, 128, rc_in);
+        if (expand_err) return 0;
+        if (case_glob(expbuf, word)) return 1;
+    }
+    /* empty pattern (e.g. lone ")") matches empty word only via glob "" */
+    if (i == 0 && pat[0] == 0) {
+        expand_err = 0;
+        expand_token("", expbuf, 128, rc_in);
+        if (!expand_err && case_glob(expbuf, word)) return 1;
+    }
+    return 0;
+}
+
+static int case_is_open_kw(const char *s) {
+    return eq(s, "for") || eq(s, "while") || eq(s, "until") || eq(s, "if")
+        || eq(s, "case");
+}
+
+static int case_is_close_kw(const char *s) {
+    return eq(s, "done") || eq(s, "fi") || eq(s, "esac");
+}
+
+/* case WORD in PAT) LIST ;; ... esac  — thin: glued PAT) or a | b); * ? globs. */
+static long run_case(char **tokens, long rc_in) {
+    static char word_buf[128];
+    int i;
+    int esac_i;
+    int matched = 0;
+    long rc = rc_in;
+
+    /* case WORD in ... esac */
+    if (tokens[1] == 0) {
+        puts("sh: case: expected word");
+        return 1;
+    }
+    if (tokens[2] == 0 || !eq(tokens[2], "in")) {
+        puts("sh: case: expected in");
+        return 1;
+    }
+    esac_i = find_closing(tokens, 3, "esac");
+    if (esac_i < 0) {
+        puts("sh: case: expected esac");
+        return 1;
+    }
+    if (tokens[esac_i + 1] != 0 && !(eq(tokens[esac_i + 1], ";") && tokens[esac_i + 2] == 0)) {
+        if (!eq(tokens[esac_i + 1], ";") || tokens[esac_i + 2] != 0) {
+            puts("sh: case: trailing tokens after esac");
+            return 1;
+        }
+    }
+
+    expand_err = 0;
+    expand_token(tokens[1], word_buf, 128, rc_in);
+    if (expand_err) {
+        return 1;
+    }
+
+    i = 3;
+    while (i < esac_i) {
+        char *pats[MAX_TOK];
+        int np = 0;
+        char *body[MAX_TOK];
+        int bi = 0;
+        int depth;
+        int pi;
+        int hit = 0;
+        static char pat_store[MAX_TOK][128];
+
+        /* optional leading "(" */
+        if (tokens[i] != 0 && eq(tokens[i], "(")) {
+            i++;
+        }
+        /* collect patterns until a token ending with ')' or standalone ')' */
+        while (i < esac_i && tokens[i] != 0) {
+            char *t = tokens[i];
+            int len;
+            if (eq(t, "|")) {
+                i++;
+                continue;
+            }
+            if (eq(t, ")")) {
+                i++;
+                break;
+            }
+            len = 0;
+            while (t[len] != 0) len++;
+            if (len > 0 && t[len - 1] == ')') {
+                int k = 0;
+                if (len - 1 >= 128) {
+                    puts("sh: case: pattern too long");
+                    return 1;
+                }
+                while (k < len - 1) {
+                    pat_store[np][k] = t[k];
+                    k++;
+                }
+                pat_store[np][k] = 0;
+                if (np < MAX_TOK - 1) {
+                    pats[np] = pat_store[np];
+                    np++;
+                }
+                i++;
+                break;
+            }
+            /* plain token: copy; may contain internal '|' — case_pat_match splits */
+            if (len >= 128) {
+                puts("sh: case: pattern too long");
+                return 1;
+            }
+            {
+                int k = 0;
+                while (k < len) {
+                    pat_store[np][k] = t[k];
+                    k++;
+                }
+                pat_store[np][k] = 0;
+            }
+            if (np < MAX_TOK - 1) {
+                pats[np] = pat_store[np];
+                np++;
+            }
+            i++;
+            if (i < esac_i && tokens[i] != 0 && eq(tokens[i], "|")) {
+                i++;
+                continue;
+            }
+            /* next should be ) or PAT) — loop continues */
+        }
+        if (np == 0) {
+            puts("sh: case: expected pattern");
+            return 1;
+        }
+
+        /* body until ;; at depth 0, or esac */
+        depth = 0;
+        while (i < esac_i && tokens[i] != 0) {
+            if (case_is_open_kw(tokens[i])) {
+                depth++;
+                if (bi < MAX_TOK - 1) body[bi++] = tokens[i];
+                i++;
+                continue;
+            }
+            if (case_is_close_kw(tokens[i])) {
+                if (depth > 0) {
+                    depth--;
+                    if (bi < MAX_TOK - 1) body[bi++] = tokens[i];
+                    i++;
+                    continue;
+                }
+                /* bare close at depth 0 before esac — stop (esac handled outside) */
+                break;
+            }
+            if (depth == 0 && eq(tokens[i], ";") && tokens[i + 1] != 0
+                && eq(tokens[i + 1], ";")) {
+                i += 2; /* consume ;; */
+                break;
+            }
+            if (bi < MAX_TOK - 1) body[bi++] = tokens[i];
+            i++;
+        }
+        body[bi] = 0;
+
+        if (!matched) {
+            for (pi = 0; pi < np; pi++) {
+                if (case_pat_match(pats[pi], word_buf, rc_in)) {
+                    hit = 1;
+                    break;
+                }
+            }
+            if (hit) {
+                matched = 1;
+                if (body[0] != 0) {
+                    rc = expand_and_run(body, rc_in);
+                } else {
+                    rc = 0;
+                }
+            }
+        }
+        /* continue scanning remaining clauses even after match (syntax check) */
+    }
+    if (!matched) {
+        return 0;
+    }
+    return rc;
+}
+
 static long run_compound(char **tokens, long rc_in) {
     if (eq(tokens[0], "for")) {
         return run_for(tokens, rc_in);
@@ -3125,6 +3356,9 @@ static long run_compound(char **tokens, long rc_in) {
     if (eq(tokens[0], "if")) {
         return run_if(tokens, rc_in);
     }
+    if (eq(tokens[0], "case")) {
+        return run_case(tokens, rc_in);
+    }
     return 1;
 }
 
@@ -3136,11 +3370,15 @@ static long run_seq(char **tokens, long rc_in) {
         char *stage[MAX_TOK];
         int ns = 0;
         if (is_compound_kw(tokens[i])) {
-            /* Keep for/while/until/if intact through matching done/fi. */
-            int end = find_closing(tokens, i + 1,
-                                   eq(tokens[i], "if") ? "fi" : "done");
+            /* Keep for/while/until/if/case intact through matching done/fi/esac. */
+            const char *closer;
+            int end;
+            if (eq(tokens[i], "if")) closer = "fi";
+            else if (eq(tokens[i], "case")) closer = "esac";
+            else closer = "done";
+            end = find_closing(tokens, i + 1, closer);
             if (end < 0) {
-                puts("sh: compound: expected done/fi");
+                puts("sh: compound: expected done/fi/esac");
                 return 1;
             }
             while (i <= end && ns < MAX_TOK - 1) {
@@ -3320,7 +3558,7 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
