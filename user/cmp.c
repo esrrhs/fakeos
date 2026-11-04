@@ -1,8 +1,9 @@
 /* fakeos userland - cmp: compare two files byte-by-byte (POSIX-ish subset).
- * Forms: cmp [-l|-s] [-n N|-nN] FILE1 FILE2
- * -n limits comparison to at most N bytes (GNU-ish). Exit 0 identical (within
- * limit), 1 differ, 2 error. "-" means stdin (at most one). Compact argv for
- * EXEC_MAX_ARGC=8.
+ * Forms: cmp [-l|-s] [-n N|-nN] [-i SKIP|-iSKIP|-i SKIP1:SKIP2] FILE1 FILE2
+ * -n limits comparison to at most N bytes (GNU-ish). -i skips SKIP initial
+ * bytes of both files (or SKIP1 of FILE1 and SKIP2 of FILE2). Byte/line
+ * numbers restart after the skip. Exit 0 identical (within limit), 1 differ,
+ * 2 error. "-" means stdin (at most one). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -10,6 +11,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern long u_lseek(long fd, long off, long whence);
 extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 extern long strtol_dec(const char *s);
@@ -24,9 +26,11 @@ enum {
 
 static unsigned long opt_limit; /* 0 = unlimited */
 static int have_limit;
+static unsigned long skip1;
+static unsigned long skip2;
 
 static void usage(void) {
-    u_write(2, "usage: cmp [-l|-s] [-n N] FILE1 FILE2\n", 38);
+    u_write(2, "usage: cmp [-l|-s] [-n N] [-i SKIP] FILE1 FILE2\n", 49);
 }
 
 static int is_digits(const char *s) {
@@ -36,6 +40,55 @@ static int is_digits(const char *s) {
         if (s[i] < '0' || s[i] > '9') return 0;
     }
     return 1;
+}
+
+/* Parse SKIP or SKIP1:SKIP2 into skip1/skip2. Returns 1 on success. */
+static int parse_skip(const char *s) {
+    int i = 0;
+    unsigned long a = 0;
+    unsigned long b = 0;
+    if (s == 0 || s[0] == 0) return 0;
+    while (s[i] && s[i] >= '0' && s[i] <= '9') {
+        a = a * 10 + (unsigned long)(s[i] - '0');
+        i++;
+    }
+    if (i == 0) return 0;
+    if (s[i] == 0) {
+        skip1 = a;
+        skip2 = a;
+        return 1;
+    }
+    if (s[i] != ':') return 0;
+    i++;
+    if (s[i] < '0' || s[i] > '9') return 0;
+    while (s[i] && s[i] >= '0' && s[i] <= '9') {
+        b = b * 10 + (unsigned long)(s[i] - '0');
+        i++;
+    }
+    if (s[i] != 0) return 0;
+    skip1 = a;
+    skip2 = b;
+    return 1;
+}
+
+static int apply_skip(long fd, unsigned long n) {
+    unsigned char buf[BUF];
+    long left;
+    long got;
+    long off;
+    if (n == 0) return 0;
+    left = (long)n;
+    off = u_lseek(fd, left, 1 /* SEEK_CUR */);
+    if (off >= 0) return 0;
+    while (left > 0) {
+        unsigned long want = BUF;
+        if ((unsigned long)left < want) want = (unsigned long)left;
+        got = u_read(fd, buf, want);
+        if (got < 0) return 1;
+        if (got == 0) return 0; /* short file: compare will see EOF */
+        left -= got;
+    }
+    return 0;
 }
 
 static void emit_dec(unsigned long v) {
@@ -162,6 +215,8 @@ int main(int argc, char **argv) {
 
     opt_limit = 0;
     have_limit = 0;
+    skip1 = 0;
+    skip2 = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
@@ -195,7 +250,19 @@ int main(int argc, char **argv) {
             i++;
             continue;
         }
-        /* glued -sn / -ls etc without -n value */
+        if (strcmp(argv[i], "-i") == 0) {
+            if (i + 1 >= argc || !parse_skip(argv[i + 1])) {
+                usage();
+                return 2;
+            }
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'i' && argv[i][2] != 0 && parse_skip(argv[i] + 2)) {
+            i++;
+            continue;
+        }
+        /* glued -sn / -ls / -siN etc */
         {
             int j;
             int handled = 0;
@@ -220,6 +287,18 @@ int main(int argc, char **argv) {
                     }
                     opt_limit = (unsigned long)strtol_dec(argv[i + 1]);
                     have_limit = 1;
+                    i += 2;
+                    goto next_arg;
+                } else if (argv[i][j] == 'i') {
+                    if (argv[i][j + 1] != 0 && parse_skip(argv[i] + j + 1)) {
+                        handled = 1;
+                        i++;
+                        goto next_arg;
+                    }
+                    if (i + 1 >= argc || !parse_skip(argv[i + 1])) {
+                        usage();
+                        return 2;
+                    }
                     i += 2;
                     goto next_arg;
                 } else {
@@ -255,6 +334,11 @@ int main(int argc, char **argv) {
         return rc;
     }
     if (strcmp(f2, "-") != 0) close2 = 1;
+    if (apply_skip(fd1, skip1) != 0 || apply_skip(fd2, skip2) != 0) {
+        if (close1) u_close(fd1);
+        if (close2) u_close(fd2);
+        return 2;
+    }
     rc = cmp_fds(fd1, fd2, f1, f2, mode);
     if (close1) u_close(fd1);
     if (close2) u_close(fd2);

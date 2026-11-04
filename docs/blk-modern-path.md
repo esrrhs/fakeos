@@ -2056,6 +2056,14 @@ with existing `-b`/`-w` whitespace modes and `-uq`. Glued `-iq`/`-uibw` keep
 EXEC_MAX_ARGC=8. No new `/bin` dent. Focused virtio login smoke covers
 `diff -i` equal/differ + prior greens (smp 1/2).
 
+## cmp -i — landed
+
+`/bin/cmp -i SKIP` (glued `-iSKIP`, also `-i SKIP1:SKIP2`) skips SKIP initial
+bytes of both files (or different skips per file) before comparing. Seek when
+possible, else read-discard. Byte/line numbers restart after the skip (GNU).
+Combines with `-n`/`-l`/`-s`. No new `/bin` dent. Focused virtio login smoke
+covers `cmp -i` equal/differ + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2063,6 +2071,6 @@ EXEC_MAX_ARGC=8. No new `/bin` dent. Focused virtio login smoke covers
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (inspect
-   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
+   sed/find leftover; `cp -p` waits on utimensat; `set --` deferred; skip
+   large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

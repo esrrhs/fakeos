@@ -396,6 +396,7 @@ flowchart TD
 - [x] **timeout -k**：超时首信号后等待 DUR 秒再 SIGKILL（`-k DUR`/`-kDUR`/`--kill-after=DUR`；无 `-k` 保持约 2s 短宽限）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **od -t x4/o4/u4/d4**：小端 32 位十六进制/八进制/无符号/有符号十进制字（`-tx4`/`-to4`/`-tu4`/`-td4`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **diff -i**：比较时忽略大小写（可与 `-b`/`-w`/`-uq` 组合；`-uqbiw` 粘合）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **cmp -i**：跳过初始字节再比较（`-i SKIP`/`-iSKIP`/`-i SKIP1:SKIP2`；可与 `-n`/`-l`/`-s` 并用）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
