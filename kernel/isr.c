@@ -20,6 +20,7 @@ extern void kbd_irq(void);
 extern void net_poll(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp,
                                       u64 *f_rdi, u64 *f_rax);
+extern void sched_resched_from_ipi(void);
 extern void net_tcp_timer(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
@@ -150,12 +151,15 @@ void isr_dispatch(struct trap_frame *f) {
         return;
     }
 
-    /* Vector 34: reschedule / signal-kick IPI (from sched_signal_send). */
+    /* Vector 34: reschedule / signal-kick IPI (enqueue balance + signals). */
     if (v == 34) {
         arch.lapic_send_eoi();
         if ((f->cs & 3) == 3) {
             sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
                                       &f->rax);
+        } else {
+            /* Idle CPUs: claim balanced/stolen work immediately. */
+            sched_resched_from_ipi();
         }
         return;
     }

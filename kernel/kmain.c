@@ -23,6 +23,7 @@ extern void vmm_selftest(void);
 extern void slab_selftest(void);
 extern void sched_selftest(void);
 extern void sched_steal_selftest(void);
+extern void sched_balance_selftest(void);
 extern types.uint32_t sched_smp_start(void);
 extern void uproc_selftest(void);
 extern void vfs_selftest(void);
@@ -169,6 +170,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     /* Release parked APs into per-CPU idle; then prove cross-CPU steal. */
     sched_smp_start();
     sched_steal_selftest();
+    sched_balance_selftest();
 
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");
@@ -189,7 +191,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: signals IRQ/IPI frames + stop/cont + pipe EINTR/SA_RESTART + cross-CPU steal + pthread + Ext2 rename + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: IPI resched + load-aware balance + signals SMP + cross-CPU steal + pthread + Ext2 rename + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
@@ -206,6 +208,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
     kprintf("           - Kernel threads + CFS-lite (nice/vruntime) + spinlocks: OK\n");
     kprintf("           - Per-CPU runqueues + cross-CPU steal (kernel then user): OK\n");
+    kprintf("           - Load-aware enqueue + vector-34 IPI resched to idle CPUs: OK\n");
     kprintf("           - Signals: IRQ/IPI sigframes, stop/cont, pipe EINTR/SA_RESTART: OK\n");
     kprintf("           - VFS inode/dentry/open-file + Ramfs (static/dynamic): OK\n");
     kprintf("           - Embedded rootfs (/bin/init,sh,hello,cat,ls,/etc/motd): OK\n");

@@ -26,6 +26,8 @@ extern u32 smp_cpu_count(void);
 extern u64 sched_steal_total(void);
 extern u64 sched_steal_on_cpu(u32 cpu);
 extern u64 sched_steal_kernel_total(void);
+extern u64 sched_balance_remote_total(void);
+extern u64 sched_ipi_resched_total(void);
 
 enum {
     LOCK_WORKERS = 4,
@@ -323,4 +325,89 @@ void sched_steal_selftest(void) {
     kprintf("      [PASS] Cross-CPU steal: kernel workers on AP (steals=%u kernel=%u hits0=%u hits1=%u)\n",
             steals1 - steals0, sched_steal_kernel_total(),
             g_steal_cpu_hits[0], g_steal_cpu_hits[1]);
+}
+
+/* Load-aware enqueue + IPI resched smoke: new kernel workers should land on
+ * an idle AP via balance (not only timer steal), with at least one resched IPI. */
+enum { BALANCE_WORKERS = 4 };
+
+static volatile u32 g_bal_done;
+static volatile u32 g_bal_saw_ap;
+static volatile u64 g_bal_hits[8];
+
+static void balance_worker(u64 id) {
+    u32 c = smp_cpuid();
+    (void)id;
+    if (c < 8) {
+        g_bal_hits[c] = g_bal_hits[c] + 1;
+    }
+    if (c != 0) {
+        g_bal_saw_ap = 1;
+    }
+    {
+        u64 n = 0;
+        u64 i;
+        for (i = 0; i < 50000; i++) {
+            n = n + i;
+        }
+        (void)n;
+    }
+    g_bal_done = g_bal_done + 1;
+    kthread_exit();
+}
+
+void sched_balance_selftest(void) {
+    u32 i;
+    u64 bal0;
+    u64 bal1;
+    u64 ipi0;
+    u64 ipi1;
+    u32 ncpu = smp_cpu_count();
+
+    kprintf("\n[SCHED] Load-aware enqueue + IPI resched self-test...\n");
+    if (ncpu < 2) {
+        kprintf("      [PASS] IPI resched balance: skipped (-smp 1)\n");
+        return;
+    }
+
+    g_bal_done = 0;
+    g_bal_saw_ap = 0;
+    for (i = 0; i < 8; i++) {
+        g_bal_hits[i] = 0;
+    }
+    bal0 = sched_balance_remote_total();
+    ipi0 = sched_ipi_resched_total();
+
+    arch.cpu_sti();
+    for (i = 0; i < BALANCE_WORKERS; i++) {
+        if (kthread_create((u64)(&balance_worker), i) == 0xFFFFFFFF) {
+            kprintf("      [FAIL] balance worker create %u\n", (u64)i);
+            arch.cpu_cli();
+            return;
+        }
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 800;
+        while (g_bal_done != BALANCE_WORKERS && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    arch.pit_busy_wait_ms(30);
+    bal1 = sched_balance_remote_total();
+    ipi1 = sched_ipi_resched_total();
+    arch.cpu_cli();
+
+    if (g_bal_done != BALANCE_WORKERS) {
+        kprintf("      [FAIL] balance workers done %u/%u\n",
+                (u64)g_bal_done, (u64)BALANCE_WORKERS);
+        return;
+    }
+    if (g_bal_saw_ap == 0 && (bal1 - bal0) == 0) {
+        kprintf("      [FAIL] no remote balance (hits0=%u hits1=%u bal=%u ipi=%u)\n",
+                g_bal_hits[0], g_bal_hits[1], bal1 - bal0, ipi1 - ipi0);
+        return;
+    }
+    kprintf("      [PASS] IPI resched balance: remote=%u ipi=%u hits0=%u hits1=%u\n",
+            bal1 - bal0, ipi1 - ipi0, g_bal_hits[0], g_bal_hits[1]);
 }

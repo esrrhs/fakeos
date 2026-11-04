@@ -120,6 +120,8 @@ static volatile u64 ap_idle_wakeups[SCHED_MAX_CPUS];
 static volatile u64 sched_steal_count[SCHED_MAX_CPUS]; /* steals onto this CPU */
 static volatile u64 sched_migrate_user;                /* user steals total   */
 static volatile u64 sched_migrate_kernel;              /* kernel steals total */
+static volatile u64 sched_balance_remote;              /* enqueues onto remote RQ */
+static volatile u64 sched_ipi_resched;                 /* resched IPIs sent */
 static u32 sched_bsp_cpu;            /* Logical CPU index of the BSP       */
 static u32 active;                   /* Scheduler online flag              */
 static volatile u64 sched_ticks;
@@ -206,6 +208,88 @@ static void sched_set_kstack_cpu(u32 cpu, u64 top) {
     sched_load_pcpu(cpu);
 }
 
+/* True when `cpu` is executing its idle TCB (or has no current). */
+static u32 rq_cpu_is_idle(u32 cpu) {
+    u32 cur;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return 0;
+    }
+    cur = cpu_current[cpu];
+    if (cur >= MAX_THREADS) {
+        return 1;
+    }
+    return idle_mark[cur];
+}
+
+/* Runnable non-idle threads queued on `cpu` (includes the running one). */
+static u32 rq_load(u32 cpu) {
+    u32 i;
+    u32 n = 0;
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (idle_mark[i]) {
+            continue;
+        }
+        if (threads[i].state != TCB_RUNNABLE) {
+            continue;
+        }
+        if (threads[i].rq_cpu != cpu) {
+            continue;
+        }
+        n = n + 1;
+    }
+    return n;
+}
+
+/* Kick a remote CPU out of HLT / into pick_next via vector-34 IPI. */
+static void sched_kick_cpu(u32 cpu) {
+    u32 apic;
+    if (cpu >= SCHED_MAX_CPUS || cpu == sched_cpu_index()) {
+        return;
+    }
+    if (cpu != sched_bsp_cpu && ap_in_sched[cpu] == 0) {
+        return;
+    }
+    apic = smp_cpu_apic_id(cpu);
+    if (apic == 0xFFFFFFFFu) {
+        return;
+    }
+    lapic_send_ipi(apic, (u32)SCHED_IPI_VECTOR);
+    sched_ipi_resched = sched_ipi_resched + 1;
+}
+
+/* Load-aware CPU pick: prefer idle CPUs, else lowest runnable load.
+ * Ties keep the local CPU. APs not yet in the scheduler are skipped. */
+static u32 rq_select_cpu(void) {
+    u32 n = smp_cpu_count();
+    u32 local = sched_cpu_index();
+    u32 best = local;
+    u32 best_score = 0xFFFFFFFFu;
+    u32 c;
+    if (n <= 1) {
+        return local;
+    }
+    if (n > SCHED_MAX_CPUS) {
+        n = SCHED_MAX_CPUS;
+    }
+    for (c = 0; c < n; c++) {
+        u32 load;
+        u32 score;
+        if (c != sched_bsp_cpu && ap_in_sched[c] == 0) {
+            continue;
+        }
+        load = rq_load(c);
+        score = load * 2;
+        if (rq_cpu_is_idle(c) == 0) {
+            score = score + 1;
+        }
+        if (score < best_score || (score == best_score && c == local)) {
+            best_score = score;
+            best = c;
+        }
+    }
+    return best;
+}
+
 /* Enqueue a newly-runnable (or created) thread onto `cpu`'s runqueue. */
 static void rq_enqueue(u32 id, u32 cpu) {
     if (id >= MAX_THREADS) {
@@ -215,6 +299,42 @@ static void rq_enqueue(u32 id, u32 cpu) {
         cpu = 0;
     }
     threads[id].rq_cpu = cpu;
+}
+
+/* Place a new runnable thread with load-aware balance; IPI idle remotes.
+ * Caller must set state=RUNNABLE first so a kicked idle CPU can see it.
+ * rq_cpu is cleared before the load walk so this thread is not self-counted. */
+static void rq_enqueue_balanced(u32 id) {
+    u32 cpu;
+    u32 local;
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    local = sched_cpu_index();
+    threads[id].rq_cpu = SCHED_CPU_NONE;
+    cpu = rq_select_cpu();
+    rq_enqueue(id, cpu);
+    if (cpu != local) {
+        sched_balance_remote = sched_balance_remote + 1;
+        if (rq_cpu_is_idle(cpu)) {
+            sched_kick_cpu(cpu);
+        }
+    }
+}
+
+/* After a sleeper becomes RUNNABLE, kick its home RQ if that CPU is idle. */
+static void rq_kick_idle_home(u32 id) {
+    u32 cpu;
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    cpu = threads[id].rq_cpu;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    if (rq_cpu_is_idle(cpu)) {
+        sched_kick_cpu(cpu);
+    }
 }
 
 /* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
@@ -467,6 +587,8 @@ void sched_init(void) {
     }
     sched_migrate_user = 0;
     sched_migrate_kernel = 0;
+    sched_balance_remote = 0;
+    sched_ipi_resched = 0;
     sched_bsp_cpu = smp_cpuid();
     if (sched_bsp_cpu >= SCHED_MAX_CPUS) {
         sched_bsp_cpu = 0;
@@ -599,8 +721,8 @@ u32 kthread_create(u64 entry, u64 arg) {
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].on_cpu = SCHED_CPU_NONE;
-    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
+    rq_enqueue_balanced(i);
     return i;
 }
 
@@ -660,8 +782,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].on_cpu = SCHED_CPU_NONE;
-    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
+    rq_enqueue_balanced(i);
     return i;
 }
 
@@ -753,8 +875,8 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
         }
     }
     threads[i].on_cpu = SCHED_CPU_NONE;
-    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
+    rq_enqueue_balanced(i);
     return i;
 }
 
@@ -835,8 +957,8 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
         threads[i].sig_restorer[s] = threads[sched_cur()].sig_restorer[s];
     }
     threads[i].on_cpu = SCHED_CPU_NONE;
-    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
+    rq_enqueue_balanced(i);
     return i;
 }
 
@@ -931,20 +1053,34 @@ void sched_sleep_cli(u64 chan) {
 void sched_wakeup(u64 chan) {
     u32 i;
     u64 flags;
+    u32 kick_mask;
     if (chan == 0) {
         return;
     }
+    kick_mask = 0;
     flags = cpu_irq_save();
     spin_lock(&sched_run_lock);
     for (i = 0; i < MAX_THREADS; i++) {
         if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+            u32 cpu;
             threads[i].wait_chan = 0;
             cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
+            cpu = threads[i].rq_cpu;
+            if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                kick_mask = kick_mask | (1u << cpu);
+            }
         }
     }
     cfs_update_min();
     spin_unlock(&sched_run_lock);
+    if (kick_mask != 0) {
+        for (i = 0; i < SCHED_MAX_CPUS; i++) {
+            if ((kick_mask & (1u << i)) != 0) {
+                sched_kick_cpu(i);
+            }
+        }
+    }
     cpu_irq_restore(flags);
 }
 
@@ -953,16 +1089,23 @@ u32 sched_wakeup_n(u64 chan, u32 n) {
     u32 i;
     u32 woke = 0;
     u64 flags;
+    u32 kick_mask;
     if (chan == 0 || n == 0) {
         return 0;
     }
+    kick_mask = 0;
     flags = cpu_irq_save();
     spin_lock(&sched_run_lock);
     for (i = 0; i < MAX_THREADS && woke < n; i++) {
         if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+            u32 cpu;
             threads[i].wait_chan = 0;
             cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
+            cpu = threads[i].rq_cpu;
+            if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                kick_mask = kick_mask | (1u << cpu);
+            }
             woke++;
         }
     }
@@ -970,6 +1113,13 @@ u32 sched_wakeup_n(u64 chan, u32 n) {
         cfs_update_min();
     }
     spin_unlock(&sched_run_lock);
+    if (kick_mask != 0) {
+        for (i = 0; i < SCHED_MAX_CPUS; i++) {
+            if ((kick_mask & (1u << i)) != 0) {
+                sched_kick_cpu(i);
+            }
+        }
+    }
     cpu_irq_restore(flags);
     return woke;
 }
@@ -1003,17 +1153,30 @@ void kmutex_unlock(struct kmutex *m) {
     m->locked = 0;
     {
         u32 i;
+        u32 kick_mask = 0;
         u64 chan = (u64)m;
         for (i = 0; i < MAX_THREADS; i++) {
             if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+                u32 cpu;
                 threads[i].wait_chan = 0;
                 cfs_place_entity(i);
                 threads[i].state = TCB_RUNNABLE;
+                cpu = threads[i].rq_cpu;
+                if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                    kick_mask = kick_mask | (1u << cpu);
+                }
             }
         }
         cfs_update_min();
+        spin_unlock(&sched_run_lock);
+        if (kick_mask != 0) {
+            for (i = 0; i < SCHED_MAX_CPUS; i++) {
+                if ((kick_mask & (1u << i)) != 0) {
+                    sched_kick_cpu(i);
+                }
+            }
+        }
     }
-    spin_unlock(&sched_run_lock);
     arch.cpu_sti();
 }
 
@@ -1478,6 +1641,7 @@ u32 sched_signal_send(u32 pid, u32 sig) {
                     threads[i].state = TCB_RUNNABLE;
                     threads[i].wait_chan = 0;
                     threads[i].cont_notify = 1;
+                    rq_kick_idle_home(i);
                     if (threads[i].ppid != 0) {
                         sched_wakeup(sched_wait4_chan(threads[i].ppid));
                     }
@@ -1490,10 +1654,12 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             if (threads[i].state == TCB_SLEEPING) {
                 threads[i].wait_chan = 0;
                 threads[i].state = TCB_RUNNABLE;
+                rq_kick_idle_home(i);
             }
             /* KILL must not leave a process stuck STOPPED. */
             if (sig == SIGKILL_N && threads[i].state == TCB_STOPPED) {
                 threads[i].state = TCB_RUNNABLE;
+                rq_kick_idle_home(i);
             }
             /* Running on a remote CPU: IPI so stop/handler/kill is prompt. */
             if (sig != 0 && threads[i].on_cpu != SCHED_CPU_NONE
@@ -1502,7 +1668,10 @@ u32 sched_signal_send(u32 pid, u32 sig) {
                 if (apic != 0xFFFFFFFFu) {
                     /* Fixed delivery, vector SCHED_IPI_VECTOR. */
                     lapic_send_ipi(apic, (u32)SCHED_IPI_VECTOR);
+                    sched_ipi_resched = sched_ipi_resched + 1;
                 }
+            } else if (sig == SIGCONT_N && threads[i].state == TCB_RUNNABLE) {
+                rq_kick_idle_home(i);
             }
         }
     }
@@ -1908,8 +2077,9 @@ u32 sched_has_pending_fatal(void) {
  * SMP: release parked APs into per-CPU idle + local APIC timer + steal.
  *
  * APs load GDT/IDT, LTR per-CPU TSS, enable LAPIC timer, install GS for the
- * SYSCALL conduit, then idle. Timer (and post-halt pick_next) steals runnable
- * work from remote runqueues — kernel first, then user.
+ * SYSCALL conduit, then idle. Timer, post-halt pick_next, and vector-34
+ * resched IPIs (from load-aware enqueue / wakeup) claim local RQ work or
+ * steal from remote runqueues — kernel first, then user.
  * ------------------------------------------------------------------------- */
 
 u32 sched_ap_waiting(void) {
@@ -1938,6 +2108,28 @@ u64 sched_steal_kernel_total(void) {
 
 u64 sched_steal_user_total(void) {
     return sched_migrate_user;
+}
+
+u64 sched_balance_remote_total(void) {
+    return sched_balance_remote;
+}
+
+u64 sched_ipi_resched_total(void) {
+    return sched_ipi_resched;
+}
+
+/* Vector-34 reschedule: if this CPU is idle, pick work now (balance/steal).
+ * Signal kicks to busy user threads skip this (caller checks CPL). */
+void sched_resched_from_ipi(void) {
+    if (!active) {
+        return;
+    }
+    spin_lock(&sched_run_lock);
+    if (idle_mark[sched_cur()] == 0) {
+        spin_unlock(&sched_run_lock);
+        return;
+    }
+    sched_switch_to(pick_next(sched_cur()));
 }
 
 void sched_ap_enter(u32 cpu) {
