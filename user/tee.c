@@ -1,4 +1,8 @@
-/* fakeos userland - tee: copy stdin to stdout and optional files (-a append). */
+/* fakeos userland - tee: copy stdin to stdout and optional files.
+ * Forms: tee [-ai] [FILE...]
+ * -a append; -i ignore SIGINT. Glued short opts (-ai/-ia). Default truncates
+ * FILE. Compact argv for EXEC_MAX_ARGC=8.
+ */
 package user;
 
 typedef unsigned long u64;
@@ -8,6 +12,7 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern int strcmp(const char *a, const char *b);
+extern void *signal(int sig, void *handler);
 extern void printf(const char *fmt, ...);
 
 enum {
@@ -15,13 +20,20 @@ enum {
     O_CREAT  = 0x40,
     O_TRUNC  = 0x200,
     O_APPEND = 0x400,
-    MAX_OUT  = 8
+    MAX_OUT  = 8,
+    SIGINT_N = 2,
+    SIG_IGN_V = 1
 };
+
+static void usage(void) {
+    u_write(2, "usage: tee [-ai] [FILE...]\n", 27);
+}
 
 int main(int argc, char **argv) {
     long fds[MAX_OUT];
     int nfds = 0;
     int append = 0;
+    int ignore_int = 0;
     int i = 1;
     int rc = 0;
     char buf[512];
@@ -29,16 +41,25 @@ int main(int argc, char **argv) {
     long flags;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
-        if (strcmp(argv[i], "-a") == 0) {
-            append = 1;
-            i++;
-        } else if (strcmp(argv[i], "--") == 0) {
+        int j;
+        if (strcmp(argv[i], "--") == 0) {
             i++;
             break;
-        } else {
-            u_write(2, "usage: tee [-a] [FILE...]\n", 26);
-            return 1;
         }
+        for (j = 1; argv[i][j]; j++) {
+            char o = argv[i][j];
+            if (o == 'a') append = 1;
+            else if (o == 'i') ignore_int = 1;
+            else {
+                usage();
+                return 1;
+            }
+        }
+        i++;
+    }
+
+    if (ignore_int) {
+        signal(SIGINT_N, (void *)(long)SIG_IGN_V);
     }
 
     flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
