@@ -1,7 +1,7 @@
 /* fakeos userland - printf: format ARGS with escapes (thin POSIX subset).
  *   printf FORMAT [ARGUMENT...]
  * Format escapes: \n \t \r \a \b \f \v \\ \% \0ooo \c (stop). Specifiers:
- * %s %c %d %i %u %x %X %% and %b (ARGUMENT with the same escapes; \c stops
+ * %s %c %d %i %u %x %X %o %% and %b (ARGUMENT with the same escapes; \c stops
  * all further output). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
@@ -51,6 +51,21 @@ static void out_hex(u64 v) {
     while (v > 0) {
         tmp[i++] = d[v & 0xF];
         v >>= 4;
+    }
+    for (k = i - 1; k >= 0; k--) out_ch(tmp[k]);
+}
+
+static void out_oct(u64 v) {
+    char tmp[24];
+    int i = 0;
+    int k;
+    if (v == 0) {
+        out_ch('0');
+        return;
+    }
+    while (v > 0) {
+        tmp[i++] = (char)('0' + (v & 7));
+        v >>= 3;
     }
     for (k = i - 1; k >= 0; k--) out_ch(tmp[k]);
 }
@@ -178,6 +193,11 @@ int main(int argc, char **argv) {
         } else if (fmt[i] == 'x' || fmt[i] == 'X') {
             const char *a = (ai < argc) ? argv[ai] : "0";
             out_hex((u64)strtol_dec(a));
+            if (ai < argc) ai++;
+            i++;
+        } else if (fmt[i] == 'o') {
+            const char *a = (ai < argc) ? argv[ai] : "0";
+            out_oct((u64)strtol_dec(a));
             if (ai < argc) ai++;
             i++;
         } else {

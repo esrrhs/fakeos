@@ -1071,16 +1071,29 @@ leaking NUL + trailing rodata into the serial console). Inventory: `/proc` still
 jbd alone. Focused virtio login smoke covers `timeout`+`watch -n1` echo +
 prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 
+## printf %o + export -n / type / command -v — landed
+
+Thin userland polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; `hash` /
+`read` builtin still deferred.
+
+`printf` gains `%o` (octal; `%x` already). Shell: `export -n NAME` clears the
+export attribute while keeping `$NAME` (env table gains an `exported` flag;
+`env` / bare `export` / `execve` envp only emit exported entries). Builtins
+`type NAME` and `command -v NAME` (pathname or builtin name; exit 1 if
+missing). Focused virtio login smoke covers `%o` / export -n keep-value /
+type builtin+PATH / command -v plus prior greens (smp 1/2). Ramfs `/bin`
+dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`watch` + `case`/`esac` +
-   `until`/`elif`/`break`/`continue` + `for`/`while`/`if` + stty/tput/reset
-   + …): prefer small coherent chunks. Keep
+3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish after inventory: `printf %o` ( `%x` already),
-   shell `export -n` / `type` / `command -v` / `hash` / `read` builtin if
-   missing; skip large `getopts` / here-doc. Leave Ext2 duplex / multi-nc /
-   CFS / jbd alone.
+   deferred. Next thin polish: shell `hash` / `read` builtin if missing;
+   skip large `getopts` / here-doc. Leave Ext2 duplex / multi-nc / CFS / jbd
+   alone.
