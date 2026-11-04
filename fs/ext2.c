@@ -16,9 +16,11 @@ extern void kprintf(const char *fmt, ...);
  * unlink (regular files), rmdir, rename, ftruncate, sync. Block size
  * 1024/2048/4096. Multi block group (BGDT indexed). Direct + single-/
  * double-/triple-indirect maps. Hardening: free-count bookkeeping in
- * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered-
- * write recovery markers in unused SB space (magic/gen/flags); dirty or
- * META_PENDING mount recounts free bits.
+ * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered/
+ * writeback commit modes with recovery markers in unused SB space
+ * (magic/gen/flags/mode); dirty or META_PENDING mount recounts free bits.
+ * ORDERED flushes the block device before clearing META_PENDING so data
+ * hits media ahead of the commit record (not a full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -185,20 +187,26 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
     return bwrite(blk, blk_buf);
 }
 
-/* Journal-lite markers in otherwise-unused SB bytes (not a full jbd). */
+/* Journal-lite markers in otherwise-unused SB bytes (not a full jbd).
+ * ORDERED: device FLUSH before clearing META_PENDING (data-before-commit).
+ * WRITEBACK: clear pending without an extra FLUSH (fsync/sync still drain). */
 enum {
     JL_MAGIC = 0x4C4A3146u,   /* 'F1JL' */
     JL_OFF_MAGIC = 248,
     JL_OFF_GEN = 252,
     JL_OFF_FLAGS = 256,
+    JL_OFF_MODE = 258,
     JL_IDLE = 0,
     JL_META_PENDING = 1,
+    JL_MODE_WRITEBACK = 0,
+    JL_MODE_ORDERED = 1,
     EXT2_VALID_FS = 1,
     EXT2_ERROR_FS = 2
 };
 
 static u32 jl_gen;
 static u32 jl_flags;
+static u32 jl_mode = JL_MODE_ORDERED;
 
 /* Superblock at byte 1024: update free counts + optional state + jl markers. */
 static u32 sb_write_counts(u16 state) {
@@ -212,6 +220,7 @@ static u32 sb_write_counts(u16 state) {
     wr32(sbsec + JL_OFF_MAGIC, JL_MAGIC);
     wr32(sbsec + JL_OFF_GEN, jl_gen);
     wr16(sbsec + JL_OFF_FLAGS, (u16)jl_flags);
+    wr16(sbsec + JL_OFF_MODE, (u16)jl_mode);
     return drivers.blk_write(2, sbsec, 2);
 }
 
@@ -220,12 +229,24 @@ static u32 jl_write_flags(u32 flags) {
     return sb_write_counts(0xFFFF);
 }
 
+static void jl_set_mode(u32 mode) {
+    if (mode != JL_MODE_WRITEBACK && mode != JL_MODE_ORDERED) {
+        mode = JL_MODE_ORDERED;
+    }
+    jl_mode = mode;
+}
+
 static void jl_begin(void) {
     jl_gen++;
     jl_write_flags(JL_META_PENDING);
 }
 
+/* Commit the in-flight marker. ORDERED drains the block device first so
+ * prior data/meta writes are on media before META_PENDING clears. */
 static void jl_commit(void) {
+    if (jl_mode == JL_MODE_ORDERED) {
+        drivers.blk_flush();
+    }
     jl_write_flags(JL_IDLE);
 }
 
@@ -1141,11 +1162,18 @@ u32 ext2_mount(void) {
     {
         u16 st = rd16(sbsec + 58);
         u32 magic = rd32(sbsec + JL_OFF_MAGIC);
+        u16 mode;
         jl_gen = rd32(sbsec + JL_OFF_GEN);
         jl_flags = rd16(sbsec + JL_OFF_FLAGS);
+        mode = rd16(sbsec + JL_OFF_MODE);
         if (magic != JL_MAGIC) {
             jl_gen = 0;
             jl_flags = JL_IDLE;
+            jl_mode = JL_MODE_ORDERED;
+        } else if (mode == JL_MODE_WRITEBACK || mode == JL_MODE_ORDERED) {
+            jl_mode = mode;
+        } else {
+            jl_mode = JL_MODE_ORDERED;
         }
         if (st != EXT2_VALID_FS || jl_flags == JL_META_PENDING) {
             kprintf("[EXT2] dirty/pending mount — journal-lite recovery recount\n");
@@ -1165,7 +1193,8 @@ u32 ext2_mount(void) {
     kprintf("[EXT2] mounted: blocks=%u inodes=%u blksize=%u groups=%u bg0=%u jl_gen=%u /mnt+/home ready\n",
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen);
-    kprintf("[EXT2] journal-lite ordered markers online (not a full journal)\n");
+    kprintf("[EXT2] journal-lite %s writeback online (not a full journal)\n",
+            jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback");
     return 1;
 }
 
@@ -1891,7 +1920,8 @@ u32 ext2_ftruncate(u32 fh, u64 length) {
 
 u32 ext2_sync(void) {
     if (!sb.mounted) return 0;
-    /* Write barrier: clear jl pending, mark VALID_FS, then FLUSH. */
+    /* Durability barrier: clear jl pending, mark VALID_FS, then FLUSH.
+     * Applies in both ORDERED and WRITEBACK modes (fsync/sync drain). */
     jl_flags = JL_IDLE;
     sb_write_counts(EXT2_VALID_FS);
     return drivers.blk_flush();
@@ -1940,17 +1970,22 @@ void ext2_selftest(void) {
     kprintf("[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt\n");
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to
-     * avoid RMW amplification that wedges VirtIO-blk under TCG. */
+     * avoid RMW amplification that wedges VirtIO-blk under TCG. Use
+     * WRITEBACK for the 270 chunked commits so ORDERED does not issue a
+     * FLUSH per KiB under TCG (durability covered by the recover test). */
     {
         u32 fh2;
         u32 total = 270 * 1024;
         u32 done = 0;
         u8 pattern[1024];
         u32 i;
+        u32 saved_mode = jl_mode;
+        jl_set_mode(JL_MODE_WRITEBACK);
         for (i = 0; i < 1024; i++) pattern[i] = (u8)(i & 0xFF);
         fh2 = ext2_open("/mnt/big.bin", O_CREAT | O_RDWR | O_TRUNC);
         if (fh2 == 0) {
             kprintf("[EXT2] [FAIL] create /mnt/big.bin\n");
+            jl_set_mode(saved_mode);
             return;
         }
         while (done < total) {
@@ -1961,6 +1996,7 @@ void ext2_selftest(void) {
             if (n != chunk) {
                 kprintf("[EXT2] [FAIL] big write at %u got %u\n", (u64)done, n);
                 ext2_close(fh2);
+                jl_set_mode(saved_mode);
                 return;
             }
             done += chunk;
@@ -1968,6 +2004,7 @@ void ext2_selftest(void) {
         if (ext2_lseek(fh2, 0, SEEK_SET) != 0) {
             kprintf("[EXT2] [FAIL] big lseek 0\n");
             ext2_close(fh2);
+            jl_set_mode(saved_mode);
             return;
         }
         {
@@ -1976,36 +2013,42 @@ void ext2_selftest(void) {
             if (n != 1024) {
                 kprintf("[EXT2] [FAIL] big head read %u\n", n);
                 ext2_close(fh2);
+                jl_set_mode(saved_mode);
                 return;
             }
             for (i = 0; i < 1024; i++) {
                 if (got[i] != pattern[i]) {
                     kprintf("[EXT2] [FAIL] big head mismatch\n");
                     ext2_close(fh2);
+                    jl_set_mode(saved_mode);
                     return;
                 }
             }
             if (ext2_lseek(fh2, total - 1024, SEEK_SET) != (u64)(total - 1024)) {
                 kprintf("[EXT2] [FAIL] big lseek tail\n");
                 ext2_close(fh2);
+                jl_set_mode(saved_mode);
                 return;
             }
             n = ext2_read(fh2, (char *)got, 1024);
             if (n != 1024) {
                 kprintf("[EXT2] [FAIL] big tail read %u\n", n);
                 ext2_close(fh2);
+                jl_set_mode(saved_mode);
                 return;
             }
             for (i = 0; i < 1024; i++) {
                 if (got[i] != pattern[i]) {
                     kprintf("[EXT2] [FAIL] big tail mismatch\n");
                     ext2_close(fh2);
+                    jl_set_mode(saved_mode);
                     return;
                 }
             }
         }
         ext2_close(fh2);
         drivers.blk_flush();
+        jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB\n");
     }
 
@@ -2180,6 +2223,84 @@ void ext2_selftest(void) {
         }
         drivers.blk_flush();
         kprintf("[EXT2] [PASS] rename same-dir/cross-dir\n");
+    }
+
+    /* Journal durability: ORDERED commit + crash-sim recover.
+     * Seed a file, leave META_PENDING (simulated power loss mid-txn),
+     * recount as on dirty mount, prove content + idle markers survive. */
+    {
+        u32 dfh;
+        char dbuf[32];
+        const char *dmsg = "jl-ordered-durable\n";
+        u32 dlen = 0;
+        u32 k;
+        u32 saved_mode;
+        while (dmsg[dlen] != 0) dlen++;
+        saved_mode = jl_mode;
+        jl_set_mode(JL_MODE_ORDERED);
+        dfh = ext2_open("/mnt/jl_dur.txt", O_CREAT | O_RDWR | O_TRUNC);
+        if (dfh == 0) {
+            kprintf("[EXT2] [FAIL] journal dur open\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (ext2_write(dfh, dmsg, dlen) != dlen) {
+            kprintf("[EXT2] [FAIL] journal dur write\n");
+            ext2_close(dfh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        ext2_close(dfh);
+        if (jl_flags != JL_IDLE) {
+            kprintf("[EXT2] [FAIL] journal dur ordered commit idle\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        ext2_sync();
+        /* Crash mid-txn: pending marker durable on media, no commit. */
+        jl_begin();
+        if (jl_flags != JL_META_PENDING) {
+            kprintf("[EXT2] [FAIL] journal dur pending marker\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        drivers.blk_flush();
+        if (!ext2_recount_free()) {
+            kprintf("[EXT2] [FAIL] journal dur recover recount\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_flags != JL_IDLE) {
+            kprintf("[EXT2] [FAIL] journal dur recover idle\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        dfh = ext2_open("/mnt/jl_dur.txt", O_RDONLY);
+        if (dfh == 0) {
+            kprintf("[EXT2] [FAIL] journal dur reopen\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (k = 0; k < 32; k++) dbuf[k] = 0;
+        if (ext2_read(dfh, dbuf, 31) != dlen) {
+            kprintf("[EXT2] [FAIL] journal dur read len\n");
+            ext2_close(dfh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (k = 0; k < dlen; k++) {
+            if (dbuf[k] != dmsg[k]) {
+                kprintf("[EXT2] [FAIL] journal dur content\n");
+                ext2_close(dfh);
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        ext2_close(dfh);
+        ext2_unlink("/mnt/jl_dur.txt");
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal ordered durability recover\n");
     }
 }
 

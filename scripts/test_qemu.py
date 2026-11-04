@@ -308,7 +308,8 @@ def main():
         "[EXT2] [PASS] triple-indirect sparse /mnt/trip.bin",
         "[EXT2] [PASS] ftruncate grow/shrink/zero",
         "[EXT2] [PASS] rename same-dir/cross-dir",
-        "[EXT2] journal-lite ordered markers online (not a full journal)",
+        "[EXT2] [PASS] journal ordered durability recover",
+        "[EXT2] journal-lite ordered writeback online (not a full journal)",
         # AHCI probe log (QEMU may or may not expose 01.06)
         re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
         "Multiboot Physical Memory Map",
@@ -401,7 +402,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: IPI resched + load-aware balance + signals SMP + cross-CPU steal + pthread + Ext2 rename + futex online!",
+        "[SUCCESS] fakeos: Ext2 journal ordered durability + IPI resched + signals SMP + cross-CPU steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
