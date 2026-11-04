@@ -102,6 +102,7 @@ struct tcb {
     u32 cfs_parent;
     u32 cfs_color;     /* 0=red, 1=black                                   */
     u32 cfs_on_rq;     /* 1 => linked in cfs_root[rq_cpu]                 */
+    u32 tg;            /* task_group id (0 = root)                        */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -153,6 +154,27 @@ static u32 cfs_root[SCHED_MAX_CPUS] = {
     0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
 };
 static u32 cfs_nr[SCHED_MAX_CPUS];   /* runnable non-idle entities on RQ    */
+
+/* CFS task_group (hierarchical fair share, first bite):
+ * Each thread belongs to a group. Groups compete by shares on each CPU;
+ * within a group, threads still compete by nice/vruntime on the flat
+ * per-CPU rbtree. pick_next chooses the min-vruntime group that has
+ * runnable members on this CPU, then the min-vruntime member of that
+ * group. Not full Linux cgroup nesting / group se rbtree. */
+enum {
+    MAX_TASK_GROUPS = 8,
+    TG_ROOT         = 0,
+    TG_NONE         = 0xFFFFFFFF
+};
+
+struct task_group {
+    u32 used;                          /* 1 => slot allocated              */
+    u32 shares;                        /* cpu.shares-style weight          */
+    u64 vruntime[SCHED_MAX_CPUS];      /* group entity vruntime per CPU    */
+    u32 nr[SCHED_MAX_CPUS];            /* runnable members on that CPU RQ  */
+};
+
+static struct task_group task_groups[MAX_TASK_GROUPS];
 
 extern void kprintf(const char *fmt, ...);
 extern void spin_lock(volatile u32 *lock);
@@ -353,6 +375,126 @@ static void cfs_set_nice_fields(struct tcb *t, s32 nice) {
     }
     t->nice = nice;
     t->weight = nice_to_weight(nice);
+}
+
+/* ---- CFS task_group helpers (hierarchical fair share) --------------- */
+
+static u32 tg_valid(u32 tg) {
+    if (tg >= MAX_TASK_GROUPS) {
+        return 0;
+    }
+    return task_groups[tg].used;
+}
+
+static void tg_init_root(void) {
+    u32 c;
+    u32 g;
+    for (g = 0; g < MAX_TASK_GROUPS; g++) {
+        task_groups[g].used = 0;
+        task_groups[g].shares = NICE0_WEIGHT;
+        for (c = 0; c < SCHED_MAX_CPUS; c++) {
+            task_groups[g].vruntime[c] = 0;
+            task_groups[g].nr[c] = 0;
+        }
+    }
+    task_groups[TG_ROOT].used = 1;
+    task_groups[TG_ROOT].shares = NICE0_WEIGHT;
+}
+
+/* Clamp a newly-runnable group's entity against peer groups on `cpu`. */
+static void tg_place_entity(u32 tg, u32 cpu) {
+    u32 g;
+    u64 minv;
+    u32 found;
+    if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    minv = 0xFFFFFFFFFFFFFFFFULL;
+    found = 0;
+    for (g = 0; g < MAX_TASK_GROUPS; g++) {
+        if (!task_groups[g].used) {
+            continue;
+        }
+        if (task_groups[g].nr[cpu] == 0) {
+            continue;
+        }
+        if (!found || task_groups[g].vruntime[cpu] < minv) {
+            minv = task_groups[g].vruntime[cpu];
+            found = 1;
+        }
+    }
+    if (found && task_groups[tg].vruntime[cpu] < minv) {
+        task_groups[tg].vruntime[cpu] = minv;
+    }
+}
+
+static void tg_account_enqueue(u32 id, u32 cpu) {
+    u32 tg;
+    if (id >= MAX_THREADS || cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    tg = threads[id].tg;
+    if (!tg_valid(tg)) {
+        threads[id].tg = TG_ROOT;
+        tg = TG_ROOT;
+    }
+    if (task_groups[tg].nr[cpu] == 0) {
+        tg_place_entity(tg, cpu);
+    }
+    task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] + 1;
+}
+
+static void tg_account_dequeue(u32 id, u32 cpu) {
+    u32 tg;
+    if (id >= MAX_THREADS || cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    tg = threads[id].tg;
+    if (!tg_valid(tg)) {
+        return;
+    }
+    if (task_groups[tg].nr[cpu] > 0) {
+        task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] - 1;
+    }
+}
+
+static void tg_charge(u32 tg, u32 cpu, u64 units) {
+    u64 shares;
+    if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    shares = task_groups[tg].shares;
+    if (shares == 0) {
+        shares = NICE0_WEIGHT;
+    }
+    task_groups[tg].vruntime[cpu] =
+        task_groups[tg].vruntime[cpu] + (units * (u64)NICE0_WEIGHT) / shares;
+}
+
+/* Pick the runnable group with the lowest vruntime on `cpu`. */
+static u32 tg_pick_min(u32 cpu) {
+    u32 g;
+    u32 best;
+    u64 best_vr;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return TG_NONE;
+    }
+    best = TG_NONE;
+    best_vr = 0;
+    for (g = 0; g < MAX_TASK_GROUPS; g++) {
+        if (!task_groups[g].used) {
+            continue;
+        }
+        if (task_groups[g].nr[cpu] == 0) {
+            continue;
+        }
+        if (best == TG_NONE || task_groups[g].vruntime[cpu] < best_vr
+            || (task_groups[g].vruntime[cpu] == best_vr && g < best)) {
+            best = g;
+            best_vr = task_groups[g].vruntime[cpu];
+        }
+    }
+    return best;
 }
 
 static void cfs_rb_clear_node(u32 id) {
@@ -575,6 +717,7 @@ static void cfs_rb_insert(u32 cpu, u32 z) {
     }
     threads[z].cfs_on_rq = 1;
     cfs_nr[cpu] = cfs_nr[cpu] + 1;
+    tg_account_enqueue(z, cpu);
     cfs_rb_insert_fixup(cpu, z);
 }
 
@@ -745,6 +888,7 @@ static void cfs_rb_erase(u32 cpu, u32 z) {
     if (cfs_nr[cpu] > 0) {
         cfs_nr[cpu] = cfs_nr[cpu] - 1;
     }
+    tg_account_dequeue(z, cpu);
     if (y_orig_color == CFS_RB_BLACK) {
         cfs_rb_erase_fixup(cpu, x, xp);
     }
@@ -787,6 +931,7 @@ static void cfs_dequeue_locked(u32 id) {
         threads[id].cfs_right = CFS_RB_NONE;
         threads[id].cfs_parent = CFS_RB_NONE;
         threads[id].cfs_color = CFS_RB_RED;
+        /* Best-effort: cannot attribute a CPU for tg.nr[]. */
         return;
     }
     cfs_rb_erase(cpu, id);
@@ -822,6 +967,8 @@ static void cfs_migrate_locked(u32 id, u32 new_cpu) {
 
 static void cfs_charge(u32 id, u64 units) {
     u64 w;
+    u32 cpu;
+    u32 tg;
     if (id >= MAX_THREADS || tcb_is_idle(id)) {
         return;
     }
@@ -836,6 +983,20 @@ static void cfs_charge(u32 id, u64 units) {
         cfs_dequeue_locked(id);
     }
     threads[id].vruntime = threads[id].vruntime + (units * (u64)NICE0_WEIGHT) / w;
+    /* Hierarchical: charge the task_group entity on this RQ as well. */
+    cpu = threads[id].on_cpu;
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = threads[id].rq_cpu;
+    }
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = sched_cpu_index();
+    }
+    tg = threads[id].tg;
+    if (!tg_valid(tg)) {
+        tg = TG_ROOT;
+        threads[id].tg = TG_ROOT;
+    }
+    tg_charge(tg, cpu, units);
     if (threads[id].state == TCB_RUNNABLE) {
         cfs_enqueue_locked(id);
     }
@@ -877,12 +1038,41 @@ static void cfs_update_min(void) {
 }
 
 /* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
- * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
+ * Hierarchical: choose the min-vruntime task_group with runnable members on
+ * this CPU, then the min-vruntime member of that group (tree walk filtered
+ * by tg). Skips threads running on a foreign CPU (on_cpu set and != cpu). */
 static u32 rq_pick_best(u32 cpu, u32 want_user) {
     u32 id;
+    u32 tg;
     if (cpu >= SCHED_MAX_CPUS) {
         return SCHED_CPU_NONE;
     }
+    tg = tg_pick_min(cpu);
+    if (tg == TG_NONE) {
+        return SCHED_CPU_NONE;
+    }
+    id = cfs_rq_leftmost(cpu);
+    while (id != CFS_RB_NONE) {
+        if (threads[id].tg != tg) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        if (threads[id].on_cpu != SCHED_CPU_NONE && threads[id].on_cpu != cpu) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        if (want_user == 0 && threads[id].is_user != 0) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        if (want_user == 1 && threads[id].is_user == 0) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        return id;
+    }
+    /* Group claimed nr>0 but no eligible member (e.g. want_user filter):
+     * fall back to any eligible task so we never idle wrongly. */
     id = cfs_rq_leftmost(cpu);
     while (id != CFS_RB_NONE) {
         if (threads[id].on_cpu != SCHED_CPU_NONE && threads[id].on_cpu != cpu) {
@@ -1092,6 +1282,7 @@ void sched_init(void) {
         threads[i].cfs_parent = CFS_RB_NONE;
         threads[i].cfs_color = CFS_RB_RED;
         threads[i].cfs_on_rq = 0;
+        threads[i].tg = TG_ROOT;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -1143,6 +1334,7 @@ void sched_init(void) {
     sched_ticks = 0;
     user_mode_ticks = 0;
     cfs_min_vruntime = 0;
+    tg_init_root();
     /* Until the first user thread runs, SYSCALL/trap entries use the boot
      * RSP0 stack programmed by gdt_init(). GS points at this CPU's conduit. */
     sched_set_kstack_cpu(sched_bsp_cpu, arch.gdt_get_rsp0());
@@ -1260,6 +1452,7 @@ u32 kthread_create(u64 entry, u64 arg) {
     cwd_set_root(&threads[i]);
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].tg = TG_ROOT;
     threads[i].on_cpu = SCHED_CPU_NONE;
     threads[i].state = TCB_RUNNABLE;
     rq_enqueue_balanced(i);
@@ -1321,6 +1514,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     cwd_set_root(&threads[i]);
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].tg = TG_ROOT;
     threads[i].on_cpu = SCHED_CPU_NONE;
     threads[i].state = TCB_RUNNABLE;
     rq_enqueue_balanced(i);
@@ -1405,6 +1599,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     cwd_copy_from(&threads[i], threads[sched_cur()].cwd);
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].tg = threads[sched_cur()].tg;
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = threads[sched_cur()].sig_ignore;
     {
@@ -1491,6 +1686,7 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     cwd_copy_from(&threads[i], threads[sched_cur()].cwd);
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].tg = threads[sched_cur()].tg;
     threads[i].pending_sigs = 0;
     threads[i].sig_ignore = threads[sched_cur()].sig_ignore;
     for (s = 0; s < 32; s++) {
@@ -1971,6 +2167,85 @@ u64 sys_nice(u64 inc) {
     }
     cfs_set_nice_fields(&threads[sched_cur()], (s32)next);
     return (u64)(s64)threads[sched_cur()].nice;
+}
+
+/* ---- CFS task_group public API (hierarchical fair share, first bite) -- */
+
+u32 sched_tg_create(u32 shares) {
+    u32 g;
+    u32 c;
+    if (shares == 0) {
+        shares = NICE0_WEIGHT;
+    }
+    for (g = 1; g < MAX_TASK_GROUPS; g++) {
+        if (!task_groups[g].used) {
+            task_groups[g].used = 1;
+            task_groups[g].shares = shares;
+            for (c = 0; c < SCHED_MAX_CPUS; c++) {
+                task_groups[g].vruntime[c] = 0;
+                task_groups[g].nr[c] = 0;
+            }
+            return g;
+        }
+    }
+    return TG_NONE;
+}
+
+u32 sched_tg_set_shares(u32 tg, u32 shares) {
+    if (!tg_valid(tg)) {
+        return 0;
+    }
+    if (shares == 0) {
+        shares = NICE0_WEIGHT;
+    }
+    task_groups[tg].shares = shares;
+    return 1;
+}
+
+u32 sched_tg_shares(u32 tg) {
+    if (!tg_valid(tg)) {
+        return 0;
+    }
+    return task_groups[tg].shares;
+}
+
+u32 sched_tg_of(u32 id) {
+    if (id >= MAX_THREADS || threads[id].state == TCB_FREE) {
+        return TG_NONE;
+    }
+    return threads[id].tg;
+}
+
+/* Move a live thread into `tg`. Updates group nr accounting if on a RQ. */
+u32 sched_tg_attach(u32 id, u32 tg) {
+    u64 flags;
+    if (id >= MAX_THREADS || threads[id].state == TCB_FREE
+        || threads[id].state == TCB_DEAD || tcb_is_idle(id)) {
+        return 0;
+    }
+    if (!tg_valid(tg)) {
+        return 0;
+    }
+    flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    if (threads[id].tg == tg) {
+        spin_unlock(&sched_run_lock);
+        cpu_irq_restore(flags);
+        return 1;
+    }
+    if (threads[id].cfs_on_rq) {
+        cfs_dequeue_locked(id);
+        threads[id].tg = tg;
+        cfs_place_entity(id);
+        if (threads[id].state == TCB_RUNNABLE) {
+            cfs_enqueue_locked(id);
+        }
+    } else {
+        threads[id].tg = tg;
+    }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    return 1;
 }
 
 /* ---------------------------------------------------------------------------

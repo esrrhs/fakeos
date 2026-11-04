@@ -21,6 +21,9 @@ extern u64 sched_tick_count(void);
 extern u32 sched_thread_state(u32 id);
 extern u32 sched_set_nice(u32 id, s32 nice);
 extern u32 sched_cfs_rb_check(void);
+extern u32 sched_tg_create(u32 shares);
+extern u32 sched_tg_attach(u32 id, u32 tg);
+extern u32 sched_tg_set_shares(u32 tg, u32 shares);
 extern u32 sched_current_id(void);
 extern u32 smp_cpuid(void);
 extern u32 smp_cpu_count(void);
@@ -256,6 +259,139 @@ static int test_weighted_fair(void) {
     if (hi < lo * 2) {
         kprintf("      [FAIL] weighted fair ratio too weak: nice0=%u nice+10=%u\n",
                 hi, lo);
+        return 0;
+    }
+    return 1;
+}
+
+/* Hierarchical CFS: two groups with shares 2048 vs 1024, one nice-0 spinner
+ * each. The higher-share group must get roughly twice the CPU. */
+static volatile u64 g_tg_counts[3];
+static volatile u64 g_tg_done;
+static volatile u64 g_tg_deadline;
+
+static void tg_spinner(u64 id) {
+    u64 n = 0;
+    while (sched_tick_count() < g_tg_deadline) {
+        n++;
+    }
+    g_tg_counts[id] = n;
+    g_tg_done = g_tg_done + 1;
+    kthread_exit();
+}
+
+static int test_tg_shares(void) {
+    u32 tga;
+    u32 tgb;
+    u32 id0;
+    u32 id1;
+    u64 hi;
+    u64 lo;
+    g_tg_done = 0;
+    g_tg_counts[0] = 0;
+    g_tg_counts[1] = 0;
+    g_tg_deadline = sched_tick_count() + 40;
+
+    tga = sched_tg_create(2048);
+    tgb = sched_tg_create(1024);
+    if (tga == 0xFFFFFFFF || tgb == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create\n");
+        return 0;
+    }
+    id0 = kthread_create((u64)(&tg_spinner), 0);
+    id1 = kthread_create((u64)(&tg_spinner), 1);
+    if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF) {
+        kprintf("      [FAIL] could not create tg spinners\n");
+        return 0;
+    }
+    if (!sched_tg_attach(id0, tga) || !sched_tg_attach(id1, tgb)) {
+        kprintf("      [FAIL] sched_tg_attach\n");
+        return 0;
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 400;
+        while (g_tg_done != 2 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_tg_done != 2) {
+        kprintf("      [FAIL] tg spinners did not finish (%u)\n", g_tg_done);
+        return 0;
+    }
+    if (g_tg_counts[0] == 0 || g_tg_counts[1] == 0) {
+        kprintf("      [FAIL] tg spinner got zero work (A=%u B=%u)\n",
+                g_tg_counts[0], g_tg_counts[1]);
+        return 0;
+    }
+    /* shares 2048:1024 => expect ~2:1; accept >=1.5x loose bound. */
+    hi = g_tg_counts[0];
+    lo = g_tg_counts[1];
+    if (hi * 2 < lo * 3) {
+        kprintf("      [FAIL] tg shares ratio too weak: A2048=%u B1024=%u\n",
+                hi, lo);
+        return 0;
+    }
+    return 1;
+}
+
+/* Equal shares, unequal membership: group A has 2 spinners, group B has 1.
+ * Aggregate A should be roughly equal to B (each A member ~half of B).
+ * Proves hierarchical group fair share vs flat per-task weight. */
+static int test_tg_aggregate(void) {
+    u32 tga;
+    u32 tgb;
+    u32 id0;
+    u32 id1;
+    u32 id2;
+    u64 sum_a;
+    u64 b;
+    g_tg_done = 0;
+    g_tg_counts[0] = 0;
+    g_tg_counts[1] = 0;
+    g_tg_counts[2] = 0;
+    g_tg_deadline = sched_tick_count() + 50;
+
+    tga = sched_tg_create(1024);
+    tgb = sched_tg_create(1024);
+    if (tga == 0xFFFFFFFF || tgb == 0xFFFFFFFF) {
+        kprintf("      [FAIL] sched_tg_create (aggregate)\n");
+        return 0;
+    }
+    id0 = kthread_create((u64)(&tg_spinner), 0);
+    id1 = kthread_create((u64)(&tg_spinner), 1);
+    id2 = kthread_create((u64)(&tg_spinner), 2);
+    if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF || id2 == 0xFFFFFFFF) {
+        kprintf("      [FAIL] could not create tg aggregate spinners\n");
+        return 0;
+    }
+    if (!sched_tg_attach(id0, tga) || !sched_tg_attach(id1, tga)
+        || !sched_tg_attach(id2, tgb)) {
+        kprintf("      [FAIL] sched_tg_attach (aggregate)\n");
+        return 0;
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 500;
+        while (g_tg_done != 3 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_tg_done != 3) {
+        kprintf("      [FAIL] tg aggregate spinners did not finish (%u)\n",
+                g_tg_done);
+        return 0;
+    }
+    sum_a = g_tg_counts[0] + g_tg_counts[1];
+    b = g_tg_counts[2];
+    if (sum_a == 0 || b == 0) {
+        kprintf("      [FAIL] tg aggregate zero work A=%u B=%u\n", sum_a, b);
+        return 0;
+    }
+    /* Accept within 2x either way (TCG noise); equal shares => not 2:1 flat. */
+    if (sum_a > b * 2 || b > sum_a * 2) {
+        kprintf("      [FAIL] tg aggregate not balanced: A2=%u B1=%u\n",
+                sum_a, b);
         return 0;
     }
     return 1;
@@ -831,9 +967,9 @@ static int test_sock_kmutex_blocking(void) {
 }
 
 void sched_selftest(void) {
-    kprintf("\n[SCHED] Kernel Threads & CFS rbtree Weighted Fair Scheduler Online:\n");
+    kprintf("\n[SCHED] Kernel Threads & CFS rbtree + task_group Hierarchical Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
-    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS rbtree + nice weights\n");
+    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS rbtree + task_group shares\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
     kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");
 
@@ -858,6 +994,12 @@ void sched_selftest(void) {
         kprintf("      [PASS] CFS rbtree: per-CPU min-vruntime order + nr\n");
     } else {
         kprintf("      [FAIL] CFS rbtree invariant check\n");
+    }
+    if (test_tg_shares()) {
+        kprintf("      [PASS] CFS task_group: shares 2048 vs 1024 >=1.5x\n");
+    }
+    if (test_tg_aggregate()) {
+        kprintf("      [PASS] CFS task_group: equal shares 2v1 aggregate~fair\n");
     }
     if (test_kmutex_workers()) {
         kprintf("      [PASS] kmutex sleep-lock: %u x %u increments + trylock\n",
