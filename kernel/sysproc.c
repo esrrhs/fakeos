@@ -170,8 +170,8 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         if (fh == 0xFFFFFFFF || pipe_fh_is(fh) || sock_fh_is(fh)) {
             return (u64)(-1);
         }
-        if (!fs.ext2_fh_is(fh) && fs.fs_file_is_console(fh)) {
-            return (u64)(-1);
+        if (!fs.ext2_fh_is(fh) && !fs.fs_file_is_mmapable(fh)) {
+            return (u64)(-1);         /* console/null/zero/dir */
         }
         if (fs.ext2_fh_is(fh) ? fs.ext2_file_is_dir(fh) : fs.fs_file_is_dir(fh)) {
             return (u64)(-1);

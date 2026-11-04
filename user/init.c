@@ -25,6 +25,7 @@ extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
+extern long u_unlink(const char *path);
 extern void *signal(int sig, void *handler);
 extern int sigaction(int sig, void *act, void *oldact);
 extern int shm_open(const char *name, int oflag, unsigned int mode);
@@ -778,6 +779,95 @@ static void shm_test(void) {
     puts("[U][PASS] POSIX shm_open/mmap/unlink");
 }
 
+static void dev_nodes_test(void) {
+    long fd;
+    long n;
+    char buf[64];
+    unsigned long i;
+
+    /* /dev/null: write discards, read returns EOF. */
+    fd = u_open("/dev/null", 2, 0); /* O_RDWR */
+    if (fd < 0) {
+        puts("[U][FAIL] open /dev/null");
+        return;
+    }
+    if (u_write(fd, "discard-me", 10) != 10) {
+        puts("[U][FAIL] write /dev/null");
+        u_close(fd);
+        return;
+    }
+    n = u_read(fd, buf, 16);
+    if (n != 0) {
+        puts("[U][FAIL] read /dev/null not EOF");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* Shell-style O_WRONLY|O_CREAT|O_TRUNC redirect must work on /dev/null. */
+    fd = u_open("/dev/null", 0x241, 0x1A4); /* WRONLY|CREAT|TRUNC */
+    if (fd < 0) {
+        puts("[U][FAIL] open /dev/null redirect flags");
+        return;
+    }
+    if (u_write(fd, "x", 1) != 1) {
+        puts("[U][FAIL] redirect write /dev/null");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* /dev/zero: reads zeros; writes discard. */
+    fd = u_open("/dev/zero", 2, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /dev/zero");
+        return;
+    }
+    for (i = 0; i < 64; i++) {
+        buf[i] = (char)0xA5;
+    }
+    n = u_read(fd, buf, 64);
+    if (n != 64) {
+        puts("[U][FAIL] read /dev/zero length");
+        u_close(fd);
+        return;
+    }
+    for (i = 0; i < 64; i++) {
+        if (buf[i] != 0) {
+            puts("[U][FAIL] read /dev/zero not zero");
+            u_close(fd);
+            return;
+        }
+    }
+    if (u_write(fd, "noise", 5) != 5) {
+        puts("[U][FAIL] write /dev/zero");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* /dev/tty: path-openable console alias. */
+    fd = u_open("/dev/tty", 1, 0); /* O_WRONLY */
+    if (fd < 0) {
+        puts("[U][FAIL] open /dev/tty");
+        return;
+    }
+    if (u_write(fd, "[U] tty ok\n", 10) != 10) {
+        puts("[U][FAIL] write /dev/tty");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+
+    /* Device nodes must not be unlinkable. */
+    if (u_unlink("/dev/null") == 0) {
+        puts("[U][FAIL] unlink /dev/null should fail");
+        return;
+    }
+    puts("[U][PASS] /dev/null /dev/zero /dev/tty");
+}
+
+
 
 
 static void mutex_test(void) {
@@ -1118,6 +1208,7 @@ int main(int argc, char **argv) {
     heap_test();
     mmap_test();
     shm_test();
+    dev_nodes_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

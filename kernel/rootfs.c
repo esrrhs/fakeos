@@ -123,6 +123,11 @@ void rootfs_publish(void) {
     if (!fs.fs_mkdir("/dev/shm")) {
         kprintf("[FS] FAILED to publish /dev/shm\n");
     }
+    if (!fs.fs_publish_chrdevs()) {
+        kprintf("[FS] FAILED to publish /dev/{null,zero,tty}\n");
+    } else {
+        kprintf("[FS] published /dev/null /dev/zero /dev/tty\n");
+    }
 
     for (i = 0; i < m5_blob_count; i++) {
         u64 msize = (u64)m5_blob_table[i].end - (u64)m5_blob_table[i].start;

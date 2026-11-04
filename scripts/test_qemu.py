@@ -336,6 +336,7 @@ def main():
         "[PASS] COW clone",
         "[PASS] MAP_SHARED anon",
         "[U][PASS] POSIX shm_open/mmap/unlink",
+        "[U][PASS] /dev/null /dev/zero /dev/tty",
         "[U][PASS] futex WAIT/WAKE",
         "[U][PASS] pthread_mutex futex lock/unlock",
         "[U][PASS] pthread_create clone same-AS",
@@ -380,6 +381,7 @@ def main():
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",
         "[FS] published /etc/passwd (",
+        "[FS] published /dev/null /dev/zero /dev/tty",
         # Ring-3 retained + stage-4 user self-tests
         "[U] hello from ring 3, pid=",
         "[U][PASS] child COW write took effect",

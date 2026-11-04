@@ -198,6 +198,7 @@ flowchart TD
 - [x] **CFS rbtree 加权公平调度**：每 CPU 侵入式红黑树（vruntime, tid）；tick/yield 记账后 erase+insert；`pick_next`/steal 走 leftmost；`nice(2)`；自测 nice0 ≥2× nice+10 + 树不变量。
 - [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
+- [x] **/dev 字符设备节点**：`/dev/null`（读 EOF / 写丢弃）、`/dev/zero`（读零 / 写丢弃）、`/dev/tty`（控制台路径别名）；shell `>`/`>>`/`<` 重定向可用；拒绝 unlink；自测 `[U][PASS] /dev/null /dev/zero /dev/tty`。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
 - [x] **AHCI bio queue（跨调用方）**：共享 bio 队列（8）让多个同步调用方共用 NCQ 窗口；`ahci_selftest` 双 bio 重叠提交；`make qemu-ahci` 见 `[AHCI] [PASS] bio queue cross-caller`。

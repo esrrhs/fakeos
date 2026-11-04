@@ -33,8 +33,12 @@ enum {
     INO_FILE    = 1,
     INO_DIR     = 2,
     INO_CONSOLE = 3,
+    INO_NULL    = 4,               /* /dev/null: reads EOF, writes discard */
+    INO_ZERO    = 5,               /* /dev/zero: reads zeros, writes discard */
 
     ROOT_INO    = 1,
+    ZERO_INO    = 61,              /* fixed /dev/zero inode */
+    NULL_INO    = 62,              /* fixed /dev/null inode */
     CONSOLE_INO = 63,
     MAX_INODES  = 256,
     MAX_DENTS   = 64,
@@ -64,7 +68,8 @@ enum {
     SEEK_END = 2,
 
     DT_REG = 8,
-    DT_DIR = 4
+    DT_DIR = 4,
+    DT_CHR = 2
 };
 
 struct dent {
@@ -133,9 +138,9 @@ static u32 name_eq(const char *a, const char *b, u32 n) {
 
 static u32 alloc_ino(u32 type, u32 parent) {
     u32 i;
-    /* Slots 2..MAX_INODES-1, skipping the fixed console slot. */
+    /* Slots 2..MAX_INODES-1, skipping fixed console/null/zero slots. */
     for (i = 2; i < MAX_INODES; i++) {
-        if (i == CONSOLE_INO) {
+        if (i == CONSOLE_INO || i == NULL_INO || i == ZERO_INO) {
             continue;
         }
         if (inodes[i].type == INO_FREE) {
@@ -324,9 +329,16 @@ void fs_init(void) {
     inodes[ROOT_INO].type = INO_DIR;
     inodes[ROOT_INO].parent = ROOT_INO;
 
-    /* Permanent console character device, never linked into the tree. */
+    /* Permanent console character device; linked as /dev/tty by
+     * fs_publish_chrdevs() after /dev exists. */
     inodes[CONSOLE_INO].type = INO_CONSOLE;
     inodes[CONSOLE_INO].parent = CONSOLE_INO;
+
+    /* Fixed /dev/null and /dev/zero nodes (linked in fs_publish_chrdevs). */
+    inodes[NULL_INO].type = INO_NULL;
+    inodes[NULL_INO].parent = NULL_INO;
+    inodes[ZERO_INO].type = INO_ZERO;
+    inodes[ZERO_INO].parent = ZERO_INO;
 
     opens[CONSOLE_FH].used = 1;
     opens[CONSOLE_FH].ino = CONSOLE_INO;
@@ -334,6 +346,28 @@ void fs_init(void) {
     opens[CONSOLE_FH].refs = 1;
     opens[CONSOLE_FH].readable = 1;
     opens[CONSOLE_FH].writable = 1;
+}
+
+/* Link fixed char devices under /dev (null/zero/tty). /dev must already
+ * exist (rootfs_publish creates it). Returns 1 on success. */
+u32 fs_publish_chrdevs(void) {
+    u32 dev = walk_lookup("/dev");
+    if (dev == 0 || inodes[dev].type != INO_DIR) {
+        return 0;
+    }
+    inodes[NULL_INO].parent = dev;
+    inodes[ZERO_INO].parent = dev;
+    inodes[CONSOLE_INO].parent = dev;
+    if (!dir_add(dev, "null", 4, NULL_INO)) {
+        return 0;
+    }
+    if (!dir_add(dev, "zero", 4, ZERO_INO)) {
+        return 0;
+    }
+    if (!dir_add(dev, "tty", 3, CONSOLE_INO)) {
+        return 0;
+    }
+    return 1;
 }
 
 /* Publish a static (incbin-backed, read-only) file, creating intermediate
@@ -479,6 +513,13 @@ u32 fs_unlink(const char *path) {
     if (target == 0) {
         return 0;
     }
+    /* Never unlink fixed character devices. */
+    if (target == CONSOLE_INO || target == NULL_INO || target == ZERO_INO
+        || inodes[target].type == INO_CONSOLE
+        || inodes[target].type == INO_NULL
+        || inodes[target].type == INO_ZERO) {
+        return 0;
+    }
     for (slot = 0; slot < d->ndent; slot++) {
         if (d->dents[slot].ino == target) {
             break;
@@ -538,7 +579,10 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
 
     old_ino = dir_find(oparent, olast, olast_n);
     if (old_ino == 0) return 0;
-    if (old_ino == ROOT_INO || old_ino == CONSOLE_INO) return 0;
+    if (old_ino == ROOT_INO || old_ino == CONSOLE_INO
+        || old_ino == NULL_INO || old_ino == ZERO_INO) return 0;
+    if (inodes[old_ino].type == INO_NULL || inodes[old_ino].type == INO_ZERO
+        || inodes[old_ino].type == INO_CONSOLE) return 0;
 
     if (inodes[old_ino].type == INO_DIR) {
         u32 cur = nparent;
@@ -649,6 +693,14 @@ u32 fs_file_is_dir(u32 fh) {
     return inodes[opens[fh].ino].type == INO_DIR;
 }
 
+/* Only regular files may back VMA_FILE mmap (not console/null/zero). */
+u32 fs_file_is_mmapable(u32 fh) {
+    if (fh >= MAX_OPEN_FILES || !opens[fh].used) {
+        return 0;
+    }
+    return inodes[opens[fh].ino].type == INO_FILE;
+}
+
 u32 fs_file_ino(u32 fh) {
     if (fh >= MAX_OPEN_FILES || !opens[fh].used) {
         return 0;
@@ -684,21 +736,25 @@ u32 fs_file_open(const char *path, u32 flags) {
         return FH_BAD;                /* O_CREAT|O_EXCL and name exists */
     }
 
-    if (inodes[ino].type == INO_CONSOLE) {
-        return FH_BAD;                /* console is acquired by fixed fh only */
-    }
+    /* /dev/tty opens the console inode via a normal fh (stdin/out/err keep
+     * the permanent CONSOLE_FH). Other char devices open the same way. */
     if (inodes[ino].type == INO_DIR && mode != O_RDONLY) {
         return FH_BAD;                /* directories are opened read-only */
+    }
+    if (inodes[ino].type != INO_FILE && inodes[ino].type != INO_DIR
+        && inodes[ino].type != INO_CONSOLE && inodes[ino].type != INO_NULL
+        && inodes[ino].type != INO_ZERO) {
+        return FH_BAD;
     }
     readable = (mode != O_WRONLY);
     writable = (mode == O_WRONLY || mode == O_RDWR);
     if (writable && inodes[ino].ro) {
         return FH_BAD;                /* static files are immutable */
     }
-    if ((flags & O_TRUNC) && writable) {
+    if ((flags & O_TRUNC) && writable && inodes[ino].type == INO_FILE) {
         inodes[ino].size = 0;
     }
-    if (flags & O_APPEND) {
+    if ((flags & O_APPEND) && inodes[ino].type == INO_FILE) {
         off = inodes[ino].size;
     }
     return alloc_open(ino, readable, writable, (flags & O_APPEND) != 0, off);
@@ -769,8 +825,20 @@ u64 fs_read_h(u32 fh, char *kbuf, u64 len) {
         return (u64)(-1);
     }
     ip = &inodes[opens[fh].ino];
-    if (ip->type != INO_FILE || !opens[fh].readable) {
-        return (u64)(-1);             /* unreadable descriptor / non-file */
+    if (!opens[fh].readable) {
+        return (u64)(-1);
+    }
+    if (ip->type == INO_NULL) {
+        return 0;                     /* always EOF */
+    }
+    if (ip->type == INO_ZERO) {
+        for (i = 0; i < len; i++) {
+            kbuf[i] = 0;
+        }
+        return len;
+    }
+    if (ip->type != INO_FILE) {
+        return (u64)(-1);             /* console uses tty path; dirs use getdents */
     }
     if (opens[fh].off >= ip->size) {
         return 0;
@@ -795,7 +863,13 @@ u64 fs_write_h(u32 fh, const char *kbuf, u64 len) {
         return (u64)(-1);
     }
     ip = &inodes[opens[fh].ino];
-    if (ip->type != INO_FILE || ip->ro || !opens[fh].writable) {
+    if (!opens[fh].writable) {
+        return (u64)(-1);
+    }
+    if (ip->type == INO_NULL || ip->type == INO_ZERO) {
+        return len;                   /* discard */
+    }
+    if (ip->type != INO_FILE || ip->ro) {
         return (u64)(-1);
     }
     /* O_APPEND forces every write to EOF, even after an intervening lseek. */
@@ -832,6 +906,20 @@ u64 fs_lseek_h(u32 fh, u64 off, u32 whence) {
     ip = &inodes[opens[fh].ino];
     if (ip->type == INO_CONSOLE) {
         return (u64)(-1);
+    }
+    if (ip->type == INO_NULL || ip->type == INO_ZERO) {
+        /* Offset is ignored on I/O; still track it for POSIX lseek. */
+        if (whence == SEEK_SET) {
+            no = off;
+        } else if (whence == SEEK_CUR) {
+            no = opens[fh].off + off;
+        } else if (whence == SEEK_END) {
+            no = off;                 /* size is always 0 */
+        } else {
+            return (u64)(-1);
+        }
+        opens[fh].off = no;
+        return no;
     }
     if (whence == SEEK_SET) {
         no = off;
@@ -889,7 +977,13 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         put_u64(r + 8, (u64)idx + 1);
         r[16] = (char)(DENT_RECLEN & 0xFF);
         r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
-        r[18] = (char)(inodes[de->ino].type == INO_DIR ? DT_DIR : DT_REG);
+        if (inodes[de->ino].type == INO_DIR) {
+            r[18] = (char)DT_DIR;
+        } else if (inodes[de->ino].type == INO_FILE) {
+            r[18] = (char)DT_REG;
+        } else {
+            r[18] = (char)DT_CHR;     /* console/null/zero */
+        }
         for (k = 0; k < NAME_LEN && de->name[k] != 0 && k < 29; k++) {
             r[19 + k] = de->name[k];
         }
