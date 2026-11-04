@@ -223,9 +223,9 @@ flowchart TD
 - [x] **/bin/true + /bin/false + /bin/seq**：`true`/`false` 退出码 0/1；`seq [-w][-s SEP] LAST|FIRST LAST|FIRST INCREMENT LAST` 整数序列（`-w` 等宽零填充）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cut + /bin/tr**：`cut -c LIST` / `cut -f LIST [-d DELIM] [-s]` 按字符或字段裁剪；`tr SET1 SET2` / `tr -d SET` 字符转换/删除（支持 `a-z` 与 `\n\t\r`）。virtio login smoke（smp 1/2）。
 - [x] **/bin/test + /bin/[**：薄 POSIX `test`/`[`（退出 0/1/2）；一元 `-e/-f/-d/-h/-L/-s/-r/-w/-x/-z/-n` 与 `-b/-c/-p/-S`；二元 `=`/`!=`/`-eq/-ne/-lt/-le/-gt/-ge`；单层 `!`；`[` 要求收尾 `]`。virtio login smoke（smp 1/2）。
-- [x] **/bin/uniq + /bin/sort**：`uniq [-c][-d][-u]` 折叠连续重复行；`sort [-r][-n]` 字典序/数值排序（内存载入）。virtio login smoke（smp 1/2）。
+- [x] **/bin/uniq + /bin/sort**：`uniq [-c][-d][-u]` 折叠连续重复行；`sort [-r][-n][-k N]` 字典序/数值/字段排序（空白字段；内存载入）。virtio login smoke（smp 1/2）。
 - [x] **/bin/yes + /bin/od**：`yes [STRING...]` 重复输出行直到写失败；`od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [FILE...]` 薄十六进制/八进制转储（默认 `-A o -t x1`）。virtio login smoke（smp 1/2）。
-- [x] **shell echo -n/-e + /bin/xargs**：shell `echo [-neE]`（`-n` 无换行、`-e` 反斜杠转义含 `\c`、`-E` 字面）；`/bin/xargs [-n N] [-r] [CMD [ARGS...]]` 按空白分词拼 argv（默认打印；批量受 execve argc=8 限制）。virtio login smoke（smp 1/2）。
+- [x] **shell echo -n/-e + /bin/xargs**：shell `echo [-neE]`（`-n` 无换行、`-e` 反斜杠转义含 `\c`、`-E` 字面）；`/bin/xargs [-n N] [-r] [-I R] [CMD [ARGS...]]` 按空白分词拼 argv（`-I` 按行替换；默认打印；批量受 execve argc=8 限制）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cmp + /bin/dd**：`cmp [-l|-s] FILE1 FILE2` 按字节比较（退出 0/1/2；`-s` 静默、`-l` 列出差异）；`dd [if=] [of=] [bs=N] [count=N] [skip=N] [seek=N] [status=none]` 块拷贝（`k`/`b`/`M` 后缀；默认 bs=512）。virtio login smoke（smp 1/2）。
 - [x] **/bin/expr + /bin/hostname**：`expr` 薄整数运算/`length`（`+ - * / %` 与比较；`*` 需 shell 引用）；`hostname` 打印 `uname` nodename。virtio login smoke（smp 1/2）。
 - [x] **/bin/echo**：外部 `echo [-neE]`，与 shell 内建对齐（`-n`/`-e`/`-E`/`\c`）；供 `xargs echo` 等路径。virtio login smoke（smp 1/2）。
@@ -251,7 +251,7 @@ flowchart TD
 - [x] **/bin/cal**：外部 `cal MONTH YEAR` / `cal YEAR`（周日起始；无 RTC 故不支持无参当前月）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/install**：外部 `install [-d] [-m MODE] SRC DST|DIR...`（`-d` 同 mkdir -p；默认 mode 0755；多源入目录）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/chown + /bin/chgrp**：外部 `chown UID[:GID] FILE...`（缺 GID 不变组）、`chgrp GID FILE...`（uid=(u32)-1）；与 shell `chown` / `chown(2)` 对齐；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
-- [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout SECONDS CMD...`（fork+nanosleep 轮询+SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout [-s SIG|--signal=SIG] SECONDS CMD...`（fork+nanosleep 轮询+信号，默认 SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir [-p] DIR...`（空目录；`-p` 清空父分量；shell-mirror 同步）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
 - [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
@@ -268,6 +268,7 @@ flowchart TD
 - [x] **grep -c + tr -c**：`grep` 增加 `-c`（匹配行计数；多文件 `name:count`；抑制行输出；可与 `-ivnF` 粘连）；`tr` 增加 `-c`/`-C`（补集）与粘连 `-cd`/`-dc`（`tr -cd SET` 仅保留 SET）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **date +FORMAT + stat -c**：`date` 支持 `+FORMAT`（启动相对秒当 epoch 填日历字段；`%s/%N/%Y/%m/%d/%H/%M/%S/%y/%%`）；`stat` 增加 `-c FORMAT`/`-cFORMAT`/`-Lc`（`%n%s%i%a%f%F%h%u%g%Y%%`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **seq -w + du -h**：`seq` 增加 `-w`（等宽前导零，宽度取端点十进制宽度）；`du` 增加 `-h`（1024 幂整数人类可读：裸字节/`K`/`M`/`G`）。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **xargs -I + sort -k + timeout --signal**：`xargs -I R`/`-IR` 按行替换初始参数中的 R；`sort -k N`/`-kN` 按空白字段排序（可与 `-n`/`-r` 组合）；`timeout -s SIG`/`--signal=SIG` 超时发指定信号（0..31，默认 9；未收尸则回退 SIGKILL）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/ls -l polish**：`ls` 增加 `-a`/`-A`/`-d`、粘连短选项、多 PATH（多目录打印 `path:` 头）；默认隐藏 `.` 前缀名；`-a` 合成输出 `.`/`..`（getdents 无此项）；`-l` 增加 `nlink`（`mode nlink uid gid size mtime name`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。

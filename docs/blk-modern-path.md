@@ -266,7 +266,7 @@ Shell builtin `echo [-neE] [ARGS...]`: `-n` suppresses the trailing newline,
 `-e` enables backslash escapes (`\n`/`\t`/`\r`/`\\`/`\c`/octal; `\c`
 stops output and implies `-n`), `-E` forces literal (default). Leading sticky
 flag clusters (`-ne`) accepted; first non-flag operand ends option parse.
-Thin `/bin/xargs [-n N] [-r] [COMMAND [ARGS...]]` whitespace-splits stdin into
+Thin `/bin/xargs [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]` whitespace-splits stdin into
 batches (default COMMAND prints args; no `/bin/echo` required). Batches honor
 `execve` `EXEC_MAX_ARGC=8`. `-r` skips empty stdin. Focused virtio login smoke
 covers `echo -n/-e`, `xargs`/`-n`/`-r`, plus prior interactive greens (smp 1/2).
@@ -560,11 +560,12 @@ login smoke covers `/bin/chown` uid:gid / uid-only, `/bin/chgrp`, Ramfs+Ext2
 Thin POSIX/GNU subset. `tac [FILE...]` prints lines in reverse (RAM-buffered
 like sort). `nproc [-a|--all]` counts `processor` lines in boot-published
 `/proc/cpuinfo` (filled from `smp_cpu_count()`; online==all, no affinity).
-`timeout SECONDS COMMAND [ARG...]` forks+execs, polls with 50ms nanosleep +
-`wait4(WNOHANG)`, SIGKILL on deadline, exit 124; COMMAND without `/` resolves
-as `/bin/COMMAND`. Compact argv for `EXEC_MAX_ARGC=8`. Focused virtio login
-smoke covers tac reverse, nproc on smp 1/2, timeout success + timed-out sleep,
-plus prior interactive greens. Ramfs `/bin` dents 92/128.
+`timeout [-s SIG] SECONDS COMMAND [ARG...]` forks+execs, polls with 50ms
+nanosleep + `wait4(WNOHANG)`, signal on deadline (default SIGKILL=9; `-s` /
+`--signal`), exit 124; COMMAND without `/` resolves as `/bin/COMMAND`. Compact
+argv for `EXEC_MAX_ARGC=8`. Focused virtio login smoke covers tac reverse,
+nproc on smp 1/2, timeout success + timed-out sleep, plus prior interactive
+greens. Ramfs `/bin` dents 92/128.
 
 ## /bin/rmdir + /bin/unlink — landed
 
@@ -810,14 +811,27 @@ deferred); `mkfifo` still needs `mknod` (absent). `/bin/seq` gains `-w`
 `seq -w`, `du -h`/`-sh`, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents
 106/128.
 
+## xargs -I + sort -k + timeout --signal — landed
+
+Thin POSIX polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/xargs` gains `-I REPLACE`
+/ glued `-IREPLACE` (line-oriented; substitute REPLACE in initial ARGS once per
+non-empty stdin line). `/bin/sort` gains `-k N` / `-kN` (blank-separated 1-based
+field; combines with `-n`/`-r`; missing field sorts empty/0). `/bin/timeout`
+gains `-s SIG` / `-sSIG` / `--signal SIG` / `--signal=SIG` (numeric 0..31;
+default remains SIGKILL=9; fallback SIGKILL if chosen signal does not reap).
+Focused virtio login smoke covers `xargs -I`, `sort -k`/`-n -k`, `timeout -s`/
+`--signal`, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents 106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`seq -w` + `du -h` + `date +FORMAT`
-   + `stat -c` + …): prefer small coherent chunks; thin `df` **only if**
-   `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive. Candidates:
-   `xargs -I`, `sort -k`, `timeout --signal`, skip `yes --version` fluff;
-   `/bin/mkfifo` only if `mknod` exists. Avoid deep jbd / Ext2-redirect duplex
-   races / CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`xargs -I` + `sort -k` +
+   `timeout --signal` + `seq -w` + …): prefer small coherent chunks; thin
+   `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
+   Candidates: skip `yes --version` fluff; `/bin/mkfifo` only if `mknod`
+   exists; more filter/polish pairs as inventory bites. Avoid deep jbd /
+   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.

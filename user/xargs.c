@@ -1,7 +1,8 @@
-/* fakeos userland - xargs: build argv from stdin words and exec (thin).
- * Forms: xargs [-n N] [-r] [COMMAND [ARGS...]]
- * Whitespace-split stdin; default COMMAND prints args (no /bin/echo).
- * Batches honor execve EXEC_MAX_ARGC=8 (command + initial + stdin words).
+/* fakeos userland - xargs: build argv from stdin and exec (thin).
+ * Forms: xargs [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]
+ * Default: whitespace-split stdin words; default COMMAND prints args.
+ * -I REPLACE: line-oriented; substitute REPLACE in initial ARGS per line
+ * (one exec per line; empty lines skipped). Batches honor EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -23,7 +24,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: xargs [-n N] [-r] [COMMAND [ARGS...]]\n", 46);
+    u_write(2, "usage: xargs [-n N] [-r] [-I R] [COMMAND [ARGS...]]\n", 52);
 }
 
 static int is_ws(char c) {
@@ -65,6 +66,42 @@ static void emit_default(char **argv, int argc) {
     u_write(1, "\n", 1);
 }
 
+/* Replace all occurrences of needle in src into dst (size ARG_SLOT).
+ * Returns 0 on success, -1 on overflow or empty needle. */
+static int subst_all(char *dst, const char *src, const char *needle,
+                     const char *repl) {
+    unsigned long nl;
+    unsigned long rl;
+    unsigned long di;
+    unsigned long si;
+    if (needle == 0 || needle[0] == 0) return -1;
+    nl = strlen(needle);
+    rl = strlen(repl);
+    di = 0;
+    si = 0;
+    while (src[si]) {
+        unsigned long k;
+        int match = 1;
+        for (k = 0; k < nl; k++) {
+            if (src[si + k] != needle[k]) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) {
+            unsigned long j;
+            if (di + rl >= ARG_SLOT) return -1;
+            for (j = 0; j < rl; j++) dst[di++] = repl[j];
+            si += nl;
+        } else {
+            if (di + 1 >= ARG_SLOT) return -1;
+            dst[di++] = src[si++];
+        }
+    }
+    dst[di] = 0;
+    return 0;
+}
+
 static int run_batch(char **argv, int argc, int have_cmd, char *pathbuf) {
     long pid;
     long status;
@@ -96,6 +133,28 @@ static int run_batch(char **argv, int argc, int have_cmd, char *pathbuf) {
     return 1;
 }
 
+/* Build substituted argv from templates; run one batch. */
+static int run_replace(char templates[][ARG_SLOT], int base, int have_cmd,
+                       char *pathbuf, const char *replstr, const char *line,
+                       char slots[][ARG_SLOT], char **av) {
+    int i;
+    if (have_cmd) {
+        for (i = 0; i < base; i++) {
+            if (subst_all(slots[i], templates[i], replstr, line) != 0) {
+                u_write(2, "xargs: arg too long\n", 20);
+                return 1;
+            }
+            av[i] = slots[i];
+        }
+        av[base] = 0;
+        return run_batch(av, base, have_cmd, pathbuf);
+    }
+    /* No COMMAND: print the input line (thin default). */
+    u_write(1, line, strlen(line));
+    u_write(1, "\n", 1);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int max_n = -1;
     int no_run_empty = 0;
@@ -103,6 +162,7 @@ int main(int argc, char **argv) {
     int have_cmd = 0;
     char pathbuf[ARG_SLOT];
     char slots[MAX_ARGC][ARG_SLOT];
+    char templates[MAX_ARGC][ARG_SLOT];
     char *av[MAX_ARGC + 1];
     int base = 0;
     int room;
@@ -114,6 +174,10 @@ int main(int argc, char **argv) {
     int i;
     int rc = 0;
     int saw_word = 0;
+    int use_replace = 0;
+    char replstr[ARG_SLOT];
+
+    replstr[0] = 0;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
         if (strcmp(argv[ai], "--") == 0) {
@@ -141,6 +205,30 @@ int main(int argc, char **argv) {
             ai++;
             continue;
         }
+        if (strcmp(argv[ai], "-I") == 0) {
+            if (ai + 1 >= argc || argv[ai + 1][0] == 0) {
+                usage();
+                return 1;
+            }
+            if (strlen(argv[ai + 1]) >= ARG_SLOT) {
+                u_write(2, "xargs: replace string too long\n", 31);
+                return 1;
+            }
+            strcpy(replstr, argv[ai + 1]);
+            use_replace = 1;
+            ai += 2;
+            continue;
+        }
+        if (argv[ai][1] == 'I' && argv[ai][2] != 0) {
+            if (strlen(argv[ai] + 2) >= ARG_SLOT) {
+                u_write(2, "xargs: replace string too long\n", 31);
+                return 1;
+            }
+            strcpy(replstr, argv[ai] + 2);
+            use_replace = 1;
+            ai++;
+            continue;
+        }
         usage();
         return 1;
     }
@@ -151,21 +239,22 @@ int main(int argc, char **argv) {
             u_write(2, "xargs: command too long\n", 24);
             return 1;
         }
-        /* argv[0] = command path basename-ish: keep user string as argv0 */
         if (strlen(argv[ai]) >= ARG_SLOT) {
             u_write(2, "xargs: command too long\n", 24);
             return 1;
         }
         strcpy(slots[0], argv[ai]);
+        strcpy(templates[0], argv[ai]);
         av[0] = slots[0];
         base = 1;
         ai++;
-        while (ai < argc && base < MAX_ARGC - 1) {
+        while (ai < argc && base < MAX_ARGC) {
             if (strlen(argv[ai]) >= ARG_SLOT) {
                 u_write(2, "xargs: arg too long\n", 20);
                 return 1;
             }
             strcpy(slots[base], argv[ai]);
+            strcpy(templates[base], argv[ai]);
             av[base] = slots[base];
             base++;
             ai++;
@@ -176,9 +265,48 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (use_replace) {
+        /* Line mode: one invocation per non-empty line; substitute REPLACE. */
+        wi = 0;
+        while ((n = u_read(0, rbuf, sizeof(rbuf))) > 0) {
+            for (i = 0; i < (int)n; i++) {
+                char c = rbuf[i];
+                if (c == '\n' || c == '\r') {
+                    if (wi > 0) {
+                        word[wi] = 0;
+                        saw_word = 1;
+                        {
+                            int st = run_replace(templates, base, have_cmd,
+                                                 pathbuf, replstr, word,
+                                                 slots, av);
+                            if (st != 0) rc = st;
+                        }
+                        wi = 0;
+                    }
+                    continue;
+                }
+                if (wi < ARG_SLOT - 1) {
+                    word[wi++] = c;
+                }
+            }
+        }
+        if (wi > 0) {
+            word[wi] = 0;
+            saw_word = 1;
+            {
+                int st = run_replace(templates, base, have_cmd, pathbuf,
+                                     replstr, word, slots, av);
+                if (st != 0) rc = st;
+            }
+        }
+        if (!saw_word && !no_run_empty && have_cmd) {
+            /* empty stdin with -I: do not run (GNU-like); -r same */
+        }
+        return rc;
+    }
+
     room = MAX_ARGC - base;
     if (room < 1 && have_cmd) {
-        /* command alone still ok; stdin words need room */
         room = 0;
     }
     if (max_n < 0) {
@@ -187,7 +315,6 @@ int main(int argc, char **argv) {
     }
     if (max_n > room) max_n = room;
     if (max_n < 1 && room == 0) {
-        /* no room for stdin words: only run command once if -r allows empty */
         if (!no_run_empty) {
             av[base] = 0;
             rc = run_batch(av, base, have_cmd, pathbuf);
@@ -203,9 +330,6 @@ int main(int argc, char **argv) {
             if (is_ws(c)) {
                 if (wi > 0) {
                     word[wi] = 0;
-                    if (filled >= max_n) {
-                        /* should not happen */
-                    }
                     strcpy(slots[base + filled], word);
                     av[base + filled] = slots[base + filled];
                     filled++;
@@ -214,7 +338,8 @@ int main(int argc, char **argv) {
                     if (filled >= max_n) {
                         av[base + filled] = 0;
                         {
-                            int st = run_batch(av, base + filled, have_cmd, pathbuf);
+                            int st = run_batch(av, base + filled, have_cmd,
+                                               pathbuf);
                             if (st != 0) rc = st;
                         }
                         filled = 0;
@@ -241,7 +366,6 @@ int main(int argc, char **argv) {
             if (st != 0) rc = st;
         }
     } else if (!no_run_empty && !saw_word) {
-        /* empty stdin: run COMMAND once (POSIX), or print one blank line. */
         av[base] = 0;
         {
             int st = run_batch(av, base, have_cmd, pathbuf);

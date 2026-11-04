@@ -1,8 +1,8 @@
 /* fakeos userland - timeout: run COMMAND with a time limit (thin).
- * Forms: timeout SECONDS COMMAND [ARG...]
+ * Forms: timeout [-s SIG|--signal SIG|--signal=SIG] SECONDS COMMAND [ARG...]
  * SECONDS is a non-negative decimal integer. Uses fork + nanosleep poll +
- * kill(SIGKILL) — no alarm(2). Exit 124 on timeout; else child status.
- * COMMAND without '/' is resolved as /bin/COMMAND (PATH-lite).
+ * kill(sig) — no alarm(2). Default signal is SIGKILL (9). Exit 124 on
+ * timeout; else child status. COMMAND without '/' is /bin/COMMAND.
  * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
@@ -15,14 +15,20 @@ extern long u_kill(long pid, long sig);
 extern long u_nanosleep(const void *req, void *rem);
 extern void u_exit(long code);
 extern char *strcpy(char *dst, const char *src);
+extern int strcmp(const char *a, const char *b);
 
 enum {
     ARG_SLOT = 128,
     WNOHANG = 1,
     SIGKILL = 9,
+    SIG_MAX = 31,
     EXIT_TIMEOUT = 124,
     TICKS_PER_SEC = 20
 };
+
+static void usage(void) {
+    u_write(2, "usage: timeout [-s SIG] SECONDS COMMAND [ARG...]\n", 49);
+}
 
 static int parse_secs(const char *s, long *out) {
     long v = 0;
@@ -38,6 +44,25 @@ static int parse_secs(const char *s, long *out) {
         v = v * 10 + (s[i] - '0');
         i++;
     }
+    *out = v;
+    return 1;
+}
+
+static int parse_sig(const char *s, long *out) {
+    long v = 0;
+    int i = 0;
+    if (s == 0 || s[0] == 0) return 0;
+    if (s[0] == '+') {
+        i = 1;
+        if (s[i] == 0) return 0;
+    }
+    if (s[i] < '0' || s[i] > '9') return 0;
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    if (v < 0 || v > SIG_MAX) return 0;
     *out = v;
     return 1;
 }
@@ -65,6 +90,46 @@ static int status_exit(long status) {
     return 128 + (int)(status & 0x7f);
 }
 
+/* Parse leading -s/--signal; returns new argv index of SECONDS, or -1. */
+static int parse_opts(int argc, char **argv, long *sig_out) {
+    int ai = 1;
+    long sig = SIGKILL;
+    while (ai < argc) {
+        const char *a = argv[ai];
+        if (a[0] != '-' || a[1] == 0) break;
+        if (strcmp(a, "--") == 0) {
+            ai++;
+            break;
+        }
+        if (strcmp(a, "-s") == 0) {
+            if (ai + 1 >= argc || !parse_sig(argv[ai + 1], &sig)) return -1;
+            ai += 2;
+            continue;
+        }
+        if (a[1] == 's' && a[2] != 0 && a[1] != '-') {
+            /* glued -sN (not --...) */
+            if (!parse_sig(a + 2, &sig)) return -1;
+            ai++;
+            continue;
+        }
+        if (strcmp(a, "--signal") == 0) {
+            if (ai + 1 >= argc || !parse_sig(argv[ai + 1], &sig)) return -1;
+            ai += 2;
+            continue;
+        }
+        if (a[0] == '-' && a[1] == '-' && a[2] == 's' && a[3] == 'i' &&
+            a[4] == 'g' && a[5] == 'n' && a[6] == 'a' && a[7] == 'l' &&
+            a[8] == '=') {
+            if (!parse_sig(a + 9, &sig)) return -1;
+            ai++;
+            continue;
+        }
+        return -1;
+    }
+    *sig_out = sig;
+    return ai;
+}
+
 int main(int argc, char **argv) {
     long sec;
     long pid;
@@ -75,19 +140,24 @@ int main(int argc, char **argv) {
     long ts[2];
     long ticks_left;
     int i;
+    int ai;
+    long sig;
+    char **cmd_argv;
 
-    if (argc < 3) {
-        u_write(2, "usage: timeout SECONDS COMMAND [ARG...]\n", 40);
+    ai = parse_opts(argc, argv, &sig);
+    if (ai < 0 || ai + 1 >= argc) {
+        usage();
         return 1;
     }
-    if (!parse_secs(argv[1], &sec)) {
+    if (!parse_secs(argv[ai], &sec)) {
         u_write(2, "timeout: invalid duration\n", 26);
         return 1;
     }
-    if (resolve_cmd(argv[2], pathbuf) != 0) {
+    if (resolve_cmd(argv[ai + 1], pathbuf) != 0) {
         u_write(2, "timeout: command too long\n", 26);
         return 1;
     }
+    cmd_argv = argv + ai + 1;
 
     envp[0] = 0;
     pid = u_fork();
@@ -96,7 +166,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (pid == 0) {
-        if (u_execve(pathbuf, argv + 2, envp) < 0) {
+        if (u_execve(pathbuf, cmd_argv, envp) < 0) {
             u_write(2, "timeout: exec failed\n", 21);
             u_exit(127);
         }
@@ -122,13 +192,23 @@ int main(int argc, char **argv) {
         ticks_left--;
     }
 
-    u_kill(pid, SIGKILL);
+    u_kill(pid, sig);
     for (i = 0; i < 40; i++) {
         reaped = u_wait4(pid, &status, WNOHANG, 0);
         if (reaped == pid) return EXIT_TIMEOUT;
         ts[0] = 0;
         ts[1] = 50000000L;
         u_nanosleep(ts, 0);
+    }
+    if (sig != SIGKILL) {
+        u_kill(pid, SIGKILL);
+        for (i = 0; i < 40; i++) {
+            reaped = u_wait4(pid, &status, WNOHANG, 0);
+            if (reaped == pid) return EXIT_TIMEOUT;
+            ts[0] = 0;
+            ts[1] = 50000000L;
+            u_nanosleep(ts, 0);
+        }
     }
     u_wait4(pid, &status, 0, 0);
     return EXIT_TIMEOUT;

@@ -1,6 +1,8 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-r] [-n] [FILE...]
- * -r reverse; -n numeric (leading optional sign/digits). Loads into RAM.
+ * Forms: sort [-r] [-n] [-k N|-kN] [FILE...]
+ * -r reverse; -n numeric (leading optional sign/digits); -k N sort by
+ * blank-separated field N (1-based; missing field sorts as empty / 0).
+ * Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -14,6 +16,7 @@ extern char *strcpy(char *dst, const char *src);
 extern void *malloc(unsigned long size);
 extern void free(void *ptr);
 extern void printf(const char *fmt, ...);
+extern long strtol_dec(const char *s);
 
 enum {
     LINE_MAX = 512,
@@ -22,38 +25,101 @@ enum {
 
 static int opt_r;
 static int opt_n;
+static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-r] [-n] [FILE...]\n", 32);
+    u_write(2, "usage: sort [-r] [-n] [-k N] [FILE...]\n", 39);
 }
 
-static long parse_num(const char *s) {
+static int is_digits(const char *s) {
+    int i;
+    if (s == 0 || s[0] == 0) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
+}
+
+/* Point at blank-separated field N (1-based) within s; set *len.
+ * Missing field -> empty (len 0). */
+static const char *field_at(const char *s, int n, int *len) {
+    int f = 0;
+    int i = 0;
+    int start;
+    *len = 0;
+    if (n < 1) {
+        *len = (int)strlen(s);
+        return s;
+    }
+    while (s[i]) {
+        while (s[i] == ' ' || s[i] == '\t') i++;
+        if (s[i] == 0) break;
+        f++;
+        start = i;
+        while (s[i] && s[i] != ' ' && s[i] != '\t') i++;
+        if (f == n) {
+            *len = i - start;
+            return s + start;
+        }
+    }
+    return s + i; /* empty */
+}
+
+static long parse_num_n(const char *s, int n) {
     long v = 0;
     int i = 0;
     int neg = 0;
-    while (s[i] == ' ' || s[i] == '\t') i++;
-    if (s[i] == '-') {
+    int end = n;
+    if (n < 0) end = (int)strlen(s);
+    while (i < end && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i < end && s[i] == '-') {
         neg = 1;
         i++;
-    } else if (s[i] == '+') {
+    } else if (i < end && s[i] == '+') {
         i++;
     }
-    if (s[i] < '0' || s[i] > '9') {
-        /* Non-numeric sorts as 0 like a thin subset. */
+    if (i >= end || s[i] < '0' || s[i] > '9') {
         return 0;
     }
-    while (s[i] >= '0' && s[i] <= '9') {
+    while (i < end && s[i] >= '0' && s[i] <= '9') {
         v = v * 10 + (s[i] - '0');
         i++;
     }
     return neg ? -v : v;
 }
 
+static long parse_num(const char *s) {
+    return parse_num_n(s, -1);
+}
+
+static int cmp_key_str(const char *a, int al, const char *b, int bl) {
+    int i;
+    int n = al < bl ? al : bl;
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
+    }
+    return al - bl;
+}
+
 static int cmp_lines(const char *a, const char *b) {
     int c;
-    if (opt_n) {
+    if (opt_k > 0) {
+        int al, bl;
+        const char *fa = field_at(a, opt_k, &al);
+        const char *fb = field_at(b, opt_k, &bl);
+        if (opt_n) {
+            long na = parse_num_n(fa, al);
+            long nb = parse_num_n(fb, bl);
+            if (na < nb) c = -1;
+            else if (na > nb) c = 1;
+            else c = cmp_key_str(fa, al, fb, bl);
+        } else {
+            c = cmp_key_str(fa, al, fb, bl);
+        }
+        if (c == 0) c = strcmp(a, b);
+    } else if (opt_n) {
         long na = parse_num(a);
         long nb = parse_num(b);
         if (na < nb) c = -1;
@@ -147,6 +213,22 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--") == 0) {
             i++;
             break;
+        }
+        if (strcmp(argv[i], "-k") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            opt_k = (int)strtol_dec(argv[i + 1]);
+            if (opt_k < 1) opt_k = 1;
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'k' && argv[i][2] != 0 && is_digits(argv[i] + 2)) {
+            opt_k = (int)strtol_dec(argv[i] + 2);
+            if (opt_k < 1) opt_k = 1;
+            i++;
+            continue;
         }
         for (j = 1; argv[i][j]; j++) {
             char o = argv[i][j];
