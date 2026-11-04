@@ -1,4 +1,9 @@
-/* fakeos userland - printf: format ARGS with escapes (thin POSIX subset). */
+/* fakeos userland - printf: format ARGS with escapes (thin POSIX subset).
+ *   printf FORMAT [ARGUMENT...]
+ * Format escapes: \n \t \r \a \b \f \v \\ \% \0ooo \c (stop). Specifiers:
+ * %s %c %d %i %u %x %X %% and %b (ARGUMENT with the same escapes; \c stops
+ * all further output). Compact argv for EXEC_MAX_ARGC=8.
+ */
 package user;
 
 typedef unsigned long u64;
@@ -61,51 +66,61 @@ static int parse_oct3(const char *s, int *consumed) {
     return v;
 }
 
-/* Expand backslash escapes from fmt into out (NUL-terminated). Returns length. */
-static int expand_escapes(const char *fmt, char *out, int cap) {
+/* Expand backslash escapes from src into out (NUL-terminated).
+ * Returns 1 if \c stopped expansion (remaining src ignored), else 0. */
+static int expand_escapes(const char *src, char *out, int cap) {
     int n = 0;
-    while (*fmt && n + 1 < cap) {
-        if (*fmt != '\\') {
-            out[n++] = *fmt++;
+    int stopped = 0;
+    while (*src && n + 1 < cap) {
+        if (*src != '\\') {
+            out[n++] = *src++;
             continue;
         }
-        fmt++;
-        if (*fmt == 0) {
+        src++;
+        if (*src == 0) {
             out[n++] = '\\';
             break;
         }
-        if (*fmt == 'n') { out[n++] = '\n'; fmt++; }
-        else if (*fmt == 't') { out[n++] = '\t'; fmt++; }
-        else if (*fmt == 'r') { out[n++] = '\r'; fmt++; }
-        else if (*fmt == 'a') { out[n++] = '\a'; fmt++; }
-        else if (*fmt == 'b') { out[n++] = '\b'; fmt++; }
-        else if (*fmt == 'f') { out[n++] = '\f'; fmt++; }
-        else if (*fmt == 'v') { out[n++] = '\v'; fmt++; }
-        else if (*fmt == '\\') { out[n++] = '\\'; fmt++; }
-        else if (*fmt == '%') { out[n++] = '%'; fmt++; }
-        else if (*fmt >= '0' && *fmt <= '7') {
+        if (*src == 'c') {
+            /* \c: produce no further output from this string / printf. */
+            src++;
+            stopped = 1;
+            break;
+        }
+        if (*src == 'n') { out[n++] = '\n'; src++; }
+        else if (*src == 't') { out[n++] = '\t'; src++; }
+        else if (*src == 'r') { out[n++] = '\r'; src++; }
+        else if (*src == 'a') { out[n++] = '\a'; src++; }
+        else if (*src == 'b') { out[n++] = '\b'; src++; }
+        else if (*src == 'f') { out[n++] = '\f'; src++; }
+        else if (*src == 'v') { out[n++] = '\v'; src++; }
+        else if (*src == '\\') { out[n++] = '\\'; src++; }
+        else if (*src == '%') { out[n++] = '%'; src++; }
+        else if (*src >= '0' && *src <= '7') {
             int cons = 0;
-            int v = parse_oct3(fmt, &cons);
+            int v = parse_oct3(src, &cons);
             out[n++] = (char)v;
-            fmt += cons;
+            src += cons;
         } else {
-            out[n++] = *fmt++;
+            out[n++] = *src++;
         }
     }
     out[n] = 0;
-    return n;
+    return stopped;
 }
 
 int main(int argc, char **argv) {
     char expanded[1024];
+    char bbuf[1024];
     const char *fmt;
     int ai;
     int i;
+    int fmt_stop;
 
     if (argc < 2) {
         return 0;
     }
-    expand_escapes(argv[1], expanded, (int)sizeof(expanded));
+    fmt_stop = expand_escapes(argv[1], expanded, (int)sizeof(expanded));
     fmt = expanded;
     ai = 2;
 
@@ -133,6 +148,16 @@ int main(int argc, char **argv) {
             out_ch(a[0]);
             if (ai < argc) ai++;
             i++;
+        } else if (fmt[i] == 'b') {
+            const char *a = (ai < argc) ? argv[ai] : "";
+            int bstop;
+            if (ai < argc) ai++;
+            bstop = expand_escapes(a, bbuf, (int)sizeof(bbuf));
+            out_str(bbuf);
+            i++;
+            if (bstop) {
+                return 0;
+            }
         } else if (fmt[i] == 'd' || fmt[i] == 'i') {
             long v = 0;
             const char *a = (ai < argc) ? argv[ai] : "0";
@@ -160,5 +185,6 @@ int main(int argc, char **argv) {
             out_ch(fmt[i++]);
         }
     }
+    (void)fmt_stop;
     return 0;
 }

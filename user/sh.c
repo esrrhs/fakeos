@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR), cd, pwd, mkdir[-p], rmdir[-p], ln[-s], readlink,
+ * Builtins: echo [-neE] ($?/$VAR), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-s], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -1107,7 +1107,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -1475,8 +1475,22 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "pwd")) {
+        /* pwd [-L|-P]: kernel cwd is already physical; both modes getcwd. */
         char buf[128];
-        if (u_getcwd(buf, sizeof(buf)) == -1) {
+        int ai = 1;
+        int bad = 0;
+        while (tokens[ai] != 0) {
+            if (eq(tokens[ai], "-L") || eq(tokens[ai], "-P")) {
+                ai++;
+                continue;
+            }
+            bad = 1;
+            break;
+        }
+        if (bad) {
+            puts("sh: pwd: usage: pwd [-L|-P]");
+            rc = 1;
+        } else if (u_getcwd(buf, sizeof(buf)) == -1) {
             puts("sh: pwd failed");
             rc = 1;
         } else {
