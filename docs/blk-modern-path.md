@@ -535,14 +535,22 @@ boot-relative (no RTC), so current month is not inferred. Focused virtio login
 smoke covers Nov 2026 / Mar 2024 / year 2024 markers plus prior interactive
 greens (smp 1/2). Ramfs `/bin` dents 86/128.
 
+## /bin/install — landed
+
+Thin POSIX/GNU subset. Forms: `install [-m MODE|-mMODE] SOURCE DEST`,
+`install [-m MODE|-mMODE] SOURCE... DIRECTORY`, and `install -d [-m MODE|-mMODE]
+DIR...` (`-d` is mkdir -p style). Default MODE 0755; copy reuses open/read/write
+then chmod; glued `-mMODE`/`-dmMODE` keep argv under `EXEC_MAX_ARGC=8`. Focused
+virtio login smoke covers `-d`/`-m`/single copy/multi-into-dir plus prior
+interactive greens (smp 1/2). Ramfs `/bin` dents 87/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (e.g.
-   `install`/`install -d`; cal + id/groups + factor/clear/tty/whoami +
-   base64 + checksum trio already present) — prefer small coherent chunks.
-   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
-   bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (install + cal +
+   id/groups + factor/clear/tty/whoami + base64 + checksum trio already
+   present) — prefer small coherent chunks. Avoid deep jbd / Ext2-redirect
+   duplex races / CFS nesting unless a clear bite-sized fix.
