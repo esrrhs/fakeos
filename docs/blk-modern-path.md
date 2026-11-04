@@ -2138,6 +2138,13 @@ precede `-s`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 `--quiet`/`--silent`). Default still prints one path per piece. Keeps
 `-f`/`-n`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## ls -h — landed
+
+`/bin/ls -h` with `-l` prints sizes as integer 1024 powers (bare / `K` /
+`M` / `G`), matching thin `du -h`. Glued `-lh` / `-lah` etc. Without `-l`,
+`-h` is accepted but unused. No new `/bin` dent. Focused virtio login smoke
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2145,6 +2152,6 @@ precede `-s`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `ls -h`, `od` leftovers if any; `cp -p` waits on utimensat; `set --`
+   deferred. Next thin polish: other util flags on existing `/bin` after
+   inspect (od leftovers if any; `cp -p` waits on utimensat; `set --`
    deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
