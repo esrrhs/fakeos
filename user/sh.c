@@ -2232,6 +2232,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "readonly") || eq(cmd, "unset") ||
            eq(cmd, "which") || eq(cmd, "type") || eq(cmd, "command") ||
+           eq(cmd, "builtin") ||
            eq(cmd, "hash") || eq(cmd, "read") ||
            eq(cmd, "chmod") || eq(cmd, "umask")
         || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
@@ -2806,9 +2807,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], builtin, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|builtin|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -3506,6 +3507,20 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 }
             }
             rc = bad ? 1 : (any ? 0 : 1);
+        }
+    } else if (eq(tokens[0], "builtin")) {
+        /* builtin NAME [ARGS...] — run NAME as a shell builtin only
+         * (skip alias/function/PATH). Error if NAME is not a builtin. */
+        char **av = tokens + 1;
+        if (av[0] == 0) {
+            puts("usage: builtin NAME [ARGS...]");
+            rc = 1;
+        } else if (!is_builtin(av[0])) {
+            printf("sh: builtin: %s: not a shell builtin\n", av[0]);
+            rc = 1;
+        } else {
+            /* Nested: redirects already applied by outer push_redirects. */
+            rc = run_builtin(av, rc_in, 0, 0, 0);
         }
     } else if (eq(tokens[0], "hash")) {
         /* hash             -> list remembered NAME=PATH
@@ -5687,7 +5702,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

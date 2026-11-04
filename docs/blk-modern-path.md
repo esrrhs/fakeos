@@ -1286,6 +1286,19 @@ conversion. Applies to `d/i/u/x/X/o/s` (and thin `c`/`b`). No precision /
 `*` / `#`. Focused virtio login smoke covers `%5d`/`%04d`/`%-5s`/`%08x` +
 prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell builtin — landed
+
+Thin shell `builtin NAME [ARGS…]` (no new `/bin` dent). Inventory: kernel has
+no `getrlimit`/`setrlimit`/`RLIMIT_*` — skip `ulimit` rather than invent a
+fake kernel. `trap`/`getopts`/here-doc still deferred.
+
+`builtin` runs NAME only via `run_builtin` (skip alias/function/PATH); errors
+with `not a shell builtin` when NAME is unknown to `is_builtin`. Mirrors the
+run half of `command` without PATH fallback. Tab-completion + help/banner
+updated. Focused virtio login smoke covers `builtin echo` / non-builtin
+reject / function shadow bypass + prior greens (smp 1/2). Ramfs `/bin` dents
+~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1293,6 +1306,7 @@ prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: thin `ulimit`, or other small `/bin`/shell
-   bites (skip large `getopts` / here-doc / trap unless bite-sized). Leave
-   Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `dirs -v`/`-p`, `set -o` for e/u, other small
+   `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
+   bite-sized; `ulimit` still needs kernel rlimit). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.
