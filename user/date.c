@@ -2,9 +2,9 @@
  *   date
  *   date +FORMAT
  * No RTC — REALTIME is boot-relative (same as MONOTONIC). Bare `date` and
- * `+%s` print whole seconds. +FORMAT supports %s %N %Y %m %d %H %M %S %y %%
- * (calendar fields treat boot-relative seconds as Unix epoch). External form
- * for xargs/scripts.
+ * `+%s` print whole seconds. +FORMAT supports %s %N %Y %m %d %H %M %S %y
+ * %F (%Y-%m-%d) %T (%H:%M:%S) %R (%H:%M) %% (calendar fields treat
+ * boot-relative seconds as Unix epoch). External form for xargs/scripts.
  */
 package user;
 
@@ -143,6 +143,25 @@ static void emit_format(const char *fmt, long sec, long nsec) {
             emit_pad((unsigned long)min, 2);
         } else if (*p == 'S') {
             emit_pad((unsigned long)ssec, 2);
+        } else if (*p == 'F') {
+            /* %Y-%m-%d */
+            emit_pad((unsigned long)year, 4);
+            emit_ch('-');
+            emit_pad((unsigned long)month, 2);
+            emit_ch('-');
+            emit_pad((unsigned long)day, 2);
+        } else if (*p == 'T') {
+            /* %H:%M:%S */
+            emit_pad((unsigned long)hour, 2);
+            emit_ch(':');
+            emit_pad((unsigned long)min, 2);
+            emit_ch(':');
+            emit_pad((unsigned long)ssec, 2);
+        } else if (*p == 'R') {
+            /* %H:%M */
+            emit_pad((unsigned long)hour, 2);
+            emit_ch(':');
+            emit_pad((unsigned long)min, 2);
         } else {
             /* Unknown conversion: echo literally like a thin subset. */
             emit_ch('%');
