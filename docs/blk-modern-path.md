@@ -1379,6 +1379,16 @@ the pattern (bash-ish). Exact equality still works when pat has no meta. Invento
 `set --` still deferred. Focused virtio login smoke covers `*`/`?`/`!=`
 + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell help table coverage — landed
+
+Expanded `sh_help_tab` so remaining builtins that fell through to
+`NAME: shell builtin` get one-line synopses (`mkdir`/`rmdir`/`ln`/
+`readlink`/`realpath`/`uname`/`pid`/`ppid`/`sleep`/`sync`/`clear`/
+`chown`/`id`/`setuid`/`seteuid`). Preferred names (wait/export/[[/…)
+were already covered. No new `/bin` dent. Focused virtio login smoke
+covers new synopses + prior greens (smp 1/2). Ramfs `/bin` dents
+~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1386,7 +1396,7 @@ the pattern (bash-ish). Exact equality still works when pat has no meta. Invento
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: expand help synopsis table, `set --` if
-   positional frames grow, or other small `/bin`/shell bites (skip large
-   `getopts` / here-doc / trap unless bite-sized; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `set --` if positional frames grow, or other
+   small `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
+   bite-sized; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

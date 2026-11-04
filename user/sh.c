@@ -2652,7 +2652,22 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "which", "which NAME..." },
     { "umask", "umask [MODE]" },
     { "chmod", "chmod [-R] MODE FILE..." },
+    { "chown", "chown [UID][:GID] FILE..." },
+    { "id", "id [-u|-g] [-n]" },
+    { "setuid", "setuid UID" },
+    { "seteuid", "seteuid UID" },
     { "env", "env" },
+    { "mkdir", "mkdir [-p] [-m MODE] DIR..." },
+    { "rmdir", "rmdir [-p] DIR..." },
+    { "ln", "ln [-sf] TARGET LINKPATH" },
+    { "readlink", "readlink FILE" },
+    { "realpath", "realpath FILE" },
+    { "uname", "uname [-asnrvm]" },
+    { "pid", "pid  (print $$)" },
+    { "ppid", "ppid" },
+    { "sleep", "sleep N" },
+    { "sync", "sync" },
+    { "clear", "clear" },
     { 0, 0 }
 };
 
