@@ -12,7 +12,7 @@
  * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false).
  * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly; wait [PID|%N];
  * command [-vV] NAME [ARGS…] (skip alias/function);
- * [[ ]] numeric -eq/-ne/-lt/-le/-gt/-ge. */
+ * [[ ]] numeric -eq/-ne/-lt/-le/-gt/-ge; jobs -l (PID). */
 package user;
 
 typedef unsigned long u64;
@@ -2806,11 +2806,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
-        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
+        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -3115,12 +3115,40 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return rcw;
     }
     if (eq(tokens[0], "jobs")) {
+        /* jobs [-l] — list active jobs; -l includes PID. */
         int i;
         int cur = job_current();
+        int long_fmt = 0;
+        int ai = 1;
+        if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
+            const char *o = tokens[1] + 1;
+            int j;
+            if (!(o[0] == '-' && o[1] == 0)) {
+                for (j = 0; o[j] != 0; j++) {
+                    if (o[j] == 'l') {
+                        long_fmt = 1;
+                    } else {
+                        puts("usage: jobs [-l]");
+                        return 1;
+                    }
+                }
+                ai = 2;
+            }
+        }
+        if (tokens[ai] != 0) {
+            puts("usage: jobs [-l]");
+            return 1;
+        }
         for (i = 0; i < MAX_JOBS; i++) {
             if (!jobs[i].active) continue;
-            printf("[%d]%c %s %s\n", i + 1, (i == cur) ? '+' : '-',
-                   jobs[i].stopped ? "Stopped" : "Running", jobs[i].name);
+            if (long_fmt) {
+                printf("[%d]%c %d %s %s\n", i + 1, (i == cur) ? '+' : '-',
+                       (int)jobs[i].pid,
+                       jobs[i].stopped ? "Stopped" : "Running", jobs[i].name);
+            } else {
+                printf("[%d]%c %s %s\n", i + 1, (i == cur) ? '+' : '-',
+                       jobs[i].stopped ? "Stopped" : "Running", jobs[i].name);
+            }
         }
         return 0;
     }
@@ -5659,7 +5687,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

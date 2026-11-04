@@ -1265,6 +1265,16 @@ gaps unchanged.
 thin `test`). Focused virtio login smoke covers numeric true/false/`!` +
 prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell jobs -l — landed
+
+Thin shell polish (no new `/bin` dent). Inventory: jobs/fg/bg/wait already
+present — `-l` was the bite-sized gap. Printf width / ulimit / trap left for
+later (trap not clearly bite-sized). Deferred kernel gaps unchanged.
+
+`jobs [-l]` lists active jobs; `-l` inserts PID after the `+/-` marker
+(`[N]+ PID Running NAME`). Focused virtio login smoke covers `true &` +
+`jobs -l` + `wait` + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1272,6 +1282,6 @@ prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `jobs -l`, printf width, thin `trap`/`ulimit`,
-   or other small `/bin`/shell bites (skip large `getopts` / here-doc). Leave
-   Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: printf width, thin `ulimit`, or other small
+   `/bin`/shell bites (skip large `getopts` / here-doc / trap unless bite-sized).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
