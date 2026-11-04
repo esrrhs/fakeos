@@ -11,7 +11,8 @@
  * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4).
  * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false).
  * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly; wait [PID|%N];
- * command [-vV] NAME [ARGS…] (skip alias/function). */
+ * command [-vV] NAME [ARGS…] (skip alias/function);
+ * [[ ]] numeric -eq/-ne/-lt/-le/-gt/-ge. */
 package user;
 
 typedef unsigned long u64;
@@ -338,6 +339,29 @@ static int db_mode_any(const char *path, unsigned int bits) {
     return (mode & bits) != 0;
 }
 
+/* Parse signed decimal for [[ -eq … ]]; 1 ok, 0 bad. */
+static int db_parse_long(const char *s, long *out) {
+    long v = 0;
+    int i = 0;
+    int neg = 0;
+    if (s == 0 || s[0] == 0) return 0;
+    if (s[0] == '-') {
+        neg = 1;
+        i = 1;
+        if (s[i] == 0) return 0;
+    } else if (s[0] == '+') {
+        i = 1;
+        if (s[i] == 0) return 0;
+    }
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    *out = neg ? -v : v;
+    return 1;
+}
+
 /* One primary at *pos.. until &&/||/end. Advances *pos. 0/1 or -1 error. */
 static int db_primary(char **av, int end, int *pos) {
     int neg = 0;
@@ -387,9 +411,20 @@ static int db_primary(char **av, int end, int *pos) {
         return neg ? !t : t;
     }
     if (n == 3) {
+        long n1 = 0;
+        long n2 = 0;
         if (eq(a1, "==") || eq(a1, "=")) t = eq(a0, a2);
         else if (eq(a1, "!=")) t = !eq(a0, a2);
-        else return -1;
+        else if (eq(a1, "-eq") || eq(a1, "-ne") || eq(a1, "-lt") ||
+                 eq(a1, "-le") || eq(a1, "-gt") || eq(a1, "-ge")) {
+            if (!db_parse_long(a0, &n1) || !db_parse_long(a2, &n2)) return -1;
+            if (eq(a1, "-eq")) t = (n1 == n2);
+            else if (eq(a1, "-ne")) t = (n1 != n2);
+            else if (eq(a1, "-lt")) t = (n1 < n2);
+            else if (eq(a1, "-le")) t = (n1 <= n2);
+            else if (eq(a1, "-gt")) t = (n1 > n2);
+            else t = (n1 >= n2);
+        } else return -1;
         return neg ? !t : t;
     }
     return -1;
@@ -2773,7 +2808,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;

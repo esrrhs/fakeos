@@ -297,6 +297,7 @@ flowchart TD
 - [x] **shell readonly**：薄 `readonly`/`readonly NAME`/`readonly NAME=VAL`；拒绝后续 `export`/`unset`/赋值改写；列表形式。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **shell wait**：薄 `wait` / `wait PID` / `wait %N`（阻塞至退出；停职作业先 SIGCONT；返回末状态）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **shell command [-vV] + run**：`command NAME [ARGS…]` 跳过 alias/function（builtin 或 PATH）；保留/扩展 `-v`/`-V`。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **shell [[ ]] numeric**：`[[` 增加 `-eq/-ne/-lt/-le/-gt/-ge`（与薄 `test(1)` 对齐）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

@@ -1253,6 +1253,18 @@ identify; `-V` verbose (type-like). Focused virtio login smoke covers
 alias/function bypass + `-v`/`-V` + prior greens (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## shell [[ ]] numeric — landed
+
+Thin shell polish (no new `/bin` dent). Inventory: `/bin/printf` already has
+`%x/%X/%u/%s/%d/%o/%b` (width still absent); `test` already has numeric ops;
+`[[` had only string/`=`/`!=` + file tests — extended carefully. `umask`
+exists; no `ulimit`/`trap` yet (trap deferred as larger). Deferred kernel
+gaps unchanged.
+
+`[[ A -eq|-ne|-lt|-le|-gt|-ge B ]]` parses signed decimals (same rules as
+thin `test`). Focused virtio login smoke covers numeric true/false/`!` +
+prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1260,6 +1272,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: more printf/test edges, or other small
-   `/bin`/shell bites (skip large `getopts` / here-doc). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `jobs -l`, printf width, thin `trap`/`ulimit`,
+   or other small `/bin`/shell bites (skip large `getopts` / here-doc). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
