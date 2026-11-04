@@ -1,10 +1,11 @@
 /* fakeos userland - base64: encode/decode (thin POSIX/GNU subset).
  * Forms: base64 [-w COLS|-wCOLS] [FILE...]
- *        base64 -d [FILE...]
+ *        base64 -d [-i] [FILE...]
  * Encode wraps at COLS columns (default 76) with a trailing newline when the
  * last line is open; -w 0 disables wrapping entirely (no trailing newline).
- * Decode ignores whitespace; rejects other non-alphabet. stdin if no FILE.
- * Glued -wCOLS keeps argv under EXEC_MAX_ARGC=8.
+ * Decode ignores whitespace; -i also ignores non-alphabet garbage (GNU).
+ * Without -i, non-alphabet is an error. stdin if no FILE. Glued -di/-id/
+ * -wCOLS keep EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -21,12 +22,13 @@ static const char b64tab[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static int decode_mode;
+static int ignore_garbage; /* -i: skip non-alphabet on decode */
 static int wrap_cols = WRAP_DEFAULT; /* 0 = no wrap */
 static signed char decmap[128];
 static int map_ready;
 
 static void usage(void) {
-    u_write(2, "usage: base64 [-d] [-w COLS] [FILE...]\n", 37);
+    u_write(2, "usage: base64 [-di] [-w COLS] [FILE...]\n", 39);
 }
 
 static int is_digits(const char *s) {
@@ -147,9 +149,15 @@ static int decode_fd(long fd) {
             if (c == '=') {
                 q[qi++] = -2; /* pad marker */
             } else {
-                if (c >= 128) return 1;
+                if (c >= 128) {
+                    if (ignore_garbage) continue;
+                    return 1;
+                }
                 v = decmap[c];
-                if (v < 0) return 1;
+                if (v < 0) {
+                    if (ignore_garbage) continue;
+                    return 1;
+                }
                 q[qi++] = v;
             }
             if (qi < 4) continue;
@@ -206,6 +214,28 @@ int main(int argc, char **argv) {
             decode_mode = 1;
             i++;
             continue;
+        }
+        if (strcmp(a, "-i") == 0) {
+            ignore_garbage = 1;
+            i++;
+            continue;
+        }
+        /* Glued -d/-i only (e.g. -di / -id). */
+        if (a[1] != 0 && a[1] != 'w') {
+            int j;
+            int ok = 1;
+            for (j = 1; a[j]; j++) {
+                if (a[j] == 'd') decode_mode = 1;
+                else if (a[j] == 'i') ignore_garbage = 1;
+                else {
+                    ok = 0;
+                    break;
+                }
+            }
+            if (ok) {
+                i++;
+                continue;
+            }
         }
         if (strcmp(a, "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) {

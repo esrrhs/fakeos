@@ -2119,6 +2119,13 @@ dent. Focused virtio login smoke covers `-v` + prior greens (smp 1/2).
 Combines with existing `-n`/`-b`/`-s`/`-v`. Glued `-nbsvETA`. No new `/bin`
 dent. Focused virtio login smoke covers `-E`/`-T` + prior greens (smp 1/2).
 
+## base64 -i — landed
+
+`/bin/base64 -i` (glued `-di`/`-id`) ignores non-alphabet garbage while
+decoding (GNU ignore-garbage). Whitespace was already skipped. Without `-i`,
+non-alphabet remains an error. Keeps `-d`/`-w`. No new `/bin` dent. Focused
+virtio login smoke covers `-di` + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2126,6 +2133,6 @@ dent. Focused virtio login smoke covers `-E`/`-T` + prior greens (smp 1/2).
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (inspect
-   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
+   `ls -h`, `csplit -s`, `truncate -c`; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
