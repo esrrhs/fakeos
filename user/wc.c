@@ -1,7 +1,8 @@
 /* fakeos userland - wc: count lines, words, bytes, and max line length.
- *   wc [-lwcL] [FILE...]
+ *   wc [-lwcLm] [FILE...]
  * Default (no flags): lines, words, bytes. -L is max line length (bytes
- * since last newline; unterminated final line counts). Glued flags ok.
+ * since last newline; unterminated final line counts). -m characters
+ * (alias of -c here; no multibyte). Glued flags ok.
  * Compact argv for EXEC_MAX_ARGC=8. stdin if no FILE.
  */
 package user;
@@ -99,9 +100,10 @@ int main(int argc, char **argv) {
             if (o == 'l') { show_l = 1; any_flag = 1; }
             else if (o == 'w') { show_w = 1; any_flag = 1; }
             else if (o == 'c') { show_c = 1; any_flag = 1; }
+            else if (o == 'm') { show_c = 1; any_flag = 1; } /* chars=bytes */
             else if (o == 'L') { show_L = 1; any_flag = 1; }
             else {
-                u_write(2, "usage: wc [-lwcL] [FILE...]\n", 28);
+                u_write(2, "usage: wc [-lwcLm] [FILE...]\n", 29);
                 return 1;
             }
         }

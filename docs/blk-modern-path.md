@@ -1738,6 +1738,13 @@ Ramfs `/bin` dents ~114/128.
 new `/bin` dent. Focused virtio login smoke covers `head -z` / `tail -z` +
 prior greens including cut -b (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## wc -m — landed
+
+`/bin/wc -m` counts characters (alias of `-c` here; no multibyte). Keeps
+`-l`/`-w`/`-c`/`-L`; glued flags ok. No new `/bin` dent. Focused virtio
+login smoke covers `wc -m` + prior greens including head/tail -z (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1745,6 +1752,6 @@ prior greens including cut -b (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `tee` flags / `wc -m` / other util flags on
+   deferred. Next thin polish: `tee -i` (ignore SIGINT) / other util flags on
    existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
    shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
