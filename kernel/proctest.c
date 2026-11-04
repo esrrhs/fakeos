@@ -21,6 +21,7 @@ extern u64 sched_tick_count(void);
 extern u32 sched_thread_state(u32 id);
 extern u32 sched_set_nice(u32 id, s32 nice);
 extern u32 sched_cfs_rb_check(void);
+extern u32 sched_tg_se_rb_check(void);
 extern u32 sched_tg_create(u32 shares);
 extern u32 sched_tg_attach(u32 id, u32 tg);
 extern u32 sched_tg_set_shares(u32 tg, u32 shares);
@@ -967,9 +968,9 @@ static int test_sock_kmutex_blocking(void) {
 }
 
 void sched_selftest(void) {
-    kprintf("\n[SCHED] Kernel Threads & CFS rbtree + task_group Hierarchical Fair Scheduler Online:\n");
+    kprintf("\n[SCHED] Kernel Threads & CFS rbtree + task_group SE Hierarchical Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
-    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS rbtree + task_group shares\n");
+    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS + group SE rbtree shares\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
     kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");
 
@@ -1000,6 +1001,11 @@ void sched_selftest(void) {
     }
     if (test_tg_aggregate()) {
         kprintf("      [PASS] CFS task_group: equal shares 2v1 aggregate~fair\n");
+    }
+    if (sched_tg_se_rb_check()) {
+        kprintf("      [PASS] CFS task_group SE rbtree: per-CPU min-vruntime + nr\n");
+    } else {
+        kprintf("      [FAIL] CFS task_group SE rbtree invariant check\n");
     }
     if (test_kmutex_workers()) {
         kprintf("      [PASS] kmutex sleep-lock: %u x %u increments + trylock\n",

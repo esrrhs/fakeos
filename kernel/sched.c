@@ -155,12 +155,12 @@ static u32 cfs_root[SCHED_MAX_CPUS] = {
 };
 static u32 cfs_nr[SCHED_MAX_CPUS];   /* runnable non-idle entities on RQ    */
 
-/* CFS task_group (hierarchical fair share, first bite):
- * Each thread belongs to a group. Groups compete by shares on each CPU;
- * within a group, threads still compete by nice/vruntime on the flat
- * per-CPU rbtree. pick_next chooses the min-vruntime group that has
- * runnable members on this CPU, then the min-vruntime member of that
- * group. Not full Linux cgroup nesting / group se rbtree. */
+/* CFS task_group (hierarchical fair share + group SE rbtree):
+ * Each thread belongs to a group. Groups compete by shares on each CPU via
+ * a per-CPU intrusive red-black tree of group scheduling entities (keyed by
+ * group vruntime, then tg id). Within a group, threads still compete on the
+ * flat per-CPU task rbtree. pick_next leftmost-picks the group SE, then the
+ * min-vruntime member of that group. Not full Linux cgroup nesting yet. */
 enum {
     MAX_TASK_GROUPS = 8,
     TG_ROOT         = 0,
@@ -172,9 +172,19 @@ struct task_group {
     u32 shares;                        /* cpu.shares-style weight          */
     u64 vruntime[SCHED_MAX_CPUS];      /* group entity vruntime per CPU    */
     u32 nr[SCHED_MAX_CPUS];            /* runnable members on that CPU RQ  */
+    u32 se_left[SCHED_MAX_CPUS];       /* intrusive group SE rbtree        */
+    u32 se_right[SCHED_MAX_CPUS];
+    u32 se_parent[SCHED_MAX_CPUS];
+    u32 se_color[SCHED_MAX_CPUS];       /* 0=red, 1=black                   */
+    u32 se_on_rq[SCHED_MAX_CPUS];      /* 1 => linked in tg_se_root[cpu]   */
 };
 
 static struct task_group task_groups[MAX_TASK_GROUPS];
+/* Roots must be NONE (not BSS 0): tg 0 is the valid root group. */
+static u32 tg_se_root[SCHED_MAX_CPUS] = {
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+};
 
 extern void kprintf(const char *fmt, ...);
 extern void spin_lock(volatile u32 *lock);
@@ -377,13 +387,24 @@ static void cfs_set_nice_fields(struct tcb *t, s32 nice) {
     t->weight = nice_to_weight(nice);
 }
 
-/* ---- CFS task_group helpers (hierarchical fair share) --------------- */
+/* ---- CFS task_group helpers (hierarchical fair share + group SE rb) - */
 
 static u32 tg_valid(u32 tg) {
     if (tg >= MAX_TASK_GROUPS) {
         return 0;
     }
     return task_groups[tg].used;
+}
+
+static void tg_se_clear_node(u32 tg, u32 cpu) {
+    if (tg >= MAX_TASK_GROUPS || cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    task_groups[tg].se_left[cpu] = TG_NONE;
+    task_groups[tg].se_right[cpu] = TG_NONE;
+    task_groups[tg].se_parent[cpu] = TG_NONE;
+    task_groups[tg].se_color[cpu] = CFS_RB_RED;
+    task_groups[tg].se_on_rq[cpu] = 0;
 }
 
 static void tg_init_root(void) {
@@ -395,35 +416,405 @@ static void tg_init_root(void) {
         for (c = 0; c < SCHED_MAX_CPUS; c++) {
             task_groups[g].vruntime[c] = 0;
             task_groups[g].nr[c] = 0;
+            tg_se_clear_node(g, c);
         }
+    }
+    for (c = 0; c < SCHED_MAX_CPUS; c++) {
+        tg_se_root[c] = TG_NONE;
     }
     task_groups[TG_ROOT].used = 1;
     task_groups[TG_ROOT].shares = NICE0_WEIGHT;
 }
 
+/* Strict weak order for group SEs on `cpu`: vruntime, then tg id. */
+static u32 tg_se_before(u32 cpu, u32 a, u32 b) {
+    if (task_groups[a].vruntime[cpu] < task_groups[b].vruntime[cpu]) {
+        return 1;
+    }
+    if (task_groups[a].vruntime[cpu] > task_groups[b].vruntime[cpu]) {
+        return 0;
+    }
+    return a < b;
+}
+
+static u32 tg_se_leftmost_from(u32 cpu, u32 tg) {
+    u32 guard = 0;
+    if (cpu >= SCHED_MAX_CPUS || tg >= MAX_TASK_GROUPS) {
+        return TG_NONE;
+    }
+    while (task_groups[tg].se_left[cpu] < MAX_TASK_GROUPS) {
+        tg = task_groups[tg].se_left[cpu];
+        guard = guard + 1;
+        if (guard > MAX_TASK_GROUPS) {
+            return TG_NONE;
+        }
+    }
+    return tg;
+}
+
+static u32 tg_se_rq_leftmost(u32 cpu) {
+    u32 root;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return TG_NONE;
+    }
+    root = tg_se_root[cpu];
+    if (root >= MAX_TASK_GROUPS || !task_groups[root].se_on_rq[cpu]) {
+        return TG_NONE;
+    }
+    return tg_se_leftmost_from(cpu, root);
+}
+
+static u32 tg_se_successor(u32 cpu, u32 tg) {
+    u32 p;
+    u32 guard = 0;
+    if (cpu >= SCHED_MAX_CPUS || tg >= MAX_TASK_GROUPS) {
+        return TG_NONE;
+    }
+    if (task_groups[tg].se_right[cpu] < MAX_TASK_GROUPS) {
+        return tg_se_leftmost_from(cpu, task_groups[tg].se_right[cpu]);
+    }
+    p = task_groups[tg].se_parent[cpu];
+    while (p < MAX_TASK_GROUPS && tg == task_groups[p].se_right[cpu]) {
+        tg = p;
+        p = task_groups[p].se_parent[cpu];
+        guard = guard + 1;
+        if (guard > MAX_TASK_GROUPS) {
+            return TG_NONE;
+        }
+    }
+    if (p >= MAX_TASK_GROUPS) {
+        return TG_NONE;
+    }
+    return p;
+}
+
+static void tg_se_rotate_left(u32 cpu, u32 x) {
+    u32 y;
+    u32 yp;
+    if (cpu >= SCHED_MAX_CPUS || x >= MAX_TASK_GROUPS) {
+        return;
+    }
+    y = task_groups[x].se_right[cpu];
+    if (y >= MAX_TASK_GROUPS) {
+        return;
+    }
+    task_groups[x].se_right[cpu] = task_groups[y].se_left[cpu];
+    if (task_groups[y].se_left[cpu] != TG_NONE) {
+        task_groups[task_groups[y].se_left[cpu]].se_parent[cpu] = x;
+    }
+    yp = task_groups[x].se_parent[cpu];
+    task_groups[y].se_parent[cpu] = yp;
+    if (yp == TG_NONE) {
+        tg_se_root[cpu] = y;
+    } else if (x == task_groups[yp].se_left[cpu]) {
+        task_groups[yp].se_left[cpu] = y;
+    } else {
+        task_groups[yp].se_right[cpu] = y;
+    }
+    task_groups[y].se_left[cpu] = x;
+    task_groups[x].se_parent[cpu] = y;
+}
+
+static void tg_se_rotate_right(u32 cpu, u32 x) {
+    u32 y;
+    u32 yp;
+    if (cpu >= SCHED_MAX_CPUS || x >= MAX_TASK_GROUPS) {
+        return;
+    }
+    y = task_groups[x].se_left[cpu];
+    if (y >= MAX_TASK_GROUPS) {
+        return;
+    }
+    task_groups[x].se_left[cpu] = task_groups[y].se_right[cpu];
+    if (task_groups[y].se_right[cpu] != TG_NONE) {
+        task_groups[task_groups[y].se_right[cpu]].se_parent[cpu] = x;
+    }
+    yp = task_groups[x].se_parent[cpu];
+    task_groups[y].se_parent[cpu] = yp;
+    if (yp == TG_NONE) {
+        tg_se_root[cpu] = y;
+    } else if (x == task_groups[yp].se_right[cpu]) {
+        task_groups[yp].se_right[cpu] = y;
+    } else {
+        task_groups[yp].se_left[cpu] = y;
+    }
+    task_groups[y].se_right[cpu] = x;
+    task_groups[x].se_parent[cpu] = y;
+}
+
+static void tg_se_insert_fixup(u32 cpu, u32 z) {
+    while (z != TG_NONE && task_groups[z].se_parent[cpu] != TG_NONE
+           && task_groups[task_groups[z].se_parent[cpu]].se_color[cpu] == CFS_RB_RED) {
+        u32 p = task_groups[z].se_parent[cpu];
+        u32 g = task_groups[p].se_parent[cpu];
+        u32 y;
+        if (g == TG_NONE) {
+            break;
+        }
+        if (p == task_groups[g].se_left[cpu]) {
+            y = task_groups[g].se_right[cpu];
+            if (y != TG_NONE && task_groups[y].se_color[cpu] == CFS_RB_RED) {
+                task_groups[p].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[y].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[g].se_color[cpu] = CFS_RB_RED;
+                z = g;
+            } else {
+                if (z == task_groups[p].se_right[cpu]) {
+                    z = p;
+                    tg_se_rotate_left(cpu, z);
+                    p = task_groups[z].se_parent[cpu];
+                    g = (p == TG_NONE) ? TG_NONE : task_groups[p].se_parent[cpu];
+                }
+                if (p != TG_NONE) {
+                    task_groups[p].se_color[cpu] = CFS_RB_BLACK;
+                }
+                if (g != TG_NONE) {
+                    task_groups[g].se_color[cpu] = CFS_RB_RED;
+                    tg_se_rotate_right(cpu, g);
+                }
+            }
+        } else {
+            y = task_groups[g].se_left[cpu];
+            if (y != TG_NONE && task_groups[y].se_color[cpu] == CFS_RB_RED) {
+                task_groups[p].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[y].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[g].se_color[cpu] = CFS_RB_RED;
+                z = g;
+            } else {
+                if (z == task_groups[p].se_left[cpu]) {
+                    z = p;
+                    tg_se_rotate_right(cpu, z);
+                    p = task_groups[z].se_parent[cpu];
+                    g = (p == TG_NONE) ? TG_NONE : task_groups[p].se_parent[cpu];
+                }
+                if (p != TG_NONE) {
+                    task_groups[p].se_color[cpu] = CFS_RB_BLACK;
+                }
+                if (g != TG_NONE) {
+                    task_groups[g].se_color[cpu] = CFS_RB_RED;
+                    tg_se_rotate_left(cpu, g);
+                }
+            }
+        }
+    }
+    if (tg_se_root[cpu] != TG_NONE) {
+        task_groups[tg_se_root[cpu]].se_color[cpu] = CFS_RB_BLACK;
+    }
+}
+
+static void tg_se_insert(u32 cpu, u32 z) {
+    u32 y;
+    u32 x;
+    if (cpu >= SCHED_MAX_CPUS || z >= MAX_TASK_GROUPS) {
+        return;
+    }
+    if (task_groups[z].se_on_rq[cpu]) {
+        return;
+    }
+    task_groups[z].se_left[cpu] = TG_NONE;
+    task_groups[z].se_right[cpu] = TG_NONE;
+    task_groups[z].se_parent[cpu] = TG_NONE;
+    task_groups[z].se_color[cpu] = CFS_RB_RED;
+    y = TG_NONE;
+    x = tg_se_root[cpu];
+    while (x != TG_NONE) {
+        y = x;
+        if (tg_se_before(cpu, z, x)) {
+            x = task_groups[x].se_left[cpu];
+        } else {
+            x = task_groups[x].se_right[cpu];
+        }
+    }
+    task_groups[z].se_parent[cpu] = y;
+    if (y == TG_NONE) {
+        tg_se_root[cpu] = z;
+    } else if (tg_se_before(cpu, z, y)) {
+        task_groups[y].se_left[cpu] = z;
+    } else {
+        task_groups[y].se_right[cpu] = z;
+    }
+    task_groups[z].se_on_rq[cpu] = 1;
+    tg_se_insert_fixup(cpu, z);
+}
+
+static void tg_se_transplant(u32 cpu, u32 u, u32 v) {
+    u32 up;
+    if (cpu >= SCHED_MAX_CPUS || u >= MAX_TASK_GROUPS) {
+        return;
+    }
+    up = task_groups[u].se_parent[cpu];
+    if (up == TG_NONE) {
+        tg_se_root[cpu] = v;
+    } else if (u == task_groups[up].se_left[cpu]) {
+        task_groups[up].se_left[cpu] = v;
+    } else {
+        task_groups[up].se_right[cpu] = v;
+    }
+    if (v != TG_NONE) {
+        task_groups[v].se_parent[cpu] = up;
+    }
+}
+
+static void tg_se_erase_fixup(u32 cpu, u32 x, u32 xp) {
+    while ((x == TG_NONE || task_groups[x].se_color[cpu] == CFS_RB_BLACK)
+           && x != tg_se_root[cpu]) {
+        u32 w;
+        if (xp == TG_NONE) {
+            break;
+        }
+        if (x == task_groups[xp].se_left[cpu]) {
+            w = task_groups[xp].se_right[cpu];
+            if (w != TG_NONE && task_groups[w].se_color[cpu] == CFS_RB_RED) {
+                task_groups[w].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[xp].se_color[cpu] = CFS_RB_RED;
+                tg_se_rotate_left(cpu, xp);
+                w = task_groups[xp].se_right[cpu];
+            }
+            if (w == TG_NONE) {
+                x = xp;
+                xp = task_groups[x].se_parent[cpu];
+                continue;
+            }
+            if ((task_groups[w].se_left[cpu] == TG_NONE
+                 || task_groups[task_groups[w].se_left[cpu]].se_color[cpu] == CFS_RB_BLACK)
+                && (task_groups[w].se_right[cpu] == TG_NONE
+                    || task_groups[task_groups[w].se_right[cpu]].se_color[cpu] == CFS_RB_BLACK)) {
+                task_groups[w].se_color[cpu] = CFS_RB_RED;
+                x = xp;
+                xp = task_groups[x].se_parent[cpu];
+            } else {
+                if (task_groups[w].se_right[cpu] == TG_NONE
+                    || task_groups[task_groups[w].se_right[cpu]].se_color[cpu] == CFS_RB_BLACK) {
+                    if (task_groups[w].se_left[cpu] != TG_NONE) {
+                        task_groups[task_groups[w].se_left[cpu]].se_color[cpu] = CFS_RB_BLACK;
+                    }
+                    task_groups[w].se_color[cpu] = CFS_RB_RED;
+                    tg_se_rotate_right(cpu, w);
+                    w = task_groups[xp].se_right[cpu];
+                }
+                if (w != TG_NONE) {
+                    task_groups[w].se_color[cpu] = task_groups[xp].se_color[cpu];
+                    if (task_groups[w].se_right[cpu] != TG_NONE) {
+                        task_groups[task_groups[w].se_right[cpu]].se_color[cpu] = CFS_RB_BLACK;
+                    }
+                }
+                task_groups[xp].se_color[cpu] = CFS_RB_BLACK;
+                tg_se_rotate_left(cpu, xp);
+                x = tg_se_root[cpu];
+                xp = TG_NONE;
+            }
+        } else {
+            w = task_groups[xp].se_left[cpu];
+            if (w != TG_NONE && task_groups[w].se_color[cpu] == CFS_RB_RED) {
+                task_groups[w].se_color[cpu] = CFS_RB_BLACK;
+                task_groups[xp].se_color[cpu] = CFS_RB_RED;
+                tg_se_rotate_right(cpu, xp);
+                w = task_groups[xp].se_left[cpu];
+            }
+            if (w == TG_NONE) {
+                x = xp;
+                xp = task_groups[x].se_parent[cpu];
+                continue;
+            }
+            if ((task_groups[w].se_right[cpu] == TG_NONE
+                 || task_groups[task_groups[w].se_right[cpu]].se_color[cpu] == CFS_RB_BLACK)
+                && (task_groups[w].se_left[cpu] == TG_NONE
+                    || task_groups[task_groups[w].se_left[cpu]].se_color[cpu] == CFS_RB_BLACK)) {
+                task_groups[w].se_color[cpu] = CFS_RB_RED;
+                x = xp;
+                xp = task_groups[x].se_parent[cpu];
+            } else {
+                if (task_groups[w].se_left[cpu] == TG_NONE
+                    || task_groups[task_groups[w].se_left[cpu]].se_color[cpu] == CFS_RB_BLACK) {
+                    if (task_groups[w].se_right[cpu] != TG_NONE) {
+                        task_groups[task_groups[w].se_right[cpu]].se_color[cpu] = CFS_RB_BLACK;
+                    }
+                    task_groups[w].se_color[cpu] = CFS_RB_RED;
+                    tg_se_rotate_left(cpu, w);
+                    w = task_groups[xp].se_left[cpu];
+                }
+                if (w != TG_NONE) {
+                    task_groups[w].se_color[cpu] = task_groups[xp].se_color[cpu];
+                    if (task_groups[w].se_left[cpu] != TG_NONE) {
+                        task_groups[task_groups[w].se_left[cpu]].se_color[cpu] = CFS_RB_BLACK;
+                    }
+                }
+                task_groups[xp].se_color[cpu] = CFS_RB_BLACK;
+                tg_se_rotate_right(cpu, xp);
+                x = tg_se_root[cpu];
+                xp = TG_NONE;
+            }
+        }
+    }
+    if (x != TG_NONE) {
+        task_groups[x].se_color[cpu] = CFS_RB_BLACK;
+    }
+}
+
+static void tg_se_erase(u32 cpu, u32 z) {
+    u32 y;
+    u32 x;
+    u32 xp;
+    u32 y_orig_color;
+    if (cpu >= SCHED_MAX_CPUS || z >= MAX_TASK_GROUPS) {
+        return;
+    }
+    if (!task_groups[z].se_on_rq[cpu]) {
+        return;
+    }
+    y = z;
+    y_orig_color = task_groups[y].se_color[cpu];
+    if (task_groups[z].se_left[cpu] == TG_NONE) {
+        x = task_groups[z].se_right[cpu];
+        xp = task_groups[z].se_parent[cpu];
+        tg_se_transplant(cpu, z, task_groups[z].se_right[cpu]);
+    } else if (task_groups[z].se_right[cpu] == TG_NONE) {
+        x = task_groups[z].se_left[cpu];
+        xp = task_groups[z].se_parent[cpu];
+        tg_se_transplant(cpu, z, task_groups[z].se_left[cpu]);
+    } else {
+        y = tg_se_leftmost_from(cpu, task_groups[z].se_right[cpu]);
+        y_orig_color = task_groups[y].se_color[cpu];
+        x = task_groups[y].se_right[cpu];
+        if (task_groups[y].se_parent[cpu] == z) {
+            xp = y;
+            if (x != TG_NONE) {
+                task_groups[x].se_parent[cpu] = y;
+            }
+        } else {
+            xp = task_groups[y].se_parent[cpu];
+            tg_se_transplant(cpu, y, task_groups[y].se_right[cpu]);
+            task_groups[y].se_right[cpu] = task_groups[z].se_right[cpu];
+            if (task_groups[y].se_right[cpu] != TG_NONE) {
+                task_groups[task_groups[y].se_right[cpu]].se_parent[cpu] = y;
+            }
+        }
+        tg_se_transplant(cpu, z, y);
+        task_groups[y].se_left[cpu] = task_groups[z].se_left[cpu];
+        if (task_groups[y].se_left[cpu] != TG_NONE) {
+            task_groups[task_groups[y].se_left[cpu]].se_parent[cpu] = y;
+        }
+        task_groups[y].se_color[cpu] = task_groups[z].se_color[cpu];
+    }
+    tg_se_clear_node(z, cpu);
+    if (y_orig_color == CFS_RB_BLACK) {
+        tg_se_erase_fixup(cpu, x, xp);
+    }
+}
+
 /* Clamp a newly-runnable group's entity against peer groups on `cpu`. */
 static void tg_place_entity(u32 tg, u32 cpu) {
-    u32 g;
+    u32 left;
     u64 minv;
-    u32 found;
     if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
         return;
     }
-    minv = 0xFFFFFFFFFFFFFFFFULL;
-    found = 0;
-    for (g = 0; g < MAX_TASK_GROUPS; g++) {
-        if (!task_groups[g].used) {
-            continue;
-        }
-        if (task_groups[g].nr[cpu] == 0) {
-            continue;
-        }
-        if (!found || task_groups[g].vruntime[cpu] < minv) {
-            minv = task_groups[g].vruntime[cpu];
-            found = 1;
-        }
+    left = tg_se_rq_leftmost(cpu);
+    if (left == TG_NONE) {
+        return;
     }
-    if (found && task_groups[tg].vruntime[cpu] < minv) {
+    minv = task_groups[left].vruntime[cpu];
+    if (task_groups[tg].vruntime[cpu] < minv) {
         task_groups[tg].vruntime[cpu] = minv;
     }
 }
@@ -440,6 +831,7 @@ static void tg_account_enqueue(u32 id, u32 cpu) {
     }
     if (task_groups[tg].nr[cpu] == 0) {
         tg_place_entity(tg, cpu);
+        tg_se_insert(cpu, tg);
     }
     task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] + 1;
 }
@@ -456,10 +848,14 @@ static void tg_account_dequeue(u32 id, u32 cpu) {
     if (task_groups[tg].nr[cpu] > 0) {
         task_groups[tg].nr[cpu] = task_groups[tg].nr[cpu] - 1;
     }
+    if (task_groups[tg].nr[cpu] == 0 && task_groups[tg].se_on_rq[cpu]) {
+        tg_se_erase(cpu, tg);
+    }
 }
 
 static void tg_charge(u32 tg, u32 cpu, u64 units) {
     u64 shares;
+    u32 on;
     if (!tg_valid(tg) || cpu >= SCHED_MAX_CPUS) {
         return;
     }
@@ -467,34 +863,23 @@ static void tg_charge(u32 tg, u32 cpu, u64 units) {
     if (shares == 0) {
         shares = NICE0_WEIGHT;
     }
+    on = task_groups[tg].se_on_rq[cpu];
+    if (on) {
+        tg_se_erase(cpu, tg);
+    }
     task_groups[tg].vruntime[cpu] =
         task_groups[tg].vruntime[cpu] + (units * (u64)NICE0_WEIGHT) / shares;
+    if (on || task_groups[tg].nr[cpu] > 0) {
+        tg_se_insert(cpu, tg);
+    }
 }
 
-/* Pick the runnable group with the lowest vruntime on `cpu`. */
+/* Pick the runnable group with the lowest vruntime on `cpu` (SE tree leftmost). */
 static u32 tg_pick_min(u32 cpu) {
-    u32 g;
-    u32 best;
-    u64 best_vr;
     if (cpu >= SCHED_MAX_CPUS) {
         return TG_NONE;
     }
-    best = TG_NONE;
-    best_vr = 0;
-    for (g = 0; g < MAX_TASK_GROUPS; g++) {
-        if (!task_groups[g].used) {
-            continue;
-        }
-        if (task_groups[g].nr[cpu] == 0) {
-            continue;
-        }
-        if (best == TG_NONE || task_groups[g].vruntime[cpu] < best_vr
-            || (task_groups[g].vruntime[cpu] == best_vr && g < best)) {
-            best = g;
-            best_vr = task_groups[g].vruntime[cpu];
-        }
-    }
-    return best;
+    return tg_se_rq_leftmost(cpu);
 }
 
 static void cfs_rb_clear_node(u32 id) {
@@ -1038,9 +1423,9 @@ static void cfs_update_min(void) {
 }
 
 /* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
- * Hierarchical: choose the min-vruntime task_group with runnable members on
- * this CPU, then the min-vruntime member of that group (tree walk filtered
- * by tg). Skips threads running on a foreign CPU (on_cpu set and != cpu). */
+ * Hierarchical: leftmost group SE on this CPU's tg_se rbtree, then the
+ * min-vruntime member of that group (task tree walk filtered by tg).
+ * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
 static u32 rq_pick_best(u32 cpu, u32 want_user) {
     u32 id;
     u32 tg;
@@ -1240,6 +1625,84 @@ u32 sched_cfs_rb_check(void) {
     return ok;
 }
 
+/* Validate every per-CPU group SE tree: sorted inorder, on_rq <=> nr>0. */
+u32 sched_tg_se_rb_check(void) {
+    u32 c;
+    u32 ok = 1;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    for (c = 0; c < SCHED_MAX_CPUS; c++) {
+        u32 tg;
+        u32 prev = TG_NONE;
+        u32 seen = 0;
+        u32 g;
+        u32 expect = 0;
+        tg = tg_se_rq_leftmost(c);
+        while (tg != TG_NONE) {
+            if (!task_groups[tg].used || !task_groups[tg].se_on_rq[c]
+                || task_groups[tg].nr[c] == 0) {
+                ok = 0;
+                break;
+            }
+            if (prev != TG_NONE && !tg_se_before(c, prev, tg)) {
+                ok = 0;
+                break;
+            }
+            prev = tg;
+            seen = seen + 1;
+            tg = tg_se_successor(c, tg);
+        }
+        if (ok == 0) {
+            break;
+        }
+        for (g = 0; g < MAX_TASK_GROUPS; g++) {
+            if (!task_groups[g].used) {
+                continue;
+            }
+            if (task_groups[g].nr[c] > 0) {
+                expect = expect + 1;
+                if (!task_groups[g].se_on_rq[c]) {
+                    ok = 0;
+                    break;
+                }
+            } else if (task_groups[g].se_on_rq[c]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok == 0) {
+            break;
+        }
+        if (seen != expect) {
+            ok = 0;
+            break;
+        }
+        /* Leftmost must match linear min-vruntime among nr>0 groups. */
+        {
+            u32 best = TG_NONE;
+            u64 best_vr = 0;
+            for (g = 0; g < MAX_TASK_GROUPS; g++) {
+                if (!task_groups[g].used || task_groups[g].nr[c] == 0) {
+                    continue;
+                }
+                if (best == TG_NONE
+                    || task_groups[g].vruntime[c] < best_vr
+                    || (task_groups[g].vruntime[c] == best_vr && g < best)) {
+                    best = g;
+                    best_vr = task_groups[g].vruntime[c];
+                }
+            }
+            if (best != tg_se_rq_leftmost(c)) {
+                ok = 0;
+                break;
+            }
+        }
+    }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    return ok;
+}
+
 /* ---------------------------------------------------------------------------
  * Initialization
  * ------------------------------------------------------------------------- */
@@ -1313,6 +1776,7 @@ void sched_init(void) {
         sched_steal_count[i] = 0;
         cfs_root[i] = CFS_RB_NONE;
         cfs_nr[i] = 0;
+        tg_se_root[i] = TG_NONE;
         syscall_pcpu[i][0] = 0;
         syscall_pcpu[i][1] = 0;
     }
@@ -2169,7 +2633,7 @@ u64 sys_nice(u64 inc) {
     return (u64)(s64)threads[sched_cur()].nice;
 }
 
-/* ---- CFS task_group public API (hierarchical fair share, first bite) -- */
+/* ---- CFS task_group public API (hierarchical fair share + group SE rb) */
 
 u32 sched_tg_create(u32 shares) {
     u32 g;
@@ -2184,6 +2648,7 @@ u32 sched_tg_create(u32 shares) {
             for (c = 0; c < SCHED_MAX_CPUS; c++) {
                 task_groups[g].vruntime[c] = 0;
                 task_groups[g].nr[c] = 0;
+                tg_se_clear_node(g, c);
             }
             return g;
         }
