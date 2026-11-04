@@ -1,5 +1,6 @@
 /* fakeos userland - tr: translate or delete characters (thin POSIX subset).
- * Forms: tr SET1 SET2 | tr -d SET1
+ * Forms: tr SET1 SET2 | tr -d SET1 | tr -c SET1 SET2 | tr -cd SET1
+ * -c/-C complement SET1. Glued -cd/-dc/-c accepted.
  * Sets: literals, ranges a-z, and \\ \n \t \r \0 escapes. stdin -> stdout.
  */
 package user;
@@ -11,7 +12,7 @@ extern int strcmp(const char *a, const char *b);
 enum { SET_MAX = 512 };
 
 static void usage(void) {
-    u_write(2, "usage: tr SET1 SET2 | tr -d SET1\n", 33);
+    u_write(2, "usage: tr [-c] SET1 SET2 | tr -d[-c] SET1\n", 44);
 }
 
 /* Expand SET into out[]; return count, or -1 on error. */
@@ -66,12 +67,33 @@ static int expand_set(const char *set, unsigned char *out, int cap) {
     return n;
 }
 
+/* Build complement of set1[0..n1) into out[]; return count (always 256-unique). */
+static int complement_set(const unsigned char *set1, int n1,
+                          unsigned char *out, int cap) {
+    unsigned char in_set[256];
+    int k;
+    int n = 0;
+    for (k = 0; k < 256; k++) in_set[k] = 0;
+    for (k = 0; k < n1; k++) in_set[set1[k]] = 1;
+    for (k = 0; k < 256; k++) {
+        if (!in_set[k]) {
+            if (n >= cap) return -1;
+            out[n++] = (unsigned char)k;
+        }
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     int delete_mode = 0;
+    int complement = 0;
     int i = 1;
     unsigned char set1[SET_MAX];
+    unsigned char set1c[256];
     unsigned char set2[SET_MAX];
+    unsigned char *use1;
     int n1;
+    int n1u;
     int n2 = 0;
     unsigned char map[256];
     unsigned char del[256];
@@ -79,13 +101,22 @@ int main(int argc, char **argv) {
     long n;
     int k;
 
-    if (i < argc && strcmp(argv[i], "-d") == 0) {
-        delete_mode = 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        int j;
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        for (j = 1; argv[i][j]; j++) {
+            char o = argv[i][j];
+            if (o == 'd') delete_mode = 1;
+            else if (o == 'c' || o == 'C') complement = 1;
+            else {
+                usage();
+                return 1;
+            }
+        }
         i++;
-    } else if (i < argc && argv[i][0] == '-' && argv[i][1] != 0 &&
-               strcmp(argv[i], "--") != 0) {
-        usage();
-        return 1;
     }
     if (i < argc && strcmp(argv[i], "--") == 0) i++;
 
@@ -99,8 +130,19 @@ int main(int argc, char **argv) {
             usage();
             return 1;
         }
+        if (complement) {
+            n1u = complement_set(set1, n1, set1c, 256);
+            if (n1u < 0) {
+                usage();
+                return 1;
+            }
+            use1 = set1c;
+            n1 = n1u;
+        } else {
+            use1 = set1;
+        }
         for (k = 0; k < 256; k++) del[k] = 0;
-        for (k = 0; k < n1; k++) del[set1[k]] = 1;
+        for (k = 0; k < n1; k++) del[use1[k]] = 1;
         while ((n = u_read(0, buf, sizeof(buf))) > 0) {
             long j;
             for (j = 0; j < n; j++) {
@@ -121,13 +163,24 @@ int main(int argc, char **argv) {
         usage();
         return 1;
     }
+    if (complement) {
+        n1u = complement_set(set1, n1, set1c, 256);
+        if (n1u < 0) {
+            usage();
+            return 1;
+        }
+        use1 = set1c;
+        n1 = n1u;
+    } else {
+        use1 = set1;
+    }
     /* POSIX: if SET2 shorter, reuse its last char. */
     for (k = 0; k < 256; k++) map[k] = (unsigned char)k;
     for (k = 0; k < n1; k++) {
         unsigned char to;
         if (k < n2) to = set2[k];
         else to = set2[n2 - 1];
-        map[set1[k]] = to;
+        map[use1[k]] = to;
     }
     while ((n = u_read(0, buf, sizeof(buf))) > 0) {
         long j;

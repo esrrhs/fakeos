@@ -265,6 +265,7 @@ flowchart TD
 - [x] **/bin/env -i/-u**：`/bin/env` 增加 `-i`/`-`（清空继承环境）、`-u NAME`（删除变量）、`NAME=VALUE` 赋值，以及可选 `COMMAND`（改 envp 后 `execve`；无 `/` 时 PATH-lite `/bin/`）。无 COMMAND 时打印结果环境。空 envp 仍由内核种子 `FAKECC_PKG=/src`。无新 /bin dent（`printenv` 同二进制）。virtio login smoke（smp 1/2）。
 - [x] **cat -n/-b + tail -q/-v**：`cat` 增加 `-n`（全部行编号）/`-b`（非空行编号，覆盖 `-n`）；`tail` 增加 `-q`/`-v` 控制多文件头（与 `head` 对称；默认多文件才打印）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/readlink -n/-f + /bin/which -a**：`readlink` 增加 `-n`（无尾换行）/`-f`（物理路径，与 `/bin/realpath` 同算法；非符号链接也可）；`which -a` 打印 PATH 上全部匹配。粘连短选项；无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **grep -c + tr -c**：`grep` 增加 `-c`（匹配行计数；多文件 `name:count`；抑制行输出；可与 `-ivnF` 粘连）；`tr` 增加 `-c`/`-C`（补集）与粘连 `-cd`/`-dc`（`tr -cd SET` 仅保留 SET）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/ls -l polish**：`ls` 增加 `-a`/`-A`/`-d`、粘连短选项、多 PATH（多目录打印 `path:` 头）；默认隐藏 `.` 前缀名；`-a` 合成输出 `.`/`..`（getdents 无此项）；`-l` 增加 `nlink`（`mode nlink uid gid size mtime name`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。
