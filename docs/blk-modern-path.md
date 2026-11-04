@@ -125,9 +125,18 @@ Shell prompt prints the cwd (`fakeos:~$` / `fakeos:~/sub$` / `fakeos:/path$`).
 Builtin `realpath`; `ls -l` shows `name -> target` via readlink. Init smoke:
 `[U][PASS] getcwd physical` (Ramfs + Ext2 when mounted).
 
+## shell env / export / unset / which — landed
+
+Shell-local environment table (default `PATH=/bin:/usr/bin:.`, `HOME=/home`,
+`USER=root`). Builtins: `env`, `export NAME=val`, `unset NAME`, `which CMD`
+(PATH lookup or `shell builtin`). Whole-token `$NAME` / `$?` expansion before
+run; bare `cd` uses `$HOME`. `resolve_cmd` reads `PATH` from the table.
+execve still takes an empty envp (kernel rejects non-empty). Focused virtio
+login smoke covers env/which alongside login/`uname`/`ls -l`/`/proc/self`.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Deep jbd — avoid unless needed.
-3. Richer shell niceties if still thin (tab completion, `which`, env/`export`).
-4. Optional: timestamps / multi-column `ls` polish.
+3. Optional shell polish: tab completion, timestamps / multi-column `ls`.
+4. Real execve envp + `/proc/self/environ` live update — only if apps need it.

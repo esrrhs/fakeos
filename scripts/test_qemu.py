@@ -224,6 +224,12 @@ def main():
         "readlink /tmp/motdlink",         # readlink builtin
         "realpath /tmp/motdlink",         # physical resolve builtin
         "ls -l /tmp",                     # show l type + -> target
+        "export FOO=bar",                 # shell-local env
+        "echo $FOO",
+        "which ls",
+        "which cd",
+        "env",
+        "unset FOO",
         "mkdir /home",      # duplicate -> error, shell survives
         "nosuchcmd",        # exec failure -> 127 + not found
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
@@ -482,6 +488,10 @@ def main():
         ("realpath motdlink", "/etc/motd\n" in norm),
         ("ls -l symlink arrow", "motdlink -> /etc/motd" in norm),
         ("getcwd physical init", "[U][PASS] getcwd physical" in out),
+        ("shell echo $FOO", "\nbar\n" in norm or "echo $FOO\nbar\n" in norm),
+        ("shell which ls", "/bin/ls" in norm),
+        ("shell which cd builtin", "cd: shell builtin" in norm),
+        ("shell env PATH", "PATH=/bin:/usr/bin:." in norm),
         # ls /bin lists all five programs
         ("ls /bin lists init",     "\ninit\n" in norm),
         ("ls /bin lists sh",       "\nsh\n" in norm),
@@ -490,7 +500,7 @@ def main():
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
         ("multiple shell prompts",
-         norm.count("fakeos:~$") + norm.count("fakeos:/") >= 14),
+         norm.count("fakeos:~$") + norm.count("fakeos:/") >= 18),
         ("userland ping replied", "reply from 10.0.2.2" in norm),
         ("userland udptest loopback", "UDP loopback OK" in norm),
     ]
