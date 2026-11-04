@@ -1,11 +1,12 @@
 /* fakeos userland - grep: fixed-string line filter; thin -E ERE subset.
- * Options: -i -v -n -F -c -q -l -L -E -w -x -o. Glued short opts. -F forces fixed
+ * Options: -i -v -n -F -c -q -l -L -E -w -x -o -z. Glued short opts. -F forces fixed
  * (wins over -E). -w word-boundary match; -x whole-line match.
  * -o only matching: print each non-empty match on its own line (-c counts
  * matches; -v+-o yields no match text). -c suppresses line/match text output;
  * multi-FILE prints name:count per file.
  * -q quiet: no stdout (status only; -c count also suppressed). May stop early.
  * -l list matching file names only; -L list non-matching names (last of -l/-L wins).
+ * -z NUL-terminated records (input+match output; GNU-ish).
  * ERE subset: | . * + ? () [] ^ $ and \ escapes. No [:class:], no {} bounds.
  * []: ranges, leading ^ negate, leading ]/- literal; \ escapes next inside [].
  */
@@ -24,7 +25,9 @@ extern void printf(const char *fmt, ...);
 
 enum { LINE_MAX = 512 };
 
-static const char *USAGE = "usage: grep [-ivncqlLFEwxo] PATTERN [FILE...]\n";
+static int opt_z; /* NUL records */
+
+static const char *USAGE = "usage: grep [-ivncqlLFEwxoz] PATTERN [FILE...]\n";
 
 static char lower(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
@@ -490,7 +493,8 @@ static int emit_only(const char *line, const char *pat, int ign, int ere,
             if (show_name) printf("%s:", name);
             if (number) printf("%u:", (unsigned)lineno);
             if (me > ms) u_write(1, line + ms, (unsigned long)(me - ms));
-            u_write(1, "\n", 1);
+            if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+            else u_write(1, "\n", 1);
         }
         from = me;
         if (whole) break;
@@ -516,7 +520,7 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            if (opt_z ? (c == 0) : (c == '\n')) {
                 int hit;
                 line[li] = 0;
                 lineno++;
@@ -549,7 +553,8 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
                             if (show_name) printf("%s:", name);
                             if (number) printf("%u:", (unsigned)lineno);
                             if (li > 0) u_write(1, line, (unsigned long)li);
-                            u_write(1, "\n", 1);
+                            if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+                            else u_write(1, "\n", 1);
                         }
                     }
                 }
@@ -591,7 +596,8 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
                     if (show_name) printf("%s:", name);
                     if (number) printf("%u:", (unsigned)lineno);
                     u_write(1, line, (unsigned long)li);
-                    u_write(1, "\n", 1);
+                    if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+                    else u_write(1, "\n", 1);
                 }
             }
         }
@@ -648,8 +654,9 @@ int main(int argc, char **argv) {
             else if (o == 'w') word = 1;
             else if (o == 'x') whole = 1;
             else if (o == 'o') only_matching = 1;
+            else if (o == 'z') opt_z = 1;
             else {
-                u_write(2, USAGE, 46);
+                u_write(2, USAGE, 47);
                 return 2;
             }
         }
@@ -660,14 +667,14 @@ int main(int argc, char **argv) {
 
     if (i < argc && strcmp(argv[i], "-e") == 0) {
         if (i + 1 >= argc) {
-            u_write(2, USAGE, 46);
+            u_write(2, USAGE, 47);
             return 2;
         }
         pat = argv[i + 1];
         i += 2;
     } else {
         if (i >= argc) {
-            u_write(2, USAGE, 46);
+            u_write(2, USAGE, 47);
             return 2;
         }
         pat = argv[i];
