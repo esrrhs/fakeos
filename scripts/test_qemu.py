@@ -465,6 +465,8 @@ def main():
         "[FS] published /bin/groups (",
         "[FS] published /bin/cal (",
         "[FS] published /bin/install (",
+        "[FS] published /bin/chown (",
+        "[FS] published /bin/chgrp (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

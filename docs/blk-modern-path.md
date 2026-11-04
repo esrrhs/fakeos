@@ -544,13 +544,23 @@ then chmod; glued `-mMODE`/`-dmMODE` keep argv under `EXEC_MAX_ARGC=8`. Focused
 virtio login smoke covers `-d`/`-m`/single copy/multi-into-dir plus prior
 interactive greens (smp 1/2). Ramfs `/bin` dents 87/128.
 
+## /bin/chown + /bin/chgrp — landed
+
+External shell/POSIX mirrors. `chown UID[:GID] FILE...` (decimal; missing GID
+leaves group unchanged via `(u32)-1`); `chgrp GID FILE...` changes group only
+(`chown(2)` uid=`(u32)-1`). Compact argv for `EXEC_MAX_ARGC=8`. Focused virtio
+login smoke covers `/bin/chown` uid:gid / uid-only, `/bin/chgrp`, Ramfs+Ext2
+`ls -l` owners, plus prior interactive greens (smp 1/2). Ramfs `/bin` dents
+89/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (install + cal +
-   id/groups + factor/clear/tty/whoami + base64 + checksum trio already
-   present) — prefer small coherent chunks. Avoid deep jbd / Ext2-redirect
-   duplex races / CFS nesting unless a clear bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (chown/chgrp +
+   install + cal + id/groups + factor/clear/tty/whoami + base64 + checksum
+   trio already present) — prefer small coherent chunks such as
+   `tac`/`timeout`/`nproc`. Avoid deep jbd / Ext2-redirect duplex races / CFS
+   nesting unless a clear bite-sized fix.
