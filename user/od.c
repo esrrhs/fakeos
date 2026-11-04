@@ -1,11 +1,12 @@
 /* fakeos userland - od: thin octal/hex dump (POSIX-ish subset).
- * Forms: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1|a] [-N COUNT|-NCOUNT]
+ * Forms: od [-v] [-A n|o|x|d] [-t x1|x2|o1|c|u1|d1|a] [-N COUNT|-NCOUNT]
  *        [-j SKIP|-jSKIP] [-w BYTES|-wBYTES] [FILE...]
  * Default: -A o -t x1, 16 bytes per line. -w sets bytes per output line
  * (1..32). -t a prints named ASCII (nul/ht/sp/del/…) or the glyph, width 3.
- * stdin if no FILE. -j skips SKIP input bytes before dumping (seek when
- * possible, else read-discard). Duplicate full-width lines are collapsed to
- * a single "*" (disable with -v). Compact argv for EXEC_MAX_ARGC=8.
+ * -t x2 prints little-endian 16-bit hex words (width 4). stdin if no FILE.
+ * -j skips SKIP input bytes before dumping (seek when possible, else
+ * read-discard). Duplicate full-width lines are collapsed to a single "*"
+ * (disable with -v). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -31,7 +32,8 @@ enum {
     TYPE_C = 2,
     TYPE_U1 = 3,
     TYPE_D1 = 4,
-    TYPE_A = 5
+    TYPE_A = 5,
+    TYPE_X2 = 6
 };
 
 static int addr_mode = ADDR_OCT;
@@ -104,6 +106,22 @@ static void emit_hex2(unsigned char b) {
     tmp[0] = d[(b >> 4) & 0xF];
     tmp[1] = d[b & 0xF];
     u_write(1, tmp, 2);
+}
+
+/* Little-endian 16-bit hex word, width 4 (GNU -t x2). */
+static void emit_hex4(unsigned int v) {
+    const char *d = "0123456789abcdef";
+    char tmp[4];
+    tmp[0] = d[(v >> 12) & 0xF];
+    tmp[1] = d[(v >> 8) & 0xF];
+    tmp[2] = d[(v >> 4) & 0xF];
+    tmp[3] = d[v & 0xF];
+    u_write(1, tmp, 4);
+}
+
+static int type_unit(void) {
+    if (type_mode == TYPE_X2) return 2;
+    return 1;
 }
 
 static void emit_oct3(unsigned char b) {
@@ -285,9 +303,18 @@ static int od_fd(long fd) {
 
         suppressing = 0;
         emit_addr(off);
-        for (i = 0; i < (int)n; i++) {
-            if (i > 0) putc1(' ');
-            emit_byte(buf[i]);
+        {
+            int unit = type_unit();
+            for (i = 0; i < (int)n; i += unit) {
+                if (i > 0) putc1(' ');
+                if (unit == 2) {
+                    unsigned int v = buf[i];
+                    if (i + 1 < (int)n) v |= ((unsigned int)buf[i + 1] << 8);
+                    emit_hex4(v);
+                } else {
+                    emit_byte(buf[i]);
+                }
+            }
         }
         putc1('\n');
 
@@ -312,6 +339,7 @@ static int od_fd(long fd) {
 
 static int parse_type(const char *s) {
     if (strcmp(s, "x1") == 0) { type_mode = TYPE_X1; return 0; }
+    if (strcmp(s, "x2") == 0) { type_mode = TYPE_X2; return 0; }
     if (strcmp(s, "o1") == 0) { type_mode = TYPE_O1; return 0; }
     if (strcmp(s, "c") == 0) { type_mode = TYPE_C; return 0; }
     if (strcmp(s, "u1") == 0) { type_mode = TYPE_U1; return 0; }
@@ -375,6 +403,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-tx1") == 0) {
             type_mode = TYPE_X1;
             i++;
+        } else if (strcmp(argv[i], "-tx2") == 0) {
+            type_mode = TYPE_X2;
+            i++;
         } else if (strcmp(argv[i], "-to1") == 0) {
             type_mode = TYPE_O1;
             i++;
@@ -393,6 +424,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-vtx1") == 0) {
             show_all = 1;
             type_mode = TYPE_X1;
+            i++;
+        } else if (strcmp(argv[i], "-vtx2") == 0) {
+            show_all = 1;
+            type_mode = TYPE_X2;
             i++;
         } else if (strcmp(argv[i], "-vto1") == 0) {
             show_all = 1;

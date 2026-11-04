@@ -2016,6 +2016,13 @@ this thin bite. No new `/bin` dent. Focused virtio login smoke covers
 `grep -z` + prior greens including shuf -z (smp 1/2). Ramfs `/bin` dents
 ~114/128.
 
+## od -t x2 — landed
+
+`/bin/od -t x2` (glued `-tx2` / `-vtx2`) dumps little-endian 16-bit hex
+words (4 digits each). Keeps `-t x1|o1|c|u1|d1|a` and `-A`/`-N`/`-j`/`-w`/`-v`.
+No new `/bin` dent. Focused virtio login smoke covers `-tx2` + prior greens
+including grep -z (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2024,5 +2031,5 @@ this thin bite. No new `/bin` dent. Focused virtio login smoke covers
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `od` type polish / `timeout -k`; `cp -p` waits on utimensat; `set --`
+   `od -t o2/u2` / `timeout -k`; `cp -p` waits on utimensat; `set --`
    deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
