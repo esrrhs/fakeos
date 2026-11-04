@@ -1620,6 +1620,13 @@ Keeps generate mode; open failures name the path; `--` supported. No new
 `/bin` dent. Focused virtio login smoke covers `cksum -c` OK/FAILED + prior
 greens including uniq -f/-s (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## sort -b — landed
+
+`/bin/sort -b` ignores leading blanks on the sort key (whole-line or `-k`
+field). Glues with existing `-rnuf`/`-k`. Output still emits original lines.
+No new `/bin` dent. Focused virtio login smoke covers `sort -b` + prior
+greens including cksum -c (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1627,7 +1634,7 @@ greens including uniq -f/-s (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `sort -b` / other util flags / thin `/bin`
-   with dent room (`set --` still deferred; skip large `getopts` / here-doc /
-   trap / `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags / thin `/bin` with dent room
+   (`set --` still deferred; skip large `getopts` / here-doc / trap / `fc` /
+   `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need kernel
+   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

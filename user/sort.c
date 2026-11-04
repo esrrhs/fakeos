@@ -1,10 +1,10 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-r] [-n] [-u] [-f] [-k N|-kN] [FILE...]
+ * Forms: sort [-rnufb] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
  * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
- * string compares / tie-breaks; -k N sort by blank-separated field N
- * (1-based; missing field sorts as empty / 0).
- * Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
+ * string compares / tie-breaks; -b ignore leading blanks on the sort key;
+ * -k N sort by blank-separated field N (1-based; missing field sorts as
+ * empty / 0). Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -29,12 +29,13 @@ static int opt_r;
 static int opt_n;
 static int opt_u;
 static int opt_f;
+static int opt_b; /* ignore leading blanks on key */
 static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnuf] [-k N] [FILE...]\n", 37);
+    u_write(2, "usage: sort [-rnufb] [-k N] [FILE...]\n", 38);
 }
 
 static int is_digits(const char *s) {
@@ -103,6 +104,28 @@ static char fold_ch(char c) {
     return c;
 }
 
+static const char *skip_blanks(const char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
+/* Key start (+ optional length for -k). Applies -b blank skip. */
+static const char *sort_key(const char *line, int *len) {
+    if (opt_k > 0) {
+        const char *f = field_at(line, opt_k, len);
+        if (opt_b) {
+            while (*len > 0 && (*f == ' ' || *f == '\t')) {
+                f++;
+                (*len)--;
+            }
+        }
+        return f;
+    }
+    if (opt_b) line = skip_blanks(line);
+    if (len) *len = -1;
+    return line;
+}
+
 static int cmp_key_str(const char *a, int al, const char *b, int bl) {
     int i;
     int n = al < bl ? al : bl;
@@ -127,28 +150,40 @@ static int cmp_str(const char *a, const char *b) {
 
 static int cmp_lines(const char *a, const char *b) {
     int c;
+    int al, bl;
+    const char *ka;
+    const char *kb;
     if (opt_k > 0) {
-        int al, bl;
-        const char *fa = field_at(a, opt_k, &al);
-        const char *fb = field_at(b, opt_k, &bl);
+        ka = sort_key(a, &al);
+        kb = sort_key(b, &bl);
         if (opt_n) {
-            long na = parse_num_n(fa, al);
-            long nb = parse_num_n(fb, bl);
+            long na = parse_num_n(ka, al);
+            long nb = parse_num_n(kb, bl);
             if (na < nb) c = -1;
             else if (na > nb) c = 1;
-            else c = cmp_key_str(fa, al, fb, bl);
+            else c = cmp_key_str(ka, al, kb, bl);
         } else {
-            c = cmp_key_str(fa, al, fb, bl);
+            c = cmp_key_str(ka, al, kb, bl);
         }
-        if (c == 0) c = cmp_str(a, b);
+        if (c == 0) {
+            const char *ta = opt_b ? skip_blanks(a) : a;
+            const char *tb = opt_b ? skip_blanks(b) : b;
+            c = cmp_str(ta, tb);
+        }
     } else if (opt_n) {
-        long na = parse_num(a);
-        long nb = parse_num(b);
-        if (na < nb) c = -1;
-        else if (na > nb) c = 1;
-        else c = cmp_str(a, b);
+        ka = sort_key(a, 0);
+        kb = sort_key(b, 0);
+        {
+            long na = parse_num(ka);
+            long nb = parse_num(kb);
+            if (na < nb) c = -1;
+            else if (na > nb) c = 1;
+            else c = cmp_str(ka, kb);
+        }
     } else {
-        c = cmp_str(a, b);
+        ka = sort_key(a, 0);
+        kb = sort_key(b, 0);
+        c = cmp_str(ka, kb);
     }
     if (opt_r) return -c;
     return c;
@@ -156,27 +191,31 @@ static int cmp_lines(const char *a, const char *b) {
 
 /* Equality for -u: same key rules as cmp_lines, without -r or line tiebreak. */
 static int key_cmp(const char *a, const char *b) {
+    int al, bl;
+    const char *ka;
+    const char *kb;
     if (opt_k > 0) {
-        int al, bl;
-        const char *fa = field_at(a, opt_k, &al);
-        const char *fb = field_at(b, opt_k, &bl);
+        ka = sort_key(a, &al);
+        kb = sort_key(b, &bl);
         if (opt_n) {
-            long na = parse_num_n(fa, al);
-            long nb = parse_num_n(fb, bl);
+            long na = parse_num_n(ka, al);
+            long nb = parse_num_n(kb, bl);
             if (na < nb) return -1;
             if (na > nb) return 1;
             return 0;
         }
-        return cmp_key_str(fa, al, fb, bl);
+        return cmp_key_str(ka, al, kb, bl);
     }
+    ka = sort_key(a, 0);
+    kb = sort_key(b, 0);
     if (opt_n) {
-        long na = parse_num(a);
-        long nb = parse_num(b);
+        long na = parse_num(ka);
+        long nb = parse_num(kb);
         if (na < nb) return -1;
         if (na > nb) return 1;
         return 0;
     }
-    return cmp_str(a, b);
+    return cmp_str(ka, kb);
 }
 
 static void sort_lines(void) {
@@ -256,6 +295,13 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
 
+    opt_r = 0;
+    opt_n = 0;
+    opt_u = 0;
+    opt_f = 0;
+    opt_b = 0;
+    opt_k = 0;
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         int j;
         if (strcmp(argv[i], "--") == 0) {
@@ -284,6 +330,7 @@ int main(int argc, char **argv) {
             else if (o == 'n') opt_n = 1;
             else if (o == 'u') opt_u = 1;
             else if (o == 'f') opt_f = 1;
+            else if (o == 'b') opt_b = 1;
             else {
                 usage();
                 return 1;
