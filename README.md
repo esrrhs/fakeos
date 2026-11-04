@@ -262,6 +262,7 @@ flowchart TD
 - [x] **basename multi-arg + head -q/-v**：`basename -a PATH...` / `basename -s SUFFIX PATH...`（传统 `PATH [SUFFIX]` 不变）；`head` 增加 `-q`/`-v` 控制多文件头（默认多文件才打印）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **printf %b/\\c + pwd -L/-P**：`printf` 增加 `%b`（对 ARGUMENT 做与 FORMAT 相同的反斜杠转义）与 `\\c`（停止后续输出）；`pwd`/`sh` 接受 `-L`/`-P`（内核 cwd 已是物理路径，两者均 `getcwd`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/nice + /bin/arch + /bin/time**：`u_nice`→`sys_nice`(503)；`nice`/`nice [-n ADJ] CMD`/`nice -ADJ CMD`；`arch`=`uname` machine；`time [-p] CMD` 用 `clock_gettime(MONOTONIC)` 报 real（`-p` stub user/sys）。virtio login smoke（smp 1/2）。
+- [x] **cat -n/-b + tail -q/-v**：`cat` 增加 `-n`（全部行编号）/`-b`（非空行编号，覆盖 `-n`）；`tail` 增加 `-q`/`-v` 控制多文件头（与 `head` 对称；默认多文件才打印）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。

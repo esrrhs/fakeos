@@ -719,14 +719,27 @@ times with `clock_gettime(MONOTONIC)` around fork/wait; reports real on
 stderr (`-p` adds stub user/sys 0.00). Focused virtio login smoke covers
 nice/arch/time, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents 106/128.
 
+
+## cat -n/-b + tail -q/-v — landed
+
+Thin POSIX polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred). `cat` gains `-n` (number all lines) / `-b` (number non-blank;
+overrides `-n`); width-6 + tab like GNU. `tail` gains `-q` (never headers) /
+`-v` (always headers); default still headers when more than one FILE (mirrors
+`head`). Focused virtio login smoke covers `cat -n`/`-b`, `tail -q`/`-v`,
+Ext2, prior greens (smp 1/2). Ramfs `/bin` dents 106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`nice`/`arch`/`time` + `printf`
-   `%b`/`\c` + `pwd -L`/`-P` + `basename` multi + head `-q`/`-v` + `diff` +
-   `touch -c` + `/bin/kill` + …): prefer small coherent chunks; thin `df`
+3. More daily-driver gaps after inventory (`cat -n`/`-b` + `tail -q`/`-v` +
+   `nice`/`arch`/`time` + `printf` `%b`/`\c` + `pwd -L`/`-P` + `basename`
+   multi + head `-q`/`-v` + …): prefer small coherent chunks; thin `df`
    **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
-   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
-   bite-sized fix.
+   Candidates: `/bin/env -i/-u`, `/bin/yes --version` skip, `/bin/ls -l`
+   polish, `/bin/mkfifo` only if `mknod` exists. uniq/sort `-c/-d/-u`/`-r/-n`
+   and `ln -s` already present. Avoid deep jbd / Ext2-redirect duplex races /
+   CFS nesting unless a clear bite-sized fix.
