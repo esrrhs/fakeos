@@ -213,6 +213,7 @@ flowchart TD
 - [x] **TTY Double-Tab match listing**：歧义且无公共前缀进展时首次 Tab 响 BEL，再次 Tab 列出候选（目录名尾加 `/`）并回显当前编辑缓冲（内核不知 shell 提示符）。其它编辑清 pending。virtio login smoke（smp 1/2）。
 - [x] **/bin/head + /bin/wc**：`head [-n N]|-N` 默认 10 行；`wc [-lwc]` 计行/词/字节（多文件带 total）；stdin/`-` 可用。virtio login smoke（smp 1/2）。
 - [x] **shell history 持久化**：环形 32 条写入 `/home/.sh_history`（Ext2）；启动 `hist_load`，每条命令后 `hist_save`+`fsync`；`!!`/`history`/CSI 上下跨重启仍可用。virtio login smoke（smp 1/2）。
+- [x] **/bin/getent**：`getent passwd|group|hosts [key...]`；无 key 时 dump；passwd/group 按名或 uid/gid 过滤；hosts 先扫 `/etc/hosts`，否则 `resolve_host`（含 DNS）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。

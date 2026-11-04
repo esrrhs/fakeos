@@ -397,6 +397,7 @@ def main():
         "[FS] published /bin/login (",
         "[FS] published /bin/head (",
         "[FS] published /bin/wc (",
+        "[FS] published /bin/getent (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

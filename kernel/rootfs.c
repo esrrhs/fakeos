@@ -40,6 +40,8 @@ extern char user_head_start;
 extern char user_head_end;
 extern char user_wc_start;
 extern char user_wc_end;
+extern char user_getent_start;
+extern char user_getent_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -109,6 +111,7 @@ void rootfs_publish(void) {
     publish_one("/bin/login", (u64)(&user_login_start), (u64)(&user_login_end));
     publish_one("/bin/head", (u64)(&user_head_start), (u64)(&user_head_end));
     publish_one("/bin/wc", (u64)(&user_wc_start), (u64)(&user_wc_end));
+    publish_one("/bin/getent", (u64)(&user_getent_start), (u64)(&user_getent_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
     publish_one("/bin/dumpbin", (u64)(&user_dumpbin_start), (u64)(&user_dumpbin_end));
