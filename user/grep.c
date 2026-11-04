@@ -1,7 +1,9 @@
 /* fakeos userland - grep: fixed-string line filter; thin -E ERE subset.
- * Options: -i -v -n -F -c -q -l -L -E -w -x. Glued short opts. -F forces fixed
+ * Options: -i -v -n -F -c -q -l -L -E -w -x -o. Glued short opts. -F forces fixed
  * (wins over -E). -w word-boundary match; -x whole-line match.
- * -c suppresses line output; multi-FILE prints name:count per file.
+ * -o only matching: print each non-empty match on its own line (-c counts
+ * matches; -v+-o yields no match text). -c suppresses line/match text output;
+ * multi-FILE prints name:count per file.
  * -q quiet: no stdout (status only; -c count also suppressed). May stop early.
  * -l list matching file names only; -L list non-matching names (last of -l/-L wins).
  * ERE subset: | . * + ? () [] ^ $ and \ escapes. No [:class:], no {} bounds.
@@ -22,7 +24,7 @@ extern void printf(const char *fmt, ...);
 
 enum { LINE_MAX = 512 };
 
-static const char *USAGE = "usage: grep [-ivncqlLFEwx] PATTERN [FILE...]\n";
+static const char *USAGE = "usage: grep [-ivncqlLFEwxo] PATTERN [FILE...]\n";
 
 static char lower(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
@@ -402,10 +404,105 @@ static int line_match(const char *line, const char *pat, int ign, int ere,
     return contains(line, pat, ign);
 }
 
+/* Next non-empty match in hay at/after from. Sets *ms,*me to [start,end).
+ * Returns 1 if found, 0 if none. Empty matches skipped (no -o flood). */
+static int find_next_match(const char *hay, const char *pat, int ign, int ere,
+                           int word, int whole, int from, int *ms, int *me) {
+    int hlen = (int)strlen(hay);
+    int plen = (int)strlen(pat);
+    int i;
+
+    if (from < 0) from = 0;
+    if (from > hlen) return 0;
+
+    if (ere) {
+        if (whole) {
+            int end;
+            if (from > 0) return 0;
+            end = ere_match(pat, 0, plen, hay, 0, hlen, ign);
+            if (end != hlen) return 0;
+            if (end == 0) return 0; /* empty whole line */
+            *ms = 0;
+            *me = end;
+            return 1;
+        }
+        for (i = from; i <= hlen; i++) {
+            int end = ere_match(pat, 0, plen, hay, i, hlen, ign);
+            if (end < 0) continue;
+            if (end == i) continue; /* skip empty */
+            if (word) {
+                if (i > 0 && is_word_char(hay[i - 1])) continue;
+                if (end < hlen && is_word_char(hay[end])) continue;
+            }
+            *ms = i;
+            *me = end;
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Fixed string. */
+    if (plen == 0) return 0; /* no empty -o matches */
+    if (whole) {
+        if (from > 0) return 0;
+        if (!line_eq(hay, pat, ign)) return 0;
+        *ms = 0;
+        *me = hlen;
+        return 1;
+    }
+    for (i = from; i + plen <= hlen; i++) {
+        int j;
+        int ok = 1;
+        for (j = 0; j < plen; j++) {
+            char a = hay[i + j];
+            char b = pat[j];
+            if (ign) {
+                a = lower(a);
+                b = lower(b);
+            }
+            if (a != b) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        if (word) {
+            if (i > 0 && is_word_char(hay[i - 1])) continue;
+            if (hay[i + plen] != 0 && is_word_char(hay[i + plen])) continue;
+        }
+        *ms = i;
+        *me = i + plen;
+        return 1;
+    }
+    return 0;
+}
+
+/* Emit -o matches for one line. Returns 1 if any match printed/counted. */
+static int emit_only(const char *line, const char *pat, int ign, int ere,
+                     int word, int whole, int number, int count_mode, int quiet,
+                     int show_name, const char *name, long lineno,
+                     unsigned long *hits) {
+    int from = 0;
+    int any = 0;
+    int ms, me;
+    while (find_next_match(line, pat, ign, ere, word, whole, from, &ms, &me)) {
+        any = 1;
+        (*hits)++;
+        if (quiet) return 1;
+        if (!count_mode) {
+            if (show_name) printf("%s:", name);
+            if (number) printf("%u:", (unsigned)lineno);
+            if (me > ms) u_write(1, line + ms, (unsigned long)(me - ms));
+            u_write(1, "\n", 1);
+        }
+        from = me;
+        if (whole) break;
+        if (from <= ms) from = ms + 1; /* safety */
+    }
+    return any;
+}
+
 /* Returns 0 ok / 1 read error. *matched set if any hit. *count_out = hits. */
 static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
                    int count_mode, int quiet, int ere, int word, int whole,
-                   int show_name, const char *name,
+                   int only_matching, int show_name, const char *name,
                    int *matched, unsigned long *count_out) {
     char buf[512];
     char line[LINE_MAX];
@@ -423,21 +520,37 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
                 int hit;
                 line[li] = 0;
                 lineno++;
-                hit = line_match(line, pat, ign, ere, word, whole);
-                if (invert) hit = !hit;
-                if (hit) {
-                    any = 1;
-                    hits++;
-                    if (quiet) {
-                        *matched = 1;
-                        if (count_out) *count_out = hits;
-                        return 0; /* early exit */
+                if (only_matching) {
+                    /* -v selects non-matching lines; those have no match text. */
+                    if (!invert) {
+                        if (emit_only(line, pat, ign, ere, word, whole, number,
+                                      count_mode, quiet, show_name, name,
+                                      lineno, &hits)) {
+                            any = 1;
+                            if (quiet) {
+                                *matched = 1;
+                                if (count_out) *count_out = hits;
+                                return 0;
+                            }
+                        }
                     }
-                    if (!count_mode) {
-                        if (show_name) printf("%s:", name);
-                        if (number) printf("%u:", (unsigned)lineno);
-                        if (li > 0) u_write(1, line, (unsigned long)li);
-                        u_write(1, "\n", 1);
+                } else {
+                    hit = line_match(line, pat, ign, ere, word, whole);
+                    if (invert) hit = !hit;
+                    if (hit) {
+                        any = 1;
+                        hits++;
+                        if (quiet) {
+                            *matched = 1;
+                            if (count_out) *count_out = hits;
+                            return 0; /* early exit */
+                        }
+                        if (!count_mode) {
+                            if (show_name) printf("%s:", name);
+                            if (number) printf("%u:", (unsigned)lineno);
+                            if (li > 0) u_write(1, line, (unsigned long)li);
+                            u_write(1, "\n", 1);
+                        }
                     }
                 }
                 li = 0;
@@ -450,21 +563,36 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
         int hit;
         line[li] = 0;
         lineno++;
-        hit = line_match(line, pat, ign, ere, word, whole);
-        if (invert) hit = !hit;
-        if (hit) {
-            any = 1;
-            hits++;
-            if (quiet) {
-                *matched = 1;
-                if (count_out) *count_out = hits;
-                return 0;
+        if (only_matching) {
+            if (!invert) {
+                if (emit_only(line, pat, ign, ere, word, whole, number,
+                              count_mode, quiet, show_name, name, lineno,
+                              &hits)) {
+                    any = 1;
+                    if (quiet) {
+                        *matched = 1;
+                        if (count_out) *count_out = hits;
+                        return 0;
+                    }
+                }
             }
-            if (!count_mode) {
-                if (show_name) printf("%s:", name);
-                if (number) printf("%u:", (unsigned)lineno);
-                u_write(1, line, (unsigned long)li);
-                u_write(1, "\n", 1);
+        } else {
+            hit = line_match(line, pat, ign, ere, word, whole);
+            if (invert) hit = !hit;
+            if (hit) {
+                any = 1;
+                hits++;
+                if (quiet) {
+                    *matched = 1;
+                    if (count_out) *count_out = hits;
+                    return 0;
+                }
+                if (!count_mode) {
+                    if (show_name) printf("%s:", name);
+                    if (number) printf("%u:", (unsigned)lineno);
+                    u_write(1, line, (unsigned long)li);
+                    u_write(1, "\n", 1);
+                }
             }
         }
     }
@@ -490,6 +618,7 @@ int main(int argc, char **argv) {
     int fixed = 0;
     int word = 0;
     int whole = 0;
+    int only_matching = 0;
     int rc = 0;
     int matched = 0;
     int nfiles = 0;
@@ -518,8 +647,9 @@ int main(int argc, char **argv) {
             else if (o == 'F') { fixed = 1; ere = 0; }
             else if (o == 'w') word = 1;
             else if (o == 'x') whole = 1;
+            else if (o == 'o') only_matching = 1;
             else {
-                u_write(2, USAGE, 45);
+                u_write(2, USAGE, 46);
                 return 2;
             }
         }
@@ -530,14 +660,14 @@ int main(int argc, char **argv) {
 
     if (i < argc && strcmp(argv[i], "-e") == 0) {
         if (i + 1 >= argc) {
-            u_write(2, USAGE, 45);
+            u_write(2, USAGE, 46);
             return 2;
         }
         pat = argv[i + 1];
         i += 2;
     } else {
         if (i >= argc) {
-            u_write(2, USAGE, 45);
+            u_write(2, USAGE, 46);
             return 2;
         }
         pat = argv[i];
@@ -557,7 +687,8 @@ int main(int argc, char **argv) {
         if (nfiles <= 0) {
             unsigned long hits = 0;
             int file_matched = 0;
-            if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole, 0, 0,
+            if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole,
+                        only_matching, 0, 0,
                         &file_matched, &hits) != 0) return 2;
             if (list_yes) {
                 if (file_matched) {
@@ -583,7 +714,8 @@ int main(int argc, char **argv) {
             const char *name;
             if (strcmp(argv[i], "-") == 0) {
                 name = "(standard input)";
-                if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole, show_name,
+                if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole,
+                            only_matching, show_name,
                             name, &file_matched, &hits) != 0) {
                     rc = 2;
                     continue;
@@ -596,7 +728,8 @@ int main(int argc, char **argv) {
                     rc = 2;
                     continue;
                 }
-                if (grep_fd(fd, pat, ign, invert, number, cmode, q, ere, word, whole, show_name,
+                if (grep_fd(fd, pat, ign, invert, number, cmode, q, ere, word, whole,
+                            only_matching, show_name,
                             name, &file_matched, &hits) != 0)
                     rc = 2;
                 u_close(fd);
