@@ -109,7 +109,7 @@ flowchart TD
 - [x] **汇编级上下文切换（`switch_to`）**：纯汇编 callee-saved RSP 上下文切换原语 + 新线程跳板；实现协作式 `sched_yield` 与基于 Local APIC tick 的**CFS-lite 加权公平抢占调度（nice/vruntime）**，`kthread_create/exit` 生命周期完整（退出回收栈且不参与轮转）。
 - [x] **同步原语**：xchg 测试-设置自旋锁与中断标志 save/restore 原语，切换窗口关中断防止 tick 嵌套切换破坏栈帧；并修复 spurious vector 255 滞留 ISR 会把 APIC PPR 抬到 15 级从而饿死定时器的问题（按 ISR 位条件 EOI，未用 LVT 源全部屏蔽）。
 - [x] **调度策略演进（CFS-lite）**：min-vruntime 加权公平调度 + `nice(2)`（nr 89）；等待队列/`kmutex` 已就绪。完整 Linux CFS 红黑树/组调度仍未做。
-- [ ] **睡眠锁与原子操作**：自旋锁已就绪；后续补充互斥锁（Mutex）、信号量与睡眠/唤醒等待队列。
+- [x] **睡眠锁与原子操作**：自旋锁 + `kmutex`（owner/`trylock`、unlock 只唤醒一个）+ `ksem` 计数信号量（`down`/`up`/`trydown`）+ 类型化 `wait_queue_head`（`sleep`/`wake`/`wake_n`）；自测覆盖争用计数、waiter 进入 `TCB_SLEEPING`、信号量会合、`wake_n(1)` 再 wake-all。
 - [x] **用户进程与 PCB**：TCB 扩展 pid/地址空间句柄/用户态标志；每进程独立 PML4 低半空间 + 按需分页用户栈，经 `user_iret_trampoline`（IRETQ 帧）首次进入 Ring 3；切换时联动 CR3、TSS RSP0 与 SYSCALL 内核栈；内嵌极简 ELF64 装载器按 `PT_LOAD` 权限预置 RX/RW 段。
 - [x] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_STAR`/`MSR_LSTAR`/`MSR_SFMASK`（屏蔽 IF|DF）与 `EFER.SCE`，GDT 布局满足 SYSRET 段选择子推导；`syscall_entry` 在逐线程内核栈上构建 128 字节寄存器帧（用户 RSP 随帧传递，抢占安全），派发 `write/getpid/yield/fork/exit`；`fork` 经 COW 地址空间克隆 + 帧拷贝实现父子双返回；Ring-3 定时器抢占、Ring-3 不可恢复故障单进程猎杀均有自测覆盖。
 
@@ -213,6 +213,7 @@ flowchart TD
 - [x] **pthread_join + FS TLS**：`arch_prctl(ARCH_SET_FS/GET_FS)` + 调度切换恢复 `MSR_FS_BASE`；libc `pthread_join`（futex）/`pthread_self`；自测 `[U][PASS] pthread_join + FS TLS`。
 - [x] **pthread_exit / detach / stack reclaim**：`pthread_exit` 经 FS TLS owner 发布 retval；`pthread_detach`；join/detach 延后 `munmap` 栈，由后续 `pthread_create` 回收；自测 `[U][PASS] pthread_exit retval` / `pthread_detach + stack reclaim`。
 - [x] **CLONE_CHILD_CLEARTID-style join**：`set_tid_address(2)`（nr 218）登记 per-TCB `clear_child_tid`；线程/进程退出时内核将 `*ctid=0` 并 `futex` 唤醒；libc `pthread_join` 等待该字归零（不再依赖用户态 WAKE）；自测 `[U][PASS] pthread_join CLEARTID`（raw `exit` 路径）。
+- [x] **睡眠锁完备化（kmutex/ksem/wait_queue）**：在既有 channel sleep 上补齐 owner/`trylock`、计数信号量与类型化 waitqueue；`sched_selftest` 验证睡眠而非忙等。
 
 
 

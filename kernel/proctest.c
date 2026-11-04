@@ -29,10 +29,40 @@ extern u64 sched_steal_kernel_total(void);
 extern u64 sched_balance_remote_total(void);
 extern u64 sched_ipi_resched_total(void);
 
+/* Sleeping-lock APIs (layouts match kernel/sched.c). */
+struct kmutex {
+    u32 locked;
+    u32 owner;
+};
+
+struct ksem {
+    s32 count;
+};
+
+struct wait_queue_head {
+    u32 pad;
+};
+
+extern void kmutex_init(struct kmutex *m);
+extern void kmutex_lock(struct kmutex *m);
+extern u32 kmutex_trylock(struct kmutex *m);
+extern void kmutex_unlock(struct kmutex *m);
+extern void ksem_init(struct ksem *s, s32 count);
+extern void ksem_down(struct ksem *s);
+extern u32 ksem_trydown(struct ksem *s);
+extern void ksem_up(struct ksem *s);
+extern void wait_queue_init(struct wait_queue_head *wq);
+extern void wait_queue_sleep(struct wait_queue_head *wq);
+extern void wait_queue_wake(struct wait_queue_head *wq);
+extern u32 wait_queue_wake_n(struct wait_queue_head *wq, u32 n);
+
 enum {
     LOCK_WORKERS = 4,
     WORK_EACH    = 200,
-    SPINNERS     = 3
+    SPINNERS     = 3,
+    TCB_FREE_ST     = 0,
+    TCB_DEAD_ST     = 2,
+    TCB_SLEEPING_ST = 3
 };
 
 static volatile u32 g_lock;
@@ -104,8 +134,10 @@ static int test_lock_workers(void) {
         return 0;
     }
     for (i = 0; i < LOCK_WORKERS; i++) {
-        if (sched_thread_state(ids[i]) != 2) {
-            kprintf("      [FAIL] worker %u not marked dead\n", i);
+        u32 st = sched_thread_state(ids[i]);
+        /* Kernel workers free their TCB on exit (not wait4-able). */
+        if (st != TCB_FREE_ST && st != TCB_DEAD_ST) {
+            kprintf("      [FAIL] worker %u not exited (state=%u)\n", i, st);
             return 0;
         }
     }
@@ -215,11 +247,333 @@ static int test_weighted_fair(void) {
     return 1;
 }
 
+/* ---- Sleeping locks: kmutex / ksem / wait_queue -------------------- */
+
+enum { KM_WORKERS = 4, KM_EACH = 100, WQ_WAITERS = 3 };
+
+static struct kmutex g_kmu;
+static volatile u64 g_kmu_shared;
+static volatile u64 g_kmu_done;
+
+static void kmutex_worker(u64 id) {
+    u64 i;
+    for (i = 0; i < KM_EACH; i++) {
+        kmutex_lock(&g_kmu);
+        g_kmu_shared = g_kmu_shared + 1;
+        kmutex_unlock(&g_kmu);
+        sched_yield();
+    }
+    kmutex_lock(&g_kmu);
+    g_kmu_done = g_kmu_done + 1;
+    kmutex_unlock(&g_kmu);
+    kthread_exit();
+}
+
+static int test_kmutex_workers(void) {
+    u32 ids[KM_WORKERS];
+    u64 i;
+    kmutex_init(&g_kmu);
+    g_kmu_shared = 0;
+    g_kmu_done = 0;
+    if (!kmutex_trylock(&g_kmu)) {
+        kprintf("      [FAIL] kmutex_trylock on free mutex\n");
+        return 0;
+    }
+    if (kmutex_trylock(&g_kmu)) {
+        kprintf("      [FAIL] kmutex_trylock on held mutex\n");
+        return 0;
+    }
+    kmutex_unlock(&g_kmu);
+
+    for (i = 0; i < KM_WORKERS; i++) {
+        ids[i] = kthread_create((u64)(&kmutex_worker), i);
+        if (ids[i] == 0xFFFFFFFF) {
+            kprintf("      [FAIL] could not create kmutex worker %u\n", i);
+            return 0;
+        }
+    }
+    {
+        u64 deadline = sched_tick_count() + 800;
+        while (g_kmu_done != KM_WORKERS && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    if (g_kmu_done != KM_WORKERS) {
+        kprintf("      [FAIL] only %u of %u kmutex workers completed\n",
+                g_kmu_done, (u64)KM_WORKERS);
+        return 0;
+    }
+    if (g_kmu_shared != (u64)KM_WORKERS * KM_EACH) {
+        kprintf("      [FAIL] kmutex counter %u, expected %u\n",
+                g_kmu_shared, (u64)KM_WORKERS * KM_EACH);
+        return 0;
+    }
+    for (i = 0; i < KM_WORKERS; i++) {
+        u32 st = sched_thread_state(ids[i]);
+        if (st != TCB_FREE_ST && st != TCB_DEAD_ST) {
+            kprintf("      [FAIL] kmutex worker %u not exited (state=%u)\n", i, st);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Holder keeps the mutex then sleeps on a release sem (must not yield-spin:
+ * a fresh low-vruntime holder would starve the test thread under CFS-lite).
+ * Waiter must enter TCB_SLEEPING on the mutex; main then ups the sem. */
+static struct kmutex g_block_mu;
+static struct ksem g_block_release;
+static volatile u32 g_block_phase;
+static volatile u32 g_block_waiter_id;
+static volatile u32 g_block_saw_sleep;
+
+static void block_holder(u64 arg) {
+    kmutex_lock(&g_block_mu);
+    g_block_phase = 1;
+    ksem_down(&g_block_release); /* sleep until main observes waiter */
+    kmutex_unlock(&g_block_mu);
+    g_block_phase = 3;
+    kthread_exit();
+}
+
+static void block_waiter(u64 arg) {
+    while (g_block_phase < 1) {
+        sched_yield();
+    }
+    g_block_waiter_id = sched_current_id();
+    kmutex_lock(&g_block_mu);   /* sleeps until holder unlocks */
+    g_block_phase = 4;
+    kmutex_unlock(&g_block_mu);
+    kthread_exit();
+}
+
+static int test_kmutex_blocks(void) {
+    u32 hid;
+    u32 wid;
+    u64 deadline;
+    kmutex_init(&g_block_mu);
+    ksem_init(&g_block_release, 0);
+    g_block_phase = 0;
+    g_block_waiter_id = 0;
+    g_block_saw_sleep = 0;
+
+    hid = kthread_create((u64)(&block_holder), 0);
+    wid = kthread_create((u64)(&block_waiter), 0);
+    if (hid == 0xFFFFFFFF || wid == 0xFFFFFFFF) {
+        kprintf("      [FAIL] kmutex block threads\n");
+        return 0;
+    }
+
+    deadline = sched_tick_count() + 400;
+    while (g_block_phase < 1 && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    if (g_block_phase < 1) {
+        kprintf("      [FAIL] holder never took kmutex\n");
+        return 0;
+    }
+
+    /* Holder is sleeping on the release sem; waiter should sleep on mutex. */
+    deadline = sched_tick_count() + 400;
+    while (sched_tick_count() < deadline) {
+        if (g_block_waiter_id != 0
+            && sched_thread_state(g_block_waiter_id) == TCB_SLEEPING_ST) {
+            g_block_saw_sleep = 1;
+            break;
+        }
+        sched_yield();
+    }
+    if (!g_block_saw_sleep) {
+        kprintf("      [FAIL] kmutex waiter never slept (state check)\n");
+        return 0;
+    }
+
+    ksem_up(&g_block_release); /* holder unlocks -> wakes waiter */
+    deadline = sched_tick_count() + 400;
+    while (g_block_phase < 4 && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    if (g_block_phase != 4) {
+        kprintf("      [FAIL] kmutex waiter did not resume (phase=%u)\n",
+                g_block_phase);
+        return 0;
+    }
+    return 1;
+}
+
+static struct ksem g_sem;
+static volatile u32 g_sem_phase;
+static volatile u32 g_sem_waiter_id;
+static volatile u32 g_sem_saw_sleep;
+
+static void sem_waiter(u64 arg) {
+    g_sem_waiter_id = sched_current_id();
+    g_sem_phase = 1;
+    ksem_down(&g_sem);
+    g_sem_phase = 3;
+    kthread_exit();
+}
+
+static int test_ksem_rendezvous(void) {
+    u32 wid;
+    u64 deadline;
+    ksem_init(&g_sem, 0);
+    g_sem_phase = 0;
+    g_sem_waiter_id = 0;
+    g_sem_saw_sleep = 0;
+
+    if (ksem_trydown(&g_sem)) {
+        kprintf("      [FAIL] ksem_trydown on zero count\n");
+        return 0;
+    }
+
+    wid = kthread_create((u64)(&sem_waiter), 0);
+    if (wid == 0xFFFFFFFF) {
+        kprintf("      [FAIL] ksem waiter create\n");
+        return 0;
+    }
+
+    deadline = sched_tick_count() + 400;
+    while (sched_tick_count() < deadline) {
+        if (g_sem_waiter_id != 0
+            && sched_thread_state(g_sem_waiter_id) == TCB_SLEEPING_ST) {
+            g_sem_saw_sleep = 1;
+            break;
+        }
+        sched_yield();
+    }
+    if (!g_sem_saw_sleep) {
+        kprintf("      [FAIL] ksem waiter never slept\n");
+        return 0;
+    }
+
+    ksem_up(&g_sem);
+    deadline = sched_tick_count() + 400;
+    while (g_sem_phase < 3 && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    if (g_sem_phase != 3) {
+        kprintf("      [FAIL] ksem waiter did not wake (phase=%u)\n", g_sem_phase);
+        return 0;
+    }
+
+    /* Counting: init 2, two downs without sleep, third would block. */
+    ksem_init(&g_sem, 2);
+    if (!ksem_trydown(&g_sem) || !ksem_trydown(&g_sem)) {
+        kprintf("      [FAIL] ksem count-2 trydown\n");
+        return 0;
+    }
+    if (ksem_trydown(&g_sem)) {
+        kprintf("      [FAIL] ksem empty still trydown\n");
+        return 0;
+    }
+    return 1;
+}
+
+static struct wait_queue_head g_wq;
+static volatile u32 g_wq_ready;
+static volatile u32 g_wq_woke;
+static volatile u32 g_wq_ids[WQ_WAITERS];
+
+static void wq_waiter(u64 id) {
+    g_wq_ids[id] = sched_current_id();
+    /* Publish readiness before sleep so the BSP can observe SLEEPING. */
+    g_wq_ready = g_wq_ready + 1;
+    wait_queue_sleep(&g_wq);
+    g_wq_woke = g_wq_woke + 1;
+    kthread_exit();
+}
+
+static int test_wait_queue_wake_n(void) {
+    u64 i;
+    u64 deadline;
+    u32 sleeping;
+    wait_queue_init(&g_wq);
+    g_wq_ready = 0;
+    g_wq_woke = 0;
+    for (i = 0; i < WQ_WAITERS; i++) {
+        g_wq_ids[i] = 0;
+        if (kthread_create((u64)(&wq_waiter), i) == 0xFFFFFFFF) {
+            kprintf("      [FAIL] wq waiter create %u\n", i);
+            return 0;
+        }
+    }
+
+    deadline = sched_tick_count() + 400;
+    while (sched_tick_count() < deadline) {
+        sleeping = 0;
+        if (g_wq_ready < WQ_WAITERS) {
+            sched_yield();
+            continue;
+        }
+        for (i = 0; i < WQ_WAITERS; i++) {
+            if (g_wq_ids[i] != 0
+                && sched_thread_state(g_wq_ids[i]) == TCB_SLEEPING_ST) {
+                sleeping++;
+            }
+        }
+        if (sleeping == WQ_WAITERS) {
+            break;
+        }
+        sched_yield();
+    }
+    sleeping = 0;
+    for (i = 0; i < WQ_WAITERS; i++) {
+        if (g_wq_ids[i] != 0
+            && sched_thread_state(g_wq_ids[i]) == TCB_SLEEPING_ST) {
+            sleeping++;
+        }
+    }
+    if (sleeping != WQ_WAITERS) {
+        kprintf("      [FAIL] wq only %u/%u sleeping\n", sleeping, (u64)WQ_WAITERS);
+        return 0;
+    }
+
+    if (wait_queue_wake_n(&g_wq, 1) != 1) {
+        kprintf("      [FAIL] wait_queue_wake_n(1) != 1\n");
+        return 0;
+    }
+    deadline = sched_tick_count() + 400;
+    while (g_wq_woke < 1 && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    if (g_wq_woke != 1) {
+        kprintf("      [FAIL] after wake_n(1) woke=%u\n", g_wq_woke);
+        return 0;
+    }
+    /* Remaining two still sleeping. */
+    sleeping = 0;
+    for (i = 0; i < WQ_WAITERS; i++) {
+        if (g_wq_ids[i] != 0
+            && sched_thread_state(g_wq_ids[i]) == TCB_SLEEPING_ST) {
+            sleeping++;
+        }
+    }
+    if (sleeping != WQ_WAITERS - 1) {
+        kprintf("      [FAIL] after wake_n expected %u sleepers, got %u\n",
+                (u64)(WQ_WAITERS - 1), sleeping);
+        return 0;
+    }
+
+    wait_queue_wake(&g_wq);
+    deadline = sched_tick_count() + 400;
+    while (g_wq_woke < WQ_WAITERS && sched_tick_count() < deadline) {
+        sched_yield();
+    }
+    if (g_wq_woke != WQ_WAITERS) {
+        kprintf("      [FAIL] wake-all woke=%u expected %u\n",
+                g_wq_woke, (u64)WQ_WAITERS);
+        return 0;
+    }
+    return 1;
+}
+
 void sched_selftest(void) {
     kprintf("\n[SCHED] Kernel Threads & CFS-lite Weighted Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
     kprintf("      Switch       : callee-saved RSP context, min-vruntime + nice weights\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
+    kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head\n");
 
     sched_init();
 
@@ -237,6 +591,19 @@ void sched_selftest(void) {
     }
     if (test_weighted_fair()) {
         kprintf("      [PASS] CFS-lite: nice0 spinner got >=2x work of nice+10\n");
+    }
+    if (test_kmutex_workers()) {
+        kprintf("      [PASS] kmutex sleep-lock: %u x %u increments + trylock\n",
+                (u64)KM_WORKERS, (u64)KM_EACH);
+    }
+    if (test_kmutex_blocks()) {
+        kprintf("      [PASS] kmutex waiter enters TCB_SLEEPING\n");
+    }
+    if (test_ksem_rendezvous()) {
+        kprintf("      [PASS] ksem down/up rendezvous + count\n");
+    }
+    if (test_wait_queue_wake_n()) {
+        kprintf("      [PASS] wait_queue wake_n(1) then wake-all\n");
     }
     arch.cpu_cli();
 }

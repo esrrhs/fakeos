@@ -101,9 +101,21 @@ struct tcb {
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
 
-/* Simple sleep-mutex: wait channel is the mutex's own address. */
+/* Sleeping locks: wait channel is the object's own address.
+ * kmutex  — binary sleep-mutex (owner tracked; unlock wakes one)
+ * ksem    — counting semaphore (up wakes one)
+ * wait_queue_head — typed Mesa waitqueue over sched_sleep/wakeup */
 struct kmutex {
     u32 locked;
+    u32 owner;          /* TCB id while held; 0xFFFFFFFF if free */
+};
+
+struct ksem {
+    s32 count;
+};
+
+struct wait_queue_head {
+    u32 pad;            /* address is the channel; pad avoids empty struct */
 };
 
 static struct tcb threads[MAX_THREADS];
@@ -1133,8 +1145,48 @@ u64 sched_wait4_chan(u32 parent_pid) {
     return 0x5774000000000000ULL | (u64)parent_pid;
 }
 
+/* Wake up to `n` sleepers on `chan` while already holding sched_run_lock
+ * (IRQs off). Returns woken count; updates kick_mask for idle CPUs. */
+static u32 wake_chan_locked(u64 chan, u32 n, u32 *kick_mask) {
+    u32 i;
+    u32 woke = 0;
+    if (chan == 0 || n == 0) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS && woke < n; i++) {
+        if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
+            u32 cpu;
+            threads[i].wait_chan = 0;
+            cfs_place_entity(i);
+            threads[i].state = TCB_RUNNABLE;
+            cpu = threads[i].rq_cpu;
+            if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                *kick_mask = *kick_mask | (1u << cpu);
+            }
+            woke++;
+        }
+    }
+    if (woke != 0) {
+        cfs_update_min();
+    }
+    return woke;
+}
+
+static void kick_idle_cpus(u32 kick_mask) {
+    u32 i;
+    if (kick_mask == 0) {
+        return;
+    }
+    for (i = 0; i < SCHED_MAX_CPUS; i++) {
+        if ((kick_mask & (1u << i)) != 0) {
+            sched_kick_cpu(i);
+        }
+    }
+}
+
 void kmutex_init(struct kmutex *m) {
     m->locked = 0;
+    m->owner = 0xFFFFFFFFu;
 }
 
 void kmutex_lock(struct kmutex *m) {
@@ -1147,41 +1199,96 @@ void kmutex_lock(struct kmutex *m) {
         spin_lock(&sched_run_lock);
     }
     m->locked = 1;
+    m->owner = threads[sched_cur()].id;
     spin_unlock(&sched_run_lock);
     arch.cpu_sti();
 }
 
+/* Non-blocking: 1 if acquired, 0 if contended. */
+u32 kmutex_trylock(struct kmutex *m) {
+    u32 got = 0;
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    if (!m->locked) {
+        m->locked = 1;
+        m->owner = threads[sched_cur()].id;
+        got = 1;
+    }
+    spin_unlock(&sched_run_lock);
+    arch.cpu_sti();
+    return got;
+}
+
 void kmutex_unlock(struct kmutex *m) {
+    u32 kick_mask = 0;
     arch.cpu_cli();
     spin_lock(&sched_run_lock);
     m->locked = 0;
-    {
-        u32 i;
-        u32 kick_mask = 0;
-        u64 chan = (u64)m;
-        for (i = 0; i < MAX_THREADS; i++) {
-            if (threads[i].state == TCB_SLEEPING && threads[i].wait_chan == chan) {
-                u32 cpu;
-                threads[i].wait_chan = 0;
-                cfs_place_entity(i);
-                threads[i].state = TCB_RUNNABLE;
-                cpu = threads[i].rq_cpu;
-                if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
-                    kick_mask = kick_mask | (1u << cpu);
-                }
-            }
-        }
-        cfs_update_min();
-        spin_unlock(&sched_run_lock);
-        if (kick_mask != 0) {
-            for (i = 0; i < SCHED_MAX_CPUS; i++) {
-                if ((kick_mask & (1u << i)) != 0) {
-                    sched_kick_cpu(i);
-                }
-            }
-        }
-    }
+    m->owner = 0xFFFFFFFFu;
+    /* Wake one waiter (Mesa: remaining contenders re-sleep). */
+    wake_chan_locked((u64)m, 1, &kick_mask);
+    spin_unlock(&sched_run_lock);
+    kick_idle_cpus(kick_mask);
     arch.cpu_sti();
+}
+
+void ksem_init(struct ksem *s, s32 count) {
+    s->count = count;
+}
+
+void ksem_down(struct ksem *s) {
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    while (s->count <= 0) {
+        threads[sched_cur()].wait_chan = (u64)s;
+        threads[sched_cur()].state = TCB_SLEEPING;
+        sched_switch_to(pick_next(sched_cur()));
+        spin_lock(&sched_run_lock);
+    }
+    s->count = s->count - 1;
+    spin_unlock(&sched_run_lock);
+    arch.cpu_sti();
+}
+
+/* Non-blocking: 1 if decremented, 0 if would block. */
+u32 ksem_trydown(struct ksem *s) {
+    u32 got = 0;
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    if (s->count > 0) {
+        s->count = s->count - 1;
+        got = 1;
+    }
+    spin_unlock(&sched_run_lock);
+    arch.cpu_sti();
+    return got;
+}
+
+void ksem_up(struct ksem *s) {
+    u32 kick_mask = 0;
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    s->count = s->count + 1;
+    wake_chan_locked((u64)s, 1, &kick_mask);
+    spin_unlock(&sched_run_lock);
+    kick_idle_cpus(kick_mask);
+    arch.cpu_sti();
+}
+
+void wait_queue_init(struct wait_queue_head *wq) {
+    wq->pad = 0;
+}
+
+void wait_queue_sleep(struct wait_queue_head *wq) {
+    sched_sleep((u64)wq);
+}
+
+void wait_queue_wake(struct wait_queue_head *wq) {
+    sched_wakeup((u64)wq);
+}
+
+u32 wait_queue_wake_n(struct wait_queue_head *wq, u32 n) {
+    return sched_wakeup_n((u64)wq, n);
 }
 
 /* Called from the Local APIC timer ISR (vector 32) with interrupts off in the
@@ -1207,9 +1314,13 @@ void kthread_exit(void) {
 
     u32 self = sched_cur();
     u32 free_slot = 0;
-    /* Secondary CLONE_THREAD exits are not wait4-able: free the TCB now so
-     * the shared pid stays owned by the still-live group leader. */
-    if (threads[self].is_user != 0 && threads[self].pid != 0
+    /* Kernel threads are never wait4-able — free the TCB immediately so
+     * self-tests / short-lived workers do not exhaust MAX_THREADS.
+     * Secondary CLONE_THREAD user exits are also not wait4-able: free now
+     * so the shared pid stays owned by the still-live group leader. */
+    if (threads[self].is_user == 0) {
+        free_slot = 1;
+    } else if (threads[self].pid != 0
         && threads[self].tid != threads[self].pid) {
         free_slot = 1;
     }
