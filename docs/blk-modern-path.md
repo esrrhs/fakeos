@@ -609,16 +609,27 @@ inside new dirs failed under modest smoke load. Focused virtio login smoke
 covers cp/mv into dir + multi, rmdir -p nested, plus prior interactive greens
 (smp 1/2). Ramfs `/bin` dents unchanged (98/128; no new publishes).
 
+## /bin/cp -r recursive directory copy — landed
+
+`/bin/cp` gains `-r`/`-R` recursive directory trees (getdents collect then
+copy children; mkdir leaf dest; merge into existing dest dir). Still supports
+`SRC DST` and `SRC... DIRECTORY` (`DIR/basename`). Without `-r`, directory
+sources are refused. Cycle guard rejects DST under/equal to SRC. No new
+`/bin` publish (dent count unchanged). Shell has no builtin `cp` — external
+only. Focused virtio login smoke covers recursive tree copy (Ramfs + Ext2),
+refuse-without-`-r`, self-copy refuse, prior interactive greens (smp 1/2).
+Ramfs `/bin` dents 98/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (cp/mv dir
-   targets + rmdir -p + logname/nohup + tsort/pathchk + rmdir/unlink +
+4. More daily-driver gaps: remaining thin POSIX after inventory (`cp -r` +
+   cp/mv dir targets + rmdir -p + logname/nohup + tsort/pathchk + rmdir/unlink +
    tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
    factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
-   small coherent chunks such as `cp -r` / `mv` dir trees, `head`/`tail` polish,
-   or other thin POSIX still missing. Avoid deep jbd / Ext2-redirect duplex
-   races / CFS nesting unless a clear bite-sized fix.
+   small coherent chunks such as recursive `mv` dir trees, `head`/`tail`
+   polish, or other thin POSIX still missing. Avoid deep jbd / Ext2-redirect
+   duplex races / CFS nesting unless a clear bite-sized fix.

@@ -1,10 +1,10 @@
-/* fakeos userland - cp: copy SRC to DST (regular files).
+/* fakeos userland - cp: copy files; -r/-R copies directory trees.
  * Forms:
- *   cp SRC DST
- *   cp SRC... DIRECTORY
+ *   cp [-r|-R] SRC DST
+ *   cp [-r|-R] SRC... DIRECTORY
  * If DST/DIRECTORY exists as a directory, place each SRC under it as
- * DIRECTORY/basename(SRC). No -r / recursive dirs yet — keep thin.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * DIRECTORY/basename(SRC). Refuse directory SRC without -r. Refuse cycles
+ * (DST under SRC). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -15,7 +15,11 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_stat(const char *path, void *statbuf);
+extern long u_mkdir(const char *path);
+extern long u_getdents(long fd, void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
+extern int strcmp(const char *a, const char *b);
+extern char *strcpy(char *dst, const char *src);
 extern void printf(const char *fmt, ...);
 
 enum {
@@ -27,7 +31,12 @@ enum {
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
-    PATH_CAP = 128
+    PATH_CAP = 128,
+    DENT_BUF = 1920,
+    DENT_REC = 48,
+    NAME_OFF = 19,
+    NAME_LEN = 30,
+    MAX_NAMES = 64
 };
 
 static unsigned int load_u32(const char *p) {
@@ -43,6 +52,11 @@ static int is_dir(const char *path) {
     if (u_stat(path, st) != 0) return 0;
     mode = load_u32(st + ST_MODE);
     return (mode & S_IFMT) == S_IFDIR;
+}
+
+static int path_exists(const char *path) {
+    char st[ST_SIZE_BYTES];
+    return u_stat(path, st) == 0;
 }
 
 static const char *basename_of(const char *path) {
@@ -71,6 +85,20 @@ static int join_dir_base(char *out, unsigned long cap,
     for (i = 0; i < bl; i++) out[o++] = base[i];
     out[o] = 0;
     return 0;
+}
+
+/* True if path is ancestor or equal to child (plain string prefix + '/'). */
+static int is_under(const char *ancestor, const char *child) {
+    unsigned long al = strlen(ancestor);
+    unsigned long i;
+    if (al == 0) return 0;
+    if (strcmp(ancestor, child) == 0) return 1;
+    for (i = 0; i < al; i++) {
+        if (child[i] != ancestor[i]) return 0;
+    }
+    /* ancestor without trailing slash: child must continue with '/' */
+    if (ancestor[al - 1] == '/') return 1;
+    return child[al] == '/';
 }
 
 static int copy_file(const char *src, const char *dst) {
@@ -103,24 +131,126 @@ static int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
-static void usage(void) {
-    u_write(2, "usage: cp SRC DST|DIR...\n", 24);
-}
+static int copy_path(const char *src, const char *dst, int recursive);
 
-int main(int argc, char **argv) {
-    int nops;
+static int copy_dir_rec(const char *src, const char *dst) {
+    char dent[DENT_BUF];
+    char child_src[PATH_CAP];
+    char child_dst[PATH_CAP];
+    char names[MAX_NAMES][NAME_LEN];
+    int nnames;
+    long fd;
+    long n;
     int i;
     int rc = 0;
 
-    if (argc < 3) {
+    if (is_under(src, dst)) {
+        printf("cp: %s: cannot copy a directory into itself\n", src);
+        return 1;
+    }
+
+    if (!path_exists(dst)) {
+        if (u_mkdir(dst) < 0) {
+            printf("cp: %s: cannot create directory\n", dst);
+            return 1;
+        }
+    } else if (!is_dir(dst)) {
+        printf("cp: %s: not a directory\n", dst);
+        return 1;
+    }
+
+    fd = u_open(src, O_RDONLY, 0);
+    if (fd < 0) {
+        printf("cp: %s: cannot open directory\n", src);
+        return 1;
+    }
+    nnames = 0;
+    for (;;) {
+        long off;
+        n = u_getdents(fd, dent, sizeof(dent));
+        if (n <= 0) break;
+        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+            char name[NAME_LEN];
+            unsigned long k = 0;
+            while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
+                name[k] = dent[off + NAME_OFF + k];
+                k++;
+            }
+            name[k] = 0;
+            if (name[0] == 0) continue;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+            if (nnames >= MAX_NAMES) {
+                printf("cp: %s: too many entries\n", src);
+                u_close(fd);
+                return 1;
+            }
+            strcpy(names[nnames], name);
+            nnames++;
+        }
+    }
+    u_close(fd);
+
+    for (i = 0; i < nnames; i++) {
+        if (join_dir_base(child_src, PATH_CAP, src, names[i]) < 0
+            || join_dir_base(child_dst, PATH_CAP, dst, names[i]) < 0) {
+            u_write(2, "cp: path too long\n", 18);
+            rc = 1;
+            continue;
+        }
+        if (copy_path(child_src, child_dst, 1) != 0) rc = 1;
+    }
+    return rc;
+}
+
+static int copy_path(const char *src, const char *dst, int recursive) {
+    if (is_dir(src)) {
+        if (!recursive) {
+            printf("cp: %s: is a directory (not copied)\n", src);
+            return 1;
+        }
+        return copy_dir_rec(src, dst);
+    }
+    return copy_file(src, dst);
+}
+
+static void usage(void) {
+    u_write(2, "usage: cp [-r|-R] SRC DST|DIR...\n", 33);
+}
+
+int main(int argc, char **argv) {
+    int i;
+    int ai = 1;
+    int recursive = 0;
+    int rc = 0;
+    int nops;
+
+    while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
+        const char *o = argv[ai] + 1;
+        int j;
+        if (o[0] == '-' && o[1] == 0) {
+            /* lone "-" treat as operand */
+            break;
+        }
+        for (j = 0; o[j] != 0; j++) {
+            if (o[j] == 'r' || o[j] == 'R') {
+                recursive = 1;
+            } else {
+                usage();
+                return 1;
+            }
+        }
+        ai++;
+    }
+
+    nops = argc - ai;
+    if (nops < 2) {
         usage();
         return 1;
     }
-    nops = argc - 1;
 
     if (nops == 2) {
-        const char *src = argv[1];
-        const char *dst = argv[2];
+        const char *src = argv[ai];
+        const char *dst = argv[ai + 1];
         char joined[PATH_CAP];
         if (is_dir(dst)) {
             if (join_dir_base(joined, PATH_CAP, dst, basename_of(src)) < 0) {
@@ -129,7 +259,7 @@ int main(int argc, char **argv) {
             }
             dst = joined;
         }
-        return copy_file(src, dst);
+        return copy_path(src, dst, recursive);
     }
 
     /* Multiple sources into directory. */
@@ -139,14 +269,14 @@ int main(int argc, char **argv) {
             printf("cp: %s: not a directory\n", dir);
             return 1;
         }
-        for (i = 1; i < argc - 1; i++) {
+        for (i = ai; i < argc - 1; i++) {
             char joined[PATH_CAP];
             if (join_dir_base(joined, PATH_CAP, dir, basename_of(argv[i])) < 0) {
                 u_write(2, "cp: path too long\n", 18);
                 rc = 1;
                 continue;
             }
-            if (copy_file(argv[i], joined) != 0) rc = 1;
+            if (copy_path(argv[i], joined, recursive) != 0) rc = 1;
         }
     }
     return rc;
