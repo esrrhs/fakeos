@@ -2064,6 +2064,13 @@ possible, else read-discard. Byte/line numbers restart after the skip (GNU).
 Combines with `-n`/`-l`/`-s`. No new `/bin` dent. Focused virtio login smoke
 covers `cmp -i` equal/differ + prior greens (smp 1/2).
 
+## find -ipath — landed
+
+`/bin/find -ipath GLOB` case-folds A-Z when matching the full path (GNU-ish;
+pairs with existing `-path` / `-iname`). Same thin `*`/`?` glob. No new
+`/bin` dent. Focused virtio login smoke covers `-ipath` + prior greens
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2072,5 +2079,5 @@ covers `cmp -i` equal/differ + prior greens (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   sed/find leftover; `cp -p` waits on utimensat; `set --` deferred; skip
+   sed `s///i` / `-e`; `cp -p` waits on utimensat; `set --` deferred; skip
    large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

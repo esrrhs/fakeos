@@ -2,12 +2,12 @@
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
- * folds A-Z), -path GLOB (full path *,? only), -type f|d, -empty (empty
- * regular file or empty directory), -prune (do not descend into a matched
- * directory), -print / -print0 (NUL-terminated paths; pairs with xargs -0),
- * -maxdepth N, -mindepth N (start points are depth 0; GNU-ish). Uses
- * lstat(2). No -o/parens. Thin -prune: when predicates match a directory,
- * skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
+ * folds A-Z), -path GLOB / -ipath GLOB (full path *,?; -ipath folds A-Z),
+ * -type f|d, -empty (empty regular file or empty directory), -prune (do not
+ * descend into a matched directory), -print / -print0 (NUL-terminated paths;
+ * pairs with xargs -0), -maxdepth N, -mindepth N (start points are depth 0;
+ * GNU-ish). Uses lstat(2). No -o/parens. Thin -prune: when predicates match
+ * a directory, skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -44,6 +44,7 @@ static int want_name;
 static int name_fold; /* 1 = -iname */
 static char name_pat[GLOB_CAP];
 static int want_path;
+static int path_fold; /* 1 = -ipath */
 static char path_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int want_empty;
@@ -165,7 +166,7 @@ static int match_preds(const char *path, unsigned int mode, const char *st) {
     if (want_type == 1 && !is_reg_mode(mode)) return 0;
     if (want_type == 2 && !is_dir_mode(mode)) return 0;
     if (want_name && !glob_match(name_pat, base_of(path), name_fold)) return 0;
-    if (want_path && !glob_match(path_pat, path, 0)) return 0;
+    if (want_path && !glob_match(path_pat, path, path_fold)) return 0;
     if (want_empty && !is_empty_path(path, mode, st)) return 0;
     return 1;
 }
@@ -210,6 +211,7 @@ static int is_primary(const char *a) {
     if (strcmp(a, "-name") == 0) return 1;
     if (strcmp(a, "-iname") == 0) return 1;
     if (strcmp(a, "-path") == 0) return 1;
+    if (strcmp(a, "-ipath") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-empty") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
@@ -342,12 +344,14 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        if (strcmp(argv[ai], "-path") == 0) {
+        if (strcmp(argv[ai], "-path") == 0 || strcmp(argv[ai], "-ipath") == 0) {
+            int ipath = (argv[ai][1] == 'i');
             if (ai + 1 >= argc) {
                 u_write(2, "find: -path needs GLOB\n", 23);
                 return 1;
             }
             want_path = 1;
+            path_fold = ipath;
             if (strlen(argv[ai + 1]) >= GLOB_CAP) {
                 u_write(2, "find: -path GLOB too long\n", 26);
                 return 1;
@@ -404,7 +408,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print|-print0]\n", 123);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path|-ipath GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print|-print0]\n", 130);
         return 1;
     }
 
