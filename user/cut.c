@@ -1,5 +1,6 @@
 /* fakeos userland - cut: select bytes/fields from lines (thin POSIX subset).
- * Forms: cut -c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]
+ * Forms: cut -b|-c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]
+ * -b byte ranges (alias of -c here; no multibyte). -c character ranges.
  * LIST: N | N- | -M | N-M | comma-separated (1-based, inclusive).
  */
 package user;
@@ -24,12 +25,12 @@ struct sel {
 
 static struct sel sels[MAX_SEL];
 static int nsels;
-static int mode_c;      /* 1 = -c, 0 = -f */
+static int mode_c;      /* 1 = -b/-c, 0 = -f */
 static char delim = '\t';
 static int suppress;    /* -s: skip lines without delim when -f */
 
 static void usage(void) {
-    u_write(2, "usage: cut -c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]\n", 69);
+    u_write(2, "usage: cut -b|-c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]\n", 72);
 }
 
 static int parse_uint(const char *s, int *endp, int *out) {
@@ -197,7 +198,7 @@ int main(int argc, char **argv) {
             i++;
             break;
         }
-        if (strcmp(argv[i], "-c") == 0) {
+        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "-c") == 0) {
             if (i + 1 >= argc || have_mode) {
                 usage();
                 return 1;
@@ -225,8 +226,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-s") == 0) {
             suppress = 1;
             i++;
-        } else if (argv[i][1] == 'c' && argv[i][2] != 0) {
-            /* -cLIST */
+        } else if ((argv[i][1] == 'b' || argv[i][1] == 'c') && argv[i][2] != 0) {
+            /* -bLIST / -cLIST */
             if (have_mode) { usage(); return 1; }
             mode_c = 1;
             have_mode = 1;
