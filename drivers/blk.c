@@ -6,6 +6,9 @@ typedef types.uint16_t u16;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
+/* end_io(private, ok): ok=1 success, 0 failure. */
+typedef void (*blk_end_io_t)(void *private, u32 ok);
+
 extern void kprintf(const char *fmt, ...);
 extern void virtio_blk_init(void);
 extern u32 virtio_blk_present(void);
@@ -19,6 +22,9 @@ extern u64 ahci_capacity(void);
 extern u32 ahci_read(u64 sector, void *kbuf, u32 count);
 extern u32 ahci_write(u64 sector, const void *kbuf, u32 count);
 extern u32 ahci_flush(void);
+extern u32 ahci_async_rw(u64 sector, void *kbuf, u32 count, u32 write,
+                         blk_end_io_t end_io, void *private);
+extern void ahci_async_poll(void);
 extern void ata_init(void);
 extern u32 ata_present_p(void);
 extern u64 ata_capacity(void);
@@ -124,4 +130,31 @@ u32 blk_flush(void) {
     if (blk_kind == BLK_AHCI) return ahci_flush();
     if (blk_kind == BLK_ATA) return ata_flush();
     return 0;
+}
+
+/* Non-blocking R/W. AHCI queues + end_io; virtio/ATA complete inline then cb.
+ * Buffer must remain valid until end_io(private, ok) runs. Returns 1 if
+ * accepted (queued or sync-completed). */
+u32 blk_async_rw(u64 sector, void *kbuf, u32 count, u32 write,
+                 blk_end_io_t end_io, void *private) {
+    u32 ok;
+    if (end_io == 0 || count == 0 || kbuf == 0) {
+        return 0;
+    }
+    if (blk_kind == BLK_AHCI) {
+        return ahci_async_rw(sector, kbuf, count, write, end_io, private);
+    }
+    if (write) {
+        ok = blk_write(sector, kbuf, count);
+    } else {
+        ok = blk_read(sector, kbuf, count);
+    }
+    end_io(private, ok);
+    return ok ? 1 : 0;
+}
+
+void blk_async_poll(void) {
+    if (blk_kind == BLK_AHCI) {
+        ahci_async_poll();
+    }
 }
