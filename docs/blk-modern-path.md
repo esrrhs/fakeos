@@ -200,7 +200,7 @@ and login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 ## /bin/tail + /bin/grep + /bin/printf — landed
 
 Thin coreutils: `tail [-n N]|-N` (ring of last N lines, stdin OK), fixed-string
-`grep [-ivnF]` (no BRE), and `printf` with `\n/\t/\r/...` escapes plus
+`grep [-ivnFE]` (thin `-E` ERE subset; default fixed), and `printf` with `\n/\t/\r/...` escapes plus
 `%s/%d/%u/%x/%c/%%`. Focused virtio login smoke covers the three plus
 login/`uname`/`ls -l`/`udptest`/`id`/`head`/`wc` (smp 1/2).
 
@@ -920,16 +920,29 @@ start at skip). Focused virtio login smoke covers sync pad / notrunc vs trunc /
 fsync / `-N4` / `-j2` plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
 Jobs/`fg`/`bg` already present — left alone.
 
+## grep -E thin ERE — landed
+
+Thin userland polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+`grep` gains `-E` (glued with `-ivncF`): thin ERE subset `|` `.` `*` `+` `?`
+`()` `^` `$` and `\` escapes; no `[]` classes, no `{}` bounds. Default remains
+fixed-string; `-F` forces fixed and wins over `-E`. Focused virtio login smoke
+covers `.`/`*`/`+`/`|`/`^`/`$`/`()`/`?`/escapes/`-Ei`/`-EF`, Ext2, prior greens
+(smp 1/2). Ramfs `/bin` dents ~106/128. Jobs/`fg`/`bg` already present — left
+alone.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`dd conv=` + `od -N/-j` +
-   `test -ot/-nt` + …): prefer small coherent chunks; thin `df` **only if**
-   `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive. Candidates:
-   `ps`/`uptime`/`free` only if `/proc` grows; skip `mkfifo` until `mknod`;
-   leave Ext2-redirect duplex / multi-nc SMP races and CFS/jbd alone. Other
-   thin polish: job/fg/bg polish if gaps remain, thin `grep -E`, further `od`
-   gaps (`-t u1`/`d1`, duplicate-line suppress) — dig carefully; many listed
-   utils already covered.
+3. More daily-driver gaps after inventory (`grep -E` + `dd conv=` + `od -N/-j`
+   + …): prefer small coherent chunks; thin `df` **only if** `statfs(2)` is
+   added, or `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free`
+   only if `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect
+   duplex / multi-nc SMP races and CFS/jbd alone. Other thin polish: job/fg/bg
+   polish if gaps remain, further `od` gaps (`-t u1`/`d1`, duplicate-line
+   suppress), optional ERE `[]` if still bite-sized — dig carefully; many
+   listed utils already covered.
