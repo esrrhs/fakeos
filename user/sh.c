@@ -2600,6 +2600,67 @@ static const char *resolve_cmd(char **argv, char *buf) {
 }
 
 /* Run a builtin in the current process. Returns exit status. */
+/* Thin help NAME synopses (keep small; bare help still prints the banner). */
+struct sh_help_ent {
+    const char *name;
+    const char *syn;
+};
+
+static const struct sh_help_ent sh_help_tab[] = {
+    { "echo", "echo [-neE] [ARGS...]" },
+    { "printf", "printf FORMAT [ARGUMENT...]" },
+    { ":", ": [ARGS...]  (true; ignore args)" },
+    { "true", "true  (exit 0)" },
+    { "false", "false  (exit 1)" },
+    { "cd", "cd [-L|-P] [DIR|-]" },
+    { "pwd", "pwd [-L|-P]" },
+    { "pushd", "pushd [DIR]" },
+    { "popd", "popd" },
+    { "dirs", "dirs [-vp]" },
+    { "alias", "alias [-p] [NAME[=VALUE]...]" },
+    { "unalias", "unalias [-a] [NAME...]" },
+    { "export", "export [-np] [NAME[=VALUE]...]" },
+    { "readonly", "readonly [-p] [NAME[=VALUE]...]" },
+    { "unset", "unset NAME..." },
+    { "set", "set [-eu] [+eu] [-o|+o [errexit|nounset]]" },
+    { "type", "type [-t] NAME..." },
+    { "command", "command [-vV] NAME [ARGS...]" },
+    { "builtin", "builtin NAME [ARGS...]" },
+    { "hash", "hash [-r] [NAME...]" },
+    { "read", "read [-r] [NAME...]" },
+    { "eval", "eval [ARGS...]" },
+    { "source", "source FILE  (also . FILE)" },
+    { ".", ". FILE" },
+    { "jobs", "jobs [-l]" },
+    { "fg", "fg [%N]" },
+    { "bg", "bg [%N]" },
+    { "wait", "wait [PID|%N]" },
+    { "kill", "kill [-SIG] PID..." },
+    { "shift", "shift [N]" },
+    { "local", "local [NAME[=VALUE]...]" },
+    { "return", "return [N]" },
+    { "break", "break" },
+    { "continue", "continue" },
+    { "[[", "[[ EXPR ]]" },
+    { "help", "help [NAME]" },
+    { "exit", "exit [N]" },
+    { "history", "history" },
+    { "which", "which NAME..." },
+    { "umask", "umask [MODE]" },
+    { "chmod", "chmod [-R] MODE FILE..." },
+    { "env", "env" },
+    { 0, 0 }
+};
+
+static const char *sh_help_lookup(const char *name) {
+    int i;
+    if (name == 0) return 0;
+    for (i = 0; sh_help_tab[i].name != 0; i++) {
+        if (eq(sh_help_tab[i].name, name)) return sh_help_tab[i].syn;
+    }
+    return 0;
+}
+
 static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path,
                         int append) {
     int saved_in;
@@ -3162,12 +3223,31 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help");
-        puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
-        puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
-        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
-        return 0;
+        /* help       -> banner (builtins/redirects/env/programs/signals)
+         * help NAME  -> one-line synopsis if known, else "shell builtin" */
+        int ai;
+        int bad = 0;
+        if (tokens[1] == 0) {
+            puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
+            puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
+            puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
+            puts("help NAME  — one-line synopsis for a builtin");
+            return 0;
+        }
+        for (ai = 1; tokens[ai] != 0; ai++) {
+            const char *syn = sh_help_lookup(tokens[ai]);
+            if (syn != 0) {
+                puts(syn);
+            } else if (is_builtin(tokens[ai])) {
+                printf("%s: shell builtin\n", tokens[ai]);
+            } else {
+                printf("sh: help: no help for %s\n", tokens[ai]);
+                bad = 1;
+            }
+        }
+        return bad ? 1 : 0;
     }
     if (eq(tokens[0], "history")) {
         hist_print();

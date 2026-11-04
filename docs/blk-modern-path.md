@@ -1362,6 +1362,14 @@ are function-scoped; no top-level argv frame yet). `-p` lists/prints
 smoke covers `-p` list + `unalias -a` + prior greens (smp 1/2). Ramfs
 `/bin` dents ~114/128.
 
+## shell help NAME — landed
+
+Thin `help` / `help NAME` (no new `/bin` dent). Bare `help` keeps the
+existing banner and adds a pointer to `help NAME`. Named form uses a small
+synopsis table; unknown-but-builtin falls back to `NAME: shell builtin`;
+non-builtins error. Focused virtio login smoke covers bare/`help printf`/
+`help nosuch` + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1369,7 +1377,7 @@ smoke covers `-p` list + `unalias -a` + prior greens (smp 1/2). Ramfs
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `set --` if positional frames grow, help for
-   one builtin, or other small `/bin`/shell bites (skip large `getopts` /
-   here-doc / trap unless bite-sized; `ulimit` still needs kernel rlimit).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `set --` if positional frames grow, or other
+   small `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
+   bite-sized; `ulimit` still needs kernel rlimit). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.
