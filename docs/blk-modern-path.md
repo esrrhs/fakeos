@@ -413,6 +413,17 @@ Focused virtio login smoke covers `printf|expand`, `expand -t4`,
 `printf|unexpand`/`-a`/`-t4`, round-trip `expand|unexpand`, plus prior
 interactive greens (smp 1/2).
 
+## /bin/comm + /bin/join — landed
+
+Sorted-file pair. `comm [-123] FILE1 FILE2` prints three columns (unique to
+FILE1 / unique to FILE2 / common); suppress with `-1`/`-2`/`-3` (combinable);
+leading tabs only between columns that are printed; one `-` stdin allowed.
+`join [-t C|-tC] [-1 N|-1N] [-2 N|-2N] FILE1 FILE2` joins on field 1 by default
+(blank-run fields, or single-char `-t`); glued forms keep argv under
+`EXEC_MAX_ARGC=8`. Thin join advances one pair per equal key (unique-key
+smokes). Focused virtio login smoke covers `comm`/`-12`/`-13`, `join`/`-t:`/
+`-12`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -420,7 +431,7 @@ interactive greens (smp 1/2).
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: thin utils still missing (`which`/`type` external,
-   `dirname` already present; consider `split`/`csplit`, `comm`/`join`,
-   `fmt`, external `/bin/which`) — prefer small coherent pairs.
+   `dirname` already present; consider `split`/`csplit`, `fmt`, external
+   `/bin/which`) — prefer small coherent pairs.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.
