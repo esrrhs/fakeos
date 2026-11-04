@@ -251,6 +251,7 @@ flowchart TD
 - [x] **/bin/cal**：外部 `cal MONTH YEAR` / `cal YEAR`（周日起始；无 RTC 故不支持无参当前月）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/install**：外部 `install [-d] [-m MODE] SRC DST|DIR...`（`-d` 同 mkdir -p；默认 mode 0755；多源入目录）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/chown + /bin/chgrp**：外部 `chown UID[:GID] FILE...`（缺 GID 不变组）、`chgrp GID FILE...`（uid=(u32)-1）；与 shell `chown` / `chown(2)` 对齐；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout SECONDS CMD...`（fork+nanosleep 轮询+SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。

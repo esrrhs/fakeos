@@ -176,6 +176,12 @@ extern char user_chown_start;
 extern char user_chown_end;
 extern char user_chgrp_start;
 extern char user_chgrp_end;
+extern char user_tac_start;
+extern char user_tac_end;
+extern char user_nproc_start;
+extern char user_nproc_end;
+extern char user_timeout_start;
+extern char user_timeout_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -206,6 +212,67 @@ struct m5_blob_entry {
 };
 extern struct m5_blob_entry m5_blob_table[];
 extern u64 m5_blob_count;
+
+
+/* Boot-static /proc/cpuinfo for /bin/nproc. Filled once from smp_cpu_count(). */
+extern u32 smp_cpu_count(void);
+static char cpuinfo_blob[512];
+
+static void put_u32_dec(char *dst, u64 *at, u64 cap, u32 v) {
+    char tmp[16];
+    u32 n = 0;
+    u32 i;
+    if (v == 0) {
+        tmp[0] = '0';
+        n = 1;
+    } else {
+        while (v != 0 && n < 15) {
+            tmp[n++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+        for (i = 0; i < n / 2; i++) {
+            char c = tmp[i];
+            tmp[i] = tmp[n - 1 - i];
+            tmp[n - 1 - i] = c;
+        }
+    }
+    for (i = 0; i < n && *at < cap; i++) {
+        dst[(*at)++] = tmp[i];
+    }
+}
+
+static void publish_cpuinfo(void) {
+    u32 ncpu = smp_cpu_count();
+    u32 i;
+    u64 at = 0;
+    u64 cap = sizeof(cpuinfo_blob);
+    const char *prefix = "processor\t: ";
+    u32 pi;
+    if (ncpu == 0) {
+        ncpu = 1;
+    }
+    if (ncpu > 8) {
+        ncpu = 8;
+    }
+    for (i = 0; i < ncpu; i++) {
+        for (pi = 0; prefix[pi] != 0 && at < cap; pi++) {
+            cpuinfo_blob[at++] = prefix[pi];
+        }
+        put_u32_dec(cpuinfo_blob, &at, cap, i);
+        if (at < cap) {
+            cpuinfo_blob[at++] = '\n';
+        }
+    }
+    if (at == 0) {
+        kprintf("[FS] FAILED to publish /proc/cpuinfo\n");
+        return;
+    }
+    if (!fs.fs_publish_file("/proc/cpuinfo", (u64)cpuinfo_blob, at)) {
+        kprintf("[FS] FAILED to publish /proc/cpuinfo\n");
+        return;
+    }
+    kprintf("[FS] published /proc/cpuinfo (%u bytes, %u cpus)\n", at, (u64)ncpu);
+}
 
 static void publish_one(const char *path, u64 start, u64 end) {
     u64 size = end - start;
@@ -314,6 +381,9 @@ void rootfs_publish(void) {
     publish_one("/bin/install", (u64)(&user_install_start), (u64)(&user_install_end));
     publish_one("/bin/chown", (u64)(&user_chown_start), (u64)(&user_chown_end));
     publish_one("/bin/chgrp", (u64)(&user_chgrp_start), (u64)(&user_chgrp_end));
+    publish_one("/bin/tac", (u64)(&user_tac_start), (u64)(&user_tac_end));
+    publish_one("/bin/nproc", (u64)(&user_nproc_start), (u64)(&user_nproc_end));
+    publish_one("/bin/timeout", (u64)(&user_timeout_start), (u64)(&user_timeout_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
@@ -333,6 +403,8 @@ void rootfs_publish(void) {
     if (!fs.fs_mkdir("/proc/self")) {
         kprintf("[FS] FAILED to publish /proc/self\n");
     }
+
+    publish_cpuinfo();
 
     /* Writable scratch directory for compiler outputs. */
     if (!fs.fs_mkdir("/tmp")) {

@@ -553,14 +553,25 @@ login smoke covers `/bin/chown` uid:gid / uid-only, `/bin/chgrp`, Ramfs+Ext2
 `ls -l` owners, plus prior interactive greens (smp 1/2). Ramfs `/bin` dents
 89/128.
 
+## /bin/tac + /bin/nproc + /bin/timeout — landed
+
+Thin POSIX/GNU subset. `tac [FILE...]` prints lines in reverse (RAM-buffered
+like sort). `nproc [-a|--all]` counts `processor` lines in boot-published
+`/proc/cpuinfo` (filled from `smp_cpu_count()`; online==all, no affinity).
+`timeout SECONDS COMMAND [ARG...]` forks+execs, polls with 50ms nanosleep +
+`wait4(WNOHANG)`, SIGKILL on deadline, exit 124; COMMAND without `/` resolves
+as `/bin/COMMAND`. Compact argv for `EXEC_MAX_ARGC=8`. Focused virtio login
+smoke covers tac reverse, nproc on smp 1/2, timeout success + timed-out sleep,
+plus prior interactive greens. Ramfs `/bin` dents 92/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (chown/chgrp +
-   install + cal + id/groups + factor/clear/tty/whoami + base64 + checksum
-   trio already present) — prefer small coherent chunks such as
-   `tac`/`timeout`/`nproc`. Avoid deep jbd / Ext2-redirect duplex races / CFS
-   nesting unless a clear bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (tac/nproc/
+   timeout + chown/chgrp + install + cal + id/groups + factor/clear/tty/whoami
+   + base64 + checksum trio already present) — prefer small coherent chunks.
+   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
+   bite-sized fix.
