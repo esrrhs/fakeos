@@ -1,15 +1,16 @@
 /* fakeos userland - ls: list directory entries or file operands.
- * Forms: ls [-a|-A] [-d] [-l] [-1] [-F] [-R] [PATH...]
+ * Forms: ls [-a|-A] [-d] [-l] [-1] [-i] [-F] [-R] [PATH...]
  * Default: hide names starting with '.' (POSIX); one name per line. -a shows
  * all including . and ..; -A almost all (hidden but not ./..). -d lists a
  * directory itself. -l uses fstatat for mode/nlink/uid/gid/size/mtime;
- * symlinks show `name -> target` via readlink. -1 forces one-per-line (default
- * already; ignored with -l). -F classifies short names (slash, star, at, pipe,
- * equals). -R recurses into subdirectories (ignored with -d); subdirs get a
- * `path:` header and a blank line before each block. Glued flags (-laFR, ...)
- * accepted. Multi-PATH: dirs get a `path:` header when more than one PATH is
- * given. Compact argv for EXEC_MAX_ARGC=8. Ownership and mtime come from live
- * inode fields (chown + write stamps). */
+ * symlinks show `name -> target` via readlink. -i prefixes the inode number
+ * (st_ino / getdents d_ino). -1 forces one-per-line (default already; ignored
+ * with -l). -F classifies short names (slash, star, at, pipe, equals). -R
+ * recurses into subdirectories (ignored with -d); subdirs get a `path:` header
+ * and a blank line before each block. Glued flags (-laFRi, ...) accepted.
+ * Multi-PATH: dirs get a `path:` header when more than one PATH is given.
+ * Compact argv for EXEC_MAX_ARGC=8. Ownership and mtime come from live inode
+ * fields (chown + write stamps). */
 package user;
 
 typedef unsigned long u64;
@@ -26,6 +27,7 @@ extern void printf(const char *fmt, ...);
 
 /* Linux x86-64 struct stat field offsets (144 bytes). */
 enum {
+    ST_INO = 8,
     ST_NLINK = 16,
     ST_MODE = 24,
     ST_UID = 28,
@@ -173,7 +175,7 @@ static int show_name(const char *name, int show_all, int almost_all) {
 
 /* linkpath: path passed to readlink for symlinks; name: display name. */
 static void print_name_long(const char *linkpath, const char *name,
-                            const char *stbuf) {
+                            const char *stbuf, int show_inode) {
     char mstr[12];
     unsigned int mode;
     unsigned int nlink;
@@ -181,13 +183,16 @@ static void print_name_long(const char *linkpath, const char *name,
     unsigned int gid;
     unsigned long size;
     unsigned long mtime;
+    unsigned long ino;
     mode = load_u32(stbuf + ST_MODE);
     nlink = (unsigned int)load_u64(stbuf + ST_NLINK);
     uid = load_u32(stbuf + ST_UID);
     gid = load_u32(stbuf + ST_GID);
     size = load_u64(stbuf + ST_SIZE);
     mtime = load_u64(stbuf + ST_MTIME);
+    ino = load_u64(stbuf + ST_INO);
     mode_string(mode, mstr);
+    if (show_inode) printf("%u ", (unsigned int)ino);
     /* mode nlink uid gid size mtime name  (mtime = boot-relative seconds) */
     if ((mode & S_IFMT) == S_IFLNK) {
         char tgt[96];
@@ -221,8 +226,10 @@ static char classify_char(unsigned int mode) {
     return 0;
 }
 
-static void print_name_short(const char *name, char suffix) {
+static void print_name_short(unsigned long ino, int show_inode,
+                             const char *name, char suffix) {
     unsigned long k = 0;
+    if (show_inode) printf("%u ", (unsigned int)ino);
     while (name[k] != 0) {
         k++;
     }
@@ -235,7 +242,7 @@ static void print_name_short(const char *name, char suffix) {
 
 static int list_one(const char *path, int longfmt, int dir_as_file,
                     int show_all, int almost_all, int classify, int recurse,
-                    int print_header, int depth) {
+                    int show_inode, int print_header, int depth) {
     char buf[1920];
     char stbuf[ST_SIZE_BYTES];
     char subnames[MAX_SUBDIRS][32];
@@ -260,9 +267,10 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
     if (dir_as_file || (mode & S_IFMT) != S_IFDIR) {
         const char *base = basename_of(path);
         if (longfmt) {
-            print_name_long(path, base, stbuf);
+            print_name_long(path, base, stbuf, show_inode);
         } else {
-            print_name_short(base, classify ? classify_char(mode) : 0);
+            print_name_short(load_u64(stbuf + ST_INO), show_inode, base,
+                             classify ? classify_char(mode) : 0);
         }
         u_close(fd);
         return 0;
@@ -279,16 +287,23 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
         dots[0] = ".";
         dots[1] = "..";
         for (di = 0; di < 2; di++) {
-            if (longfmt) {
+            if (longfmt || show_inode) {
                 if (u_newfstatat(fd, dots[di], stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
-                    printf("?????????? 0 0 0 0 0 %s\n", dots[di]);
+                    if (show_inode) printf("0 ");
+                    if (longfmt) printf("?????????? 0 0 0 0 0 %s\n", dots[di]);
+                    else print_name_short(0, 0, dots[di], classify ? '/' : 0);
                 } else {
                     char full[PATH_CAP];
                     join_dir_name(full, sizeof(full), path, dots[di]);
-                    print_name_long(full, dots[di], stbuf);
+                    if (longfmt) {
+                        print_name_long(full, dots[di], stbuf, show_inode);
+                    } else {
+                        print_name_short(load_u64(stbuf + ST_INO), show_inode,
+                                         dots[di], classify ? '/' : 0);
+                    }
                 }
             } else {
-                print_name_short(dots[di], classify ? '/' : 0);
+                print_name_short(0, 0, dots[di], classify ? '/' : 0);
             }
         }
     }
@@ -316,30 +331,35 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
             if (!show_name(name, show_all, almost_all)) {
                 continue;
             }
-            if (longfmt || classify || recurse) {
+            if (longfmt || classify || recurse || show_inode) {
                 if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) == 0) {
                     unsigned int em = load_u32(stbuf + ST_MODE);
+                    unsigned long ino = load_u64(stbuf + ST_INO);
                     is_dir = ((em & S_IFMT) == S_IFDIR);
                     if (longfmt) {
                         join_dir_name(full, sizeof(full), path, name);
-                        print_name_long(full, name, stbuf);
+                        print_name_long(full, name, stbuf, show_inode);
                     } else if (classify) {
-                        print_name_short(name, classify_char(em));
+                        print_name_short(ino, show_inode, name,
+                                         classify_char(em));
                     } else {
-                        print_name_short(name, 0);
+                        print_name_short(ino, show_inode, name, 0);
                     }
                 } else {
+                    unsigned long dino = load_u64(buf + off);
                     if (longfmt) {
+                        if (show_inode) printf("%u ", (unsigned int)dino);
                         printf("?????????? 0 0 0 0 0 %s\n", name);
                     } else if (classify) {
-                        print_name_short(name, buf[off + 18] == 4 ? '/' : 0);
+                        print_name_short(dino, show_inode, name,
+                                         buf[off + 18] == 4 ? '/' : 0);
                     } else {
-                        print_name_short(name, 0);
+                        print_name_short(dino, show_inode, name, 0);
                     }
                     if (buf[off + 18] == 4) is_dir = 1;
                 }
             } else {
-                print_name_short(name, 0);
+                print_name_short(0, 0, name, 0);
                 if (buf[off + 18] == 4) is_dir = 1;
             }
             if (recurse && is_dir && nsub < MAX_SUBDIRS) {
@@ -362,7 +382,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
             if (child[0] == 0) continue;
             u_write(1, "\n", 1);
             if (list_one(child, longfmt, 0, show_all, almost_all, classify,
-                         recurse, 1, depth + 1) != 0) {
+                         recurse, show_inode, 1, depth + 1) != 0) {
                 rc = 1;
             }
         }
@@ -371,7 +391,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
 }
 
 static void usage(void) {
-    u_write(2, "usage: ls [-a|-A] [-d] [-l] [-1FR] [PATH...]\n", 46);
+    u_write(2, "usage: ls [-a|-A] [-d] [-l] [-1iFR] [PATH...]\n", 46);
 }
 
 int main(int argc, char **argv) {
@@ -381,6 +401,7 @@ int main(int argc, char **argv) {
     int almost_all = 0;
     int classify = 0;
     int recurse = 0;
+    int show_inode = 0;
     const char *paths[MAX_PATHS];
     int npaths = 0;
     int ai;
@@ -415,6 +436,8 @@ int main(int argc, char **argv) {
                     classify = 1;
                 } else if (a[j] == 'R') {
                     recurse = 1;
+                } else if (a[j] == 'i') {
+                    show_inode = 1;
                 } else {
                     usage();
                     return 1;
@@ -452,7 +475,7 @@ int main(int argc, char **argv) {
     for (i = 0; i < npaths; i++) {
         if (i > 0) u_write(1, "\n", 1);
         if (list_one(paths[i], longfmt, dir_as_file, show_all, almost_all,
-                     classify, recurse, headers, 0)) {
+                     classify, recurse, show_inode, headers, 0)) {
             rc = 1;
         }
     }
