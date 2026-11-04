@@ -21,6 +21,7 @@ global u_getppid
 global u_uname
 global u_nanosleep
 global u_clock_gettime
+global u_nice
 global u_yield
 global u_fork
 global u_execve
@@ -153,6 +154,9 @@ USYSC1 u_nanosleep, 35
 
 ; long u_clock_gettime(long clockid, void *tp) -- Linux nr 228
 USYSC1 u_clock_gettime, 228
+
+; long u_nice(long inc) -- fakeos-specific nr 503 (Linux has no nice)
+USYSC1 u_nice, 503
 
 
 ; long u_yield(void)
