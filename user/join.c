@@ -1,11 +1,12 @@
 /* fakeos userland - join: relational join on sorted text files (thin POSIX).
- * Forms: join [-a N|-aN] [-v N|-vN] [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N]
- *        FILE1 FILE2
+ * Forms: join [-a N|-aN] [-v N|-vN] [-e STR|-eSTR] [-t CHAR|-tCHAR]
+ *        [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
  * Default join field 1 on both; default field sep is blank runs; with -t the
- * delimiter is a single char (empty fields allowed). Output sep is space, or
- * the -t char when set. -a N also prints unpairable lines from file N (1 or 2).
- * -v N like -a N but suppress pairable (joined) lines. "-" is stdin (at most
- * one). Files must be sorted on the join field. Compact argv for EXEC_MAX_ARGC=8.
+ * delimiter is a single char (empty fields allowed). -e STR replaces empty
+ * output fields with STR. Output sep is space, or the -t char when set.
+ * -a N also prints unpairable lines from file N (1 or 2). -v N like -a N but
+ * suppress pairable (joined) lines. "-" is stdin (at most one). Files must be
+ * sorted on the join field. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -27,9 +28,10 @@ static int opt_a1;
 static int opt_a2;
 static int opt_v1;
 static int opt_v2;
+static const char *empty_repl; /* -e: replace empty fields */
 
 static void usage(void) {
-    u_write(2, "usage: join [-a N] [-v N] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 59);
+    u_write(2, "usage: join [-a N] [-v N] [-e STR] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 68);
 }
 
 static int is_digits(const char *s) {
@@ -98,7 +100,12 @@ static const char *get_field(char **fields, int nf, int idx) {
 }
 
 static void emit_str(const char *s) {
-    unsigned long n = strlen(s);
+    unsigned long n;
+    if (s == 0 || s[0] == 0) {
+        if (empty_repl) s = empty_repl;
+        else return;
+    }
+    n = strlen(s);
     if (n > 0) u_write(1, s, n);
 }
 
@@ -189,6 +196,7 @@ int main(int argc, char **argv) {
     int have2 = 0;
     int stdin_used = 0;
 
+    empty_repl = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         const char *a = argv[i];
         if (strcmp(a, "--") == 0) {
@@ -203,6 +211,13 @@ int main(int argc, char **argv) {
         } else if (a[1] == 't' && a[2] != 0) {
             have_t = 1;
             tchar = a[2];
+            i++;
+        } else if (strcmp(a, "-e") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            empty_repl = argv[i + 1];
+            i += 2;
+        } else if (a[1] == 'e' && a[2] != 0) {
+            empty_repl = a + 2;
             i++;
         } else if (strcmp(a, "-a") == 0) {
             int which;
