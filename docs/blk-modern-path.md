@@ -490,6 +490,14 @@ blocks; compact argv (no flags). Focused virtio login smoke covers empty/
 `abc`/`hello` stdin digests, file operand, plus prior interactive greens
 (smp 1/2). Ramfs `/bin` dents 77/128.
 
+## /bin/sha256sum — landed
+
+Checksum follow-on with real FIPS 180-4 SHA-256 (not a stub).
+`sha256sum [FILE...]` prints `DIGEST  FILE` (two spaces; `-` for stdin/`-`).
+Streaming 64-byte blocks; compact argv (no flags). Focused virtio login smoke
+covers empty/`abc`/`hello` stdin digests, file operand, plus prior interactive
+greens (smp 1/2). Ramfs `/bin` dents 78/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -497,6 +505,6 @@ blocks; compact argv (no flags). Focused virtio login smoke covers empty/
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `md5sum`/`sha1sum` already present; consider `sha256sum`, `base64`,
-   `factor`, `yes` already present) — prefer small coherent chunks. Avoid deep
-   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+   (e.g. `base64`, `factor`; checksum trio already present) — prefer small
+   coherent chunks. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
+   unless a clear bite-sized fix.

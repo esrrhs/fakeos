@@ -152,6 +152,8 @@ extern char user_md5sum_start;
 extern char user_md5sum_end;
 extern char user_sha1sum_start;
 extern char user_sha1sum_end;
+extern char user_sha256sum_start;
+extern char user_sha256sum_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -278,6 +280,7 @@ void rootfs_publish(void) {
     publish_one("/bin/column", (u64)(&user_column_start), (u64)(&user_column_end));
     publish_one("/bin/md5sum", (u64)(&user_md5sum_start), (u64)(&user_md5sum_end));
     publish_one("/bin/sha1sum", (u64)(&user_sha1sum_start), (u64)(&user_sha1sum_end));
+    publish_one("/bin/sha256sum", (u64)(&user_sha256sum_start), (u64)(&user_sha256sum_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
