@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
+ * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-pv], rmdir[-p], ln[-sf],
  * readlink, realpath, env/export[-n]/unset/which/type/command[-vV]/hash[-rplt]/read/alias[-p]/unalias[-a]/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg, wait.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -580,14 +580,17 @@ static int sh_chmod_path(const char *path, unsigned int mode, int recursive,
 }
 
 /* Create one directory; with parents, create each missing component.
- * Existing directories are OK under -p (no errno; re-stat after mkdir). */
-static int sh_mkdir_one(const char *path, int parents) {
+ * Existing directories are OK under -p (no errno; re-stat after mkdir).
+ * verbose: print GNU-style announce for each directory actually created. */
+static int sh_mkdir_one(const char *path, int parents, int verbose) {
     char buf[SH_PATH_CAP];
     unsigned long n;
     unsigned long i;
     if (path == 0 || path[0] == 0) return -1;
     if (!parents) {
-        return u_mkdir(path) < 0 ? -1 : 0;
+        if (u_mkdir(path) < 0) return -1;
+        if (verbose) printf("mkdir: created directory '%s'\n", path);
+        return 0;
     }
     n = strlen(path);
     if (n >= SH_PATH_CAP) return -1;
@@ -609,6 +612,8 @@ static int sh_mkdir_one(const char *path, int parents) {
                         buf[i] = saved;
                         return -1;
                     }
+                } else if (verbose) {
+                    printf("mkdir: created directory '%s'\n", buf);
                 }
             }
         }
@@ -2687,7 +2692,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "setuid", "setuid UID" },
     { "seteuid", "seteuid UID" },
     { "env", "env" },
-    { "mkdir", "mkdir [-p] [-m MODE] DIR..." },
+    { "mkdir", "mkdir [-pv] [-m MODE] DIR..." },
     { "rmdir", "rmdir [-p] DIR..." },
     { "ln", "ln [-sf] TARGET LINKPATH" },
     { "readlink", "readlink FILE" },
@@ -3026,6 +3031,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "mkdir")) {
         int parents = 0;
+        int verbose = 0;
         int have_mode = 0;
         unsigned int mode = 0;
         int ai = 1;
@@ -3038,6 +3044,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 'p') {
                     parents = 1;
+                } else if (o[j] == 'v') {
+                    verbose = 1;
                 } else if (o[j] == 'm') {
                     const char *ms;
                     unsigned int m = 0;
@@ -3048,7 +3056,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     } else {
                         ai++;
                         if (tokens[ai] == 0) {
-                            puts("usage: mkdir [-p] [-m MODE] DIR...");
+                            puts("usage: mkdir [-pv] [-m MODE] DIR...");
                             return 1;
                         }
                         ms = tokens[ai];
@@ -3067,7 +3075,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     mode = m;
                     have_mode = 1;
                 } else {
-                    puts("usage: mkdir [-p] [-m MODE] DIR...");
+                    puts("usage: mkdir [-pv] [-m MODE] DIR...");
                     return 1;
                 }
             }
@@ -3079,7 +3087,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         while (tokens[ai] != 0) {
             saw = 1;
-            if (sh_mkdir_one(tokens[ai], parents) < 0) {
+            if (sh_mkdir_one(tokens[ai], parents, verbose) < 0) {
                 printf("sh: mkdir: %s: cannot create directory\n", tokens[ai]);
                 rc = 1;
             } else if (have_mode) {
@@ -3328,7 +3336,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");

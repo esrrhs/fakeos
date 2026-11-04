@@ -1,8 +1,10 @@
 /* fakeos userland - mkdir: create directories (thin; mirrors shell builtin).
- *   mkdir [-p] [-m MODE|-mMODE] DIR...
+ *   mkdir [-pv] [-m MODE|-mMODE] DIR...
  * -p  create parents; existing directories are OK (re-stat after mkdir).
+ * -v  print a line for each directory actually created (GNU).
  * -m  set mode after create (octal; glued -mMODE keeps EXEC_MAX_ARGC=8).
  * External form for xargs/scripts that exec mkdir without the shell builtin.
+ * Glued -pv/-vp/-pmMODE accepted.
  */
 package user;
 
@@ -50,13 +52,19 @@ static int parse_mode(const char *s, unsigned int *out) {
     return 1;
 }
 
-static int mkdir_one(const char *path, int parents) {
+static void announce(const char *path) {
+    printf("mkdir: created directory '%s'\n", path);
+}
+
+static int mkdir_one(const char *path, int parents, int verbose) {
     char buf[PATH_CAP];
     unsigned long n;
     unsigned long i;
     if (path == 0 || path[0] == 0) return -1;
     if (!parents) {
-        return u_mkdir(path) < 0 ? -1 : 0;
+        if (u_mkdir(path) < 0) return -1;
+        if (verbose) announce(path);
+        return 0;
     }
     n = strlen(path);
     if (n >= PATH_CAP) return -1;
@@ -78,6 +86,8 @@ static int mkdir_one(const char *path, int parents) {
                         buf[i] = saved;
                         return -1;
                     }
+                } else if (verbose) {
+                    announce(buf);
                 }
             }
         }
@@ -90,11 +100,12 @@ static int mkdir_one(const char *path, int parents) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: mkdir [-p] [-m MODE] DIR...\n", 35);
+    u_write(2, "usage: mkdir [-pv] [-m MODE] DIR...\n", 36);
 }
 
 int main(int argc, char **argv) {
     int parents = 0;
+    int verbose = 0;
     int have_mode = 0;
     unsigned int mode = 0;
     int ai = 1;
@@ -108,6 +119,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'p') {
                 parents = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else if (o[j] == 'm') {
                 const char *ms;
                 if (o[j + 1] != 0) {
@@ -139,7 +152,7 @@ int main(int argc, char **argv) {
     }
     while (ai < argc) {
         saw = 1;
-        if (mkdir_one(argv[ai], parents) < 0) {
+        if (mkdir_one(argv[ai], parents, verbose) < 0) {
             printf("mkdir: %s: cannot create directory\n", argv[ai]);
             rc = 1;
         } else if (have_mode) {
