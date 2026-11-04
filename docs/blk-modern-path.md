@@ -2087,6 +2087,13 @@ With any `-e`, there is no positional SCRIPT operand (POSIX). Keeps `-n`/`-i`
 and `s///gi`. No new `/bin` dent. Focused virtio login smoke covers dual `-e`
 + prior greens (smp 1/2).
 
+## uniq -w — landed
+
+`/bin/uniq -w N` (glued `-wN`) compares at most N characters of the
+comparison key after `-f`/`-s` skips (GNU). `-w0` treats all keys equal.
+Combines with `-cduiz`. No new `/bin` dent. Focused virtio login smoke
+covers `-w2` collapse + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2094,6 +2101,6 @@ and `s///gi`. No new `/bin` dent. Focused virtio login smoke covers dual `-e`
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (inspect
-   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
+   `find -type l`, `xargs -t`, `cat -v`; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

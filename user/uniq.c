@@ -1,10 +1,11 @@
 /* fakeos userland - uniq: collapse consecutive duplicate lines (thin POSIX).
- * Forms: uniq [-cduiz] [-f N] [-s N] [FILE...]
+ * Forms: uniq [-cduiz] [-f N] [-s N] [-w N] [FILE...]
  * -c count prefix; -d only duplicated; -u only unique; -i fold case when
  * comparing; -z NUL-terminated records (input+output; pairs with xargs -0);
- * -f N skip N fields; -s N skip N chars (after fields) when comparing.
- * Output still emits the full original line. stdin if no FILE.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * -f N skip N fields; -s N skip N chars (after fields) when comparing;
+ * -w N compare at most N chars of the key (GNU; after -f/-s). Output still
+ * emits the full original line. stdin if no FILE. Compact argv for
+ * EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -26,10 +27,11 @@ static int opt_u;
 static int opt_i;
 static int opt_f; /* skip N fields (0 = none) */
 static int opt_s; /* skip N chars after fields (0 = none) */
+static int opt_w; /* compare at most N chars (-1 = unlimited) */
 static int opt_z; /* NUL-terminated records */
 
 static void usage(void) {
-    u_write(2, "usage: uniq [-cduiz] [-f N] [-s N] [FILE...]\n", 45);
+    u_write(2, "usage: uniq [-cduiz] [-f N] [-s N] [-w N] [FILE...]\n", 52);
 }
 
 static int is_digits(const char *s) {
@@ -68,15 +70,23 @@ static char fold_ch(char c) {
     return c;
 }
 
-/* Case-sensitive or -i fold compare on keys (after -f/-s skips). */
+/* Case-sensitive or -i fold compare on keys (after -f/-s; capped by -w). */
 static int line_eq(const char *a, const char *b) {
     const char *ka = key_at(a);
     const char *kb = key_at(b);
     int i;
-    if (!opt_i) return strcmp(ka, kb) == 0;
+    int lim = opt_w;
+    if (lim == 0) return 1; /* -w0: all keys equal */
     for (i = 0; ; i++) {
-        char ca = fold_ch(ka[i]);
-        char cb = fold_ch(kb[i]);
+        char ca;
+        char cb;
+        if (lim > 0 && i >= lim) return 1;
+        ca = ka[i];
+        cb = kb[i];
+        if (opt_i) {
+            ca = fold_ch(ca);
+            cb = fold_ch(cb);
+        }
         if (ca != cb) return 0;
         if (ka[i] == 0) return 1;
     }
@@ -196,6 +206,7 @@ int main(int argc, char **argv) {
     opt_i = 0;
     opt_f = 0;
     opt_s = 0;
+    opt_w = -1;
     opt_z = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
@@ -233,6 +244,20 @@ int main(int argc, char **argv) {
             i++;
             continue;
         }
+        if (strcmp(argv[i], "-w") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            opt_w = (int)strtol_dec(argv[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'w' && argv[i][2] != 0 && is_digits(argv[i] + 2)) {
+            opt_w = (int)strtol_dec(argv[i] + 2);
+            i++;
+            continue;
+        }
         for (j = 1; argv[i][j]; j++) {
             char o = argv[i][j];
             if (o == 'c') opt_c = 1;
@@ -248,6 +273,12 @@ int main(int argc, char **argv) {
                 goto next_arg;
             } else if (o == 's') {
                 if (!take_num(argc, argv, &i, j, &opt_s)) {
+                    usage();
+                    return 1;
+                }
+                goto next_arg;
+            } else if (o == 'w') {
+                if (!take_num(argc, argv, &i, j, &opt_w)) {
                     usage();
                     return 1;
                 }
