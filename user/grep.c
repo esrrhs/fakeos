@@ -1,7 +1,8 @@
 /* fakeos userland - grep: fixed-string line filter; thin -E ERE subset.
- * Options: -i -v -n -F -c -q -E. Glued short opts. -F forces fixed (wins over -E).
+ * Options: -i -v -n -F -c -q -l -L -E. Glued short opts. -F forces fixed (wins over -E).
  * -c suppresses line output; multi-FILE prints name:count per file.
  * -q quiet: no stdout (status only; -c count also suppressed). May stop early.
+ * -l list matching file names only; -L list non-matching names (last of -l/-L wins).
  * ERE subset: | . * + ? () [] ^ $ and \ escapes. No [:class:], no {} bounds.
  * []: ranges, leading ^ negate, leading ]/- literal; \ escapes next inside [].
  */
@@ -20,7 +21,7 @@ extern void printf(const char *fmt, ...);
 
 enum { LINE_MAX = 512 };
 
-static const char *USAGE = "usage: grep [-ivncqFE] PATTERN [FILE...]\n";
+static const char *USAGE = "usage: grep [-ivncqlLFE] PATTERN [FILE...]\n";
 
 static char lower(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
@@ -414,6 +415,8 @@ int main(int argc, char **argv) {
     int number = 0;
     int count_mode = 0;
     int quiet = 0;
+    int list_yes = 0; /* -l */
+    int list_no = 0;  /* -L */
     int ere = 0;
     int fixed = 0;
     int rc = 0;
@@ -438,10 +441,12 @@ int main(int argc, char **argv) {
             else if (o == 'n') number = 1;
             else if (o == 'c') count_mode = 1;
             else if (o == 'q') quiet = 1;
+            else if (o == 'l') { list_yes = 1; list_no = 0; }
+            else if (o == 'L') { list_no = 1; list_yes = 0; }
             else if (o == 'E') { ere = 1; fixed = 0; }
             else if (o == 'F') { fixed = 1; ere = 0; }
             else {
-                u_write(2, USAGE, 41);
+                u_write(2, USAGE, 43);
                 return 2;
             }
         }
@@ -452,14 +457,14 @@ int main(int argc, char **argv) {
 
     if (i < argc && strcmp(argv[i], "-e") == 0) {
         if (i + 1 >= argc) {
-            u_write(2, USAGE, 41);
+            u_write(2, USAGE, 43);
             return 2;
         }
         pat = argv[i + 1];
         i += 2;
     } else {
         if (i >= argc) {
-            u_write(2, USAGE, 41);
+            u_write(2, USAGE, 43);
             return 2;
         }
         pat = argv[i];
@@ -468,31 +473,75 @@ int main(int argc, char **argv) {
 
     file_start = i;
     nfiles = argc - file_start;
-    if (nfiles <= 0) {
-        unsigned long hits = 0;
-        if (grep_fd(0, pat, ign, invert, number, count_mode, quiet, ere, 0, 0,
-                    &matched, &hits) != 0) return 2;
-        return matched ? 0 : 1;
-    }
-    for (; i < argc; i++) {
-        long fd;
-        int show_name = (nfiles > 1);
-        unsigned long hits = 0;
-        if (strcmp(argv[i], "-") == 0) {
-            if (grep_fd(0, pat, ign, invert, number, count_mode, quiet, ere, show_name,
-                        "(standard input)", &matched, &hits) != 0) rc = 2;
-            continue;
+    /* -l/-L: scan quietly then print path; -l may stop early via quiet. */
+    {
+        int q = quiet;
+        int cmode = count_mode;
+        if (list_yes || list_no) {
+            q = 1;
+            cmode = 0;
         }
-        fd = u_open(argv[i], 0, 0);
-        if (fd < 0) {
-            printf("grep: %s: no such file\n", argv[i]);
-            rc = 2;
-            continue;
+        if (nfiles <= 0) {
+            unsigned long hits = 0;
+            int file_matched = 0;
+            if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, 0, 0,
+                        &file_matched, &hits) != 0) return 2;
+            if (list_yes) {
+                if (file_matched) {
+                    printf("(standard input)\n");
+                    return 0;
+                }
+                return 1;
+            }
+            if (list_no) {
+                if (!file_matched) {
+                    printf("(standard input)\n");
+                    return 0;
+                }
+                return 1;
+            }
+            return file_matched ? 0 : 1;
         }
-        if (grep_fd(fd, pat, ign, invert, number, count_mode, quiet, ere, show_name,
-                    argv[i], &matched, &hits) != 0)
-            rc = 2;
-        u_close(fd);
+        for (; i < argc; i++) {
+            long fd;
+            int show_name = (nfiles > 1) && !(list_yes || list_no);
+            unsigned long hits = 0;
+            int file_matched = 0;
+            const char *name;
+            if (strcmp(argv[i], "-") == 0) {
+                name = "(standard input)";
+                if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, show_name,
+                            name, &file_matched, &hits) != 0) {
+                    rc = 2;
+                    continue;
+                }
+            } else {
+                name = argv[i];
+                fd = u_open(argv[i], 0, 0);
+                if (fd < 0) {
+                    printf("grep: %s: no such file\n", argv[i]);
+                    rc = 2;
+                    continue;
+                }
+                if (grep_fd(fd, pat, ign, invert, number, cmode, q, ere, show_name,
+                            name, &file_matched, &hits) != 0)
+                    rc = 2;
+                u_close(fd);
+            }
+            if (list_yes) {
+                if (file_matched) {
+                    printf("%s\n", name);
+                    matched = 1;
+                }
+            } else if (list_no) {
+                if (!file_matched) {
+                    printf("%s\n", name);
+                    matched = 1; /* listed at least one non-match */
+                }
+            } else if (file_matched) {
+                matched = 1;
+            }
+        }
     }
     if (rc == 2) return 2;
     return matched ? 0 : 1;
