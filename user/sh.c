@@ -362,6 +362,9 @@ static int db_parse_long(const char *s, long *out) {
     return 1;
 }
 
+/* case_glob: thin * ? matcher (also used by [[ == / != ]]). */
+static int case_glob(const char *pat, const char *s);
+
 /* One primary at *pos.. until &&/||/end. Advances *pos. 0/1 or -1 error. */
 static int db_primary(char **av, int end, int *pos) {
     int neg = 0;
@@ -413,8 +416,9 @@ static int db_primary(char **av, int end, int *pos) {
     if (n == 3) {
         long n1 = 0;
         long n2 = 0;
-        if (eq(a1, "==") || eq(a1, "=")) t = eq(a0, a2);
-        else if (eq(a1, "!=")) t = !eq(a0, a2);
+        /* RHS is pattern (bash-ish); exact match when no meta. */
+        if (eq(a1, "==") || eq(a1, "=")) t = case_glob(a2, a0);
+        else if (eq(a1, "!=")) t = !case_glob(a2, a0);
         else if (eq(a1, "-eq") || eq(a1, "-ne") || eq(a1, "-lt") ||
                  eq(a1, "-le") || eq(a1, "-gt") || eq(a1, "-ge")) {
             if (!db_parse_long(a0, &n1) || !db_parse_long(a2, &n2)) return -1;
@@ -2641,7 +2645,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "return", "return [N]" },
     { "break", "break" },
     { "continue", "continue" },
-    { "[[", "[[ EXPR ]]" },
+    { "[[", "[[ EXPR ]]  (==/!= *?; -eq…; -z/-n; file tests)" },
     { "help", "help [NAME]" },
     { "exit", "exit [N]" },
     { "history", "history" },
@@ -3230,7 +3234,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         if (tokens[1] == 0) {
             puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -5650,7 +5654,7 @@ static long run_if(char **tokens, long rc_in) {
     }
 }
 
-/* Thin glob for case patterns: only '*' and '?' meta; match whole string. */
+/* Thin glob for case / [[ == != ]]: only '*' and '?' meta; match whole string. */
 static int case_glob(const char *pat, const char *s) {
     for (;;) {
         if (pat[0] == 0) return s[0] == 0;
