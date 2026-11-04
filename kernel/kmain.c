@@ -22,6 +22,7 @@ extern void pmm_selftest(void);
 extern void vmm_selftest(void);
 extern void slab_selftest(void);
 extern void sched_selftest(void);
+extern void sched_steal_selftest(void);
 extern types.uint32_t sched_smp_start(void);
 extern void uproc_selftest(void);
 extern void vfs_selftest(void);
@@ -165,8 +166,9 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // fork across real user address spaces and timer preemption at ring 3.
     uproc_selftest();
 
-    /* Release parked APs into per-CPU scheduler idle (no work stealing yet). */
+    /* Release parked APs into per-CPU idle; then prove cross-CPU steal. */
     sched_smp_start();
+    sched_steal_selftest();
 
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");
@@ -187,7 +189,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: AP timer + per-CPU TSS/IST + sched idle + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: cross-CPU RQ steal + AP timer/TSS/IST + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
@@ -203,6 +205,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
     kprintf("           - Kernel threads + CFS-lite (nice/vruntime) + spinlocks: OK\n");
+    kprintf("           - Per-CPU runqueues + cross-CPU steal (kernel then user): OK\n");
     kprintf("           - VFS inode/dentry/open-file + Ramfs (static/dynamic): OK\n");
     kprintf("           - Embedded rootfs (/bin/init,sh,hello,cat,ls,/etc/motd): OK\n");
     kprintf("           - Ring-3 user processes (IRET entry, per-process PML4): OK\n");

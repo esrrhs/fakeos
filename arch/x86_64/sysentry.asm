@@ -6,12 +6,12 @@
 default rel
 
 extern syscall_dispatch         ; C handler in kernel/syscall.c
-extern syscall_kstack_top       ; u64 in kernel/sched.c: current kstack top
+; Per-CPU block (sched.c): [gs:0] = kstack top, [gs:8] = user-RSP scratch.
+; schedule_tail / sched_init / AP enter load MSR_GS_BASE to this CPU's block.
 
 global syscall_entry
 global user_iret_trampoline
 global fork_ret_trampoline
-global syscall_user_rsp
 
 section .text
 
@@ -22,15 +22,15 @@ section .text
 ;
 ; XMM must survive syscalls: kernel C handlers emit SSE spills, and the user
 ; compiler keeps aggregate temporaries in vector registers around its raw
-; __syscall sites. The user RSP is stashed in a global conduit (SFMASK clears
-; IF on entry); the syscall number stays in RAX through the pushes and is
-; pushed last, so the conduit reload (which clobbers RAX) happens only after
+; __syscall sites. The user RSP is stashed in a per-CPU GS conduit (SFMASK
+; clears IF on entry); the syscall number stays in RAX through the pushes and
+; is pushed last, so the conduit reload (which clobbers RAX) happens only after
 ; the number is safely in its frame slot. fork_ret_trampoline lands on this
 ; identical 392-byte layout.
 align 16
 syscall_entry:
-    mov     [rel syscall_user_rsp], rsp
-    mov     rsp, [rel syscall_kstack_top]
+    mov     [gs:8], rsp         ; per-CPU user-RSP scratch
+    mov     rsp, [gs:0]         ; per-CPU kernel stack top
     sub     rsp, 264            ; 256 XMM bytes + 8 user-RSP pad (16-aligned)
     movdqa  [rsp + 0x08], xmm0
     movdqa  [rsp + 0x18], xmm1
@@ -63,7 +63,7 @@ syscall_entry:
     push    r8
     push    r9
     push    rax                 ; frame +0 syscall number (RAX still intact)
-    mov     rax, [rel syscall_user_rsp]
+    mov     rax, [gs:8]
     mov     [rsp + 120], rax    ; frame +120 pad = user RSP
     mov     rdi, rsp            ; struct syscall_frame *
     cld
@@ -132,10 +132,5 @@ fork_ret_trampoline:
     xor     eax, eax
     mov     rsp, r12
     jmp     syscall_epilogue
-
-; ------------------------------------------------------------------------------
-section .data
-align 8
-syscall_user_rsp:   dq 0        ; stashed user RSP across one syscall
 
 section .note.GNU-stack noalloc noexec nowrite progbits

@@ -21,6 +21,11 @@ extern u64 sched_tick_count(void);
 extern u32 sched_thread_state(u32 id);
 extern u32 sched_set_nice(u32 id, s32 nice);
 extern u32 sched_current_id(void);
+extern u32 smp_cpuid(void);
+extern u32 smp_cpu_count(void);
+extern u64 sched_steal_total(void);
+extern u64 sched_steal_on_cpu(u32 cpu);
+extern u64 sched_steal_kernel_total(void);
 
 enum {
     LOCK_WORKERS = 4,
@@ -232,4 +237,90 @@ void sched_selftest(void) {
         kprintf("      [PASS] CFS-lite: nice0 spinner got >=2x work of nice+10\n");
     }
     arch.cpu_cli();
+}
+
+
+/* Cross-CPU steal smoke: after APs are in the scheduler, flood the BSP
+ * runqueue with kernel workers and require the AP to steal at least one. */
+enum { STEAL_WORKERS = 6 };
+
+static volatile u32 g_steal_done;
+static volatile u32 g_steal_saw_ap;
+static volatile u64 g_steal_cpu_hits[8];
+
+static void steal_worker(u64 id) {
+    u32 c = smp_cpuid();
+    (void)id;
+    if (c < 8) {
+        g_steal_cpu_hits[c] = g_steal_cpu_hits[c] + 1;
+    }
+    if (c != 0) {
+        g_steal_saw_ap = 1;
+    }
+    /* Brief burn so an AP tick can observe runnable peers still queued. */
+    {
+        u64 n = 0;
+        u64 i;
+        for (i = 0; i < 200000; i++) {
+            n = n + i;
+        }
+        (void)n;
+    }
+    g_steal_done = g_steal_done + 1;
+    kthread_exit();
+}
+
+void sched_steal_selftest(void) {
+    u32 i;
+    u64 steals0;
+    u64 steals1;
+    u32 ncpu = smp_cpu_count();
+
+    kprintf("\n[SCHED] Cross-CPU runqueue steal self-test...\n");
+    if (ncpu < 2) {
+        kprintf("      [PASS] Cross-CPU steal: skipped (-smp 1)\n");
+        return;
+    }
+
+    g_steal_done = 0;
+    g_steal_saw_ap = 0;
+    for (i = 0; i < 8; i++) {
+        g_steal_cpu_hits[i] = 0;
+    }
+    steals0 = sched_steal_total();
+
+    arch.cpu_sti();
+    for (i = 0; i < STEAL_WORKERS; i++) {
+        if (kthread_create((u64)(&steal_worker), i) == 0xFFFFFFFF) {
+            kprintf("      [FAIL] steal worker create %u\n", (u64)i);
+            arch.cpu_cli();
+            return;
+        }
+    }
+
+    {
+        u64 deadline = sched_tick_count() + 800;
+        while (g_steal_done != STEAL_WORKERS && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    /* Extra settle for AP tick accounting. */
+    arch.pit_busy_wait_ms(50);
+    steals1 = sched_steal_total();
+    arch.cpu_cli();
+
+    if (g_steal_done != STEAL_WORKERS) {
+        kprintf("      [FAIL] steal workers done %u/%u\n",
+                (u64)g_steal_done, (u64)STEAL_WORKERS);
+        return;
+    }
+    if (g_steal_saw_ap == 0 && sched_steal_on_cpu(1) == 0
+        && (steals1 - steals0) == 0) {
+        kprintf("      [FAIL] no AP steal observed (hits0=%u hits1=%u steals=%u)\n",
+                g_steal_cpu_hits[0], g_steal_cpu_hits[1], steals1 - steals0);
+        return;
+    }
+    kprintf("      [PASS] Cross-CPU steal: kernel workers on AP (steals=%u kernel=%u hits0=%u hits1=%u)\n",
+            steals1 - steals0, sched_steal_kernel_total(),
+            g_steal_cpu_hits[0], g_steal_cpu_hits[1]);
 }

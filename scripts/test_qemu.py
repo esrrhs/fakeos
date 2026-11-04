@@ -397,7 +397,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: AP timer + per-CPU TSS/IST + sched idle + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!",
+        "[SUCCESS] fakeos: cross-CPU RQ steal + AP timer/TSS/IST + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

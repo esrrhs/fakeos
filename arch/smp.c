@@ -56,6 +56,9 @@ static u32 tramp_ready;
 static u32 identity_on;
 static u64 ap_stack_storage[MAX_CPUS][AP_STACK_WORDS];
 
+/* APIC id -> logical CPU index; SYSCALL asm indexes per-CPU kstack by this. */
+u8 smp_apic_logical[256];
+
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
 
 static volatile u8 *tramp_u8(void) {
@@ -350,6 +353,9 @@ void smp_init(void) {
     ncpus = 1;
     tramp_ready = 0;
     identity_on = 0;
+    for (i = 0; i < 256; i++) {
+        smp_apic_logical[i] = 0;
+    }
     for (i = 0; i < MAX_CPUS; i++) {
         cpus[i].apic_id = 0;
         cpus[i].online = 0;
@@ -357,6 +363,7 @@ void smp_init(void) {
     }
     cpus[0].apic_id = bsp_apic;
     cpus[0].online = 1;
+    smp_apic_logical[bsp_apic & 0xFF] = 0;
 
     smp_parse_madt();
     if (ncpus == 0) {
@@ -369,6 +376,9 @@ void smp_init(void) {
                 cpus[i].online = 1;
             }
         }
+    }
+    for (i = 0; i < ncpus && i < MAX_CPUS; i++) {
+        smp_apic_logical[cpus[i].apic_id & 0xFF] = (u8)i;
     }
 
     smp_install_trampoline();

@@ -38,10 +38,12 @@ extern void thread_trampoline(void);
 extern void user_iret_trampoline(void);
 extern void fork_ret_trampoline(void);
 
-/* Kernel stack top used by the SYSCALL entry to leave the user stack behind.
- * Read directly by sysentry.asm; refreshed by schedule_tail() on every
- * context switch. */
-u64 syscall_kstack_top;
+/* Per-CPU SYSCALL conduit (GS_BASE points here on each CPU):
+ *   [0] kstack top  — sysentry loads RSP from [gs:0]
+ *   [1] user RSP    — sysentry stashes user RSP at [gs:8]
+ * Required once user threads can run on APs after cross-CPU steal. */
+enum { MSR_GS_BASE = 0xC0000101 };
+u64 syscall_pcpu[8][2];
 
 /* Kernel thread control block. Kernel threads share the bootstrap address
  * space (as_h = 0); user threads own a ring-3 address space created by the
@@ -57,6 +59,7 @@ enum {
     MAX_THREADS  = 32,
     STACK_ORDER  = 2,                 /* 4 frames = 16 KiB per kernel stack  */
     STACK_BYTES  = 16384,
+    SCHED_CPU_NONE = 0xFFFFFFFF,
 
     FD_MAX       = 16,
     FD_EMPTY     = 0xFFFFFFFF,
@@ -91,6 +94,8 @@ struct tcb {
     s32 nice;          /* nice(-20..19); weight derived for CFS           */
     u32 weight;        /* load weight (nice 0 => 1024)                    */
     u64 vruntime;      /* CFS virtual runtime (nice-0 units)              */
+    u32 rq_cpu;        /* Home runqueue CPU (SCHED_CPU_NONE if unbound)   */
+    u32 on_cpu;        /* CPU currently executing this TCB, or NONE       */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -109,6 +114,9 @@ static volatile u32 sched_run_lock;
 static volatile u32 ap_sched_go;
 static volatile u32 ap_in_sched[SCHED_MAX_CPUS];
 static volatile u64 ap_idle_wakeups[SCHED_MAX_CPUS];
+static volatile u64 sched_steal_count[SCHED_MAX_CPUS]; /* steals onto this CPU */
+static volatile u64 sched_migrate_user;                /* user steals total   */
+static volatile u64 sched_migrate_kernel;              /* kernel steals total */
 static u32 sched_bsp_cpu;            /* Logical CPU index of the BSP       */
 static u32 active;                   /* Scheduler online flag              */
 static volatile u64 sched_ticks;
@@ -167,6 +175,130 @@ static u32 tcb_is_idle(u32 id) {
         return 1;
     }
     return idle_mark[id];
+}
+
+static u32 sched_cpu_index(void) {
+    u32 c = smp_cpuid();
+    if (c >= SCHED_MAX_CPUS) {
+        c = 0;
+    }
+    return c;
+}
+
+/* Point GS at this CPU's SYSCALL conduit (kstack + user-RSP scratch). */
+static void sched_load_pcpu(u32 cpu) {
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = 0;
+    }
+    msr_write((u32)MSR_GS_BASE, (u64)(&syscall_pcpu[cpu][0]));
+}
+
+static void sched_set_kstack_cpu(u32 cpu, u64 top) {
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = 0;
+    }
+    syscall_pcpu[cpu][0] = top;
+    sched_load_pcpu(cpu);
+}
+
+/* Enqueue a newly-runnable (or created) thread onto `cpu`'s runqueue. */
+static void rq_enqueue(u32 id, u32 cpu) {
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = 0;
+    }
+    threads[id].rq_cpu = cpu;
+}
+
+/* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
+ * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
+static u32 rq_pick_best(u32 cpu, u32 want_user) {
+    u32 i;
+    u32 best = SCHED_CPU_NONE;
+    u64 best_vr = 0;
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (idle_mark[i]) {
+            continue;
+        }
+        if (threads[i].state != TCB_RUNNABLE) {
+            continue;
+        }
+        if (threads[i].rq_cpu != cpu) {
+            continue;
+        }
+        if (threads[i].on_cpu != SCHED_CPU_NONE && threads[i].on_cpu != cpu) {
+            continue;
+        }
+        if (want_user == 0 && threads[i].is_user != 0) {
+            continue;
+        }
+        if (want_user == 1 && threads[i].is_user == 0) {
+            continue;
+        }
+        if (best == SCHED_CPU_NONE || threads[i].vruntime < best_vr) {
+            best = i;
+            best_vr = threads[i].vruntime;
+        }
+    }
+    return best;
+}
+
+/* Steal one runnable task from a remote RQ onto `cpu`. Prefer kernel, then
+ * user. Only takes threads that are not currently executing (on_cpu NONE). */
+static u32 rq_steal(u32 cpu) {
+    u32 i;
+    u32 best;
+    u32 n = smp_cpu_count();
+    u32 pass;
+
+    if (n > SCHED_MAX_CPUS) {
+        n = SCHED_MAX_CPUS;
+    }
+    for (pass = 0; pass < 2; pass++) {
+        best = SCHED_CPU_NONE;
+        {
+            u64 best_vr = 0;
+            for (i = 0; i < MAX_THREADS; i++) {
+                u32 rq;
+                if (idle_mark[i]) {
+                    continue;
+                }
+                if (threads[i].state != TCB_RUNNABLE) {
+                    continue;
+                }
+                if (threads[i].on_cpu != SCHED_CPU_NONE) {
+                    continue;
+                }
+                rq = threads[i].rq_cpu;
+                if (rq == cpu || rq >= SCHED_MAX_CPUS) {
+                    continue;
+                }
+                if (pass == 0 && threads[i].is_user != 0) {
+                    continue;
+                }
+                if (pass == 1 && threads[i].is_user == 0) {
+                    continue;
+                }
+                if (best == SCHED_CPU_NONE || threads[i].vruntime < best_vr) {
+                    best = i;
+                    best_vr = threads[i].vruntime;
+                }
+            }
+        }
+        if (best != SCHED_CPU_NONE) {
+            threads[best].rq_cpu = cpu;
+            sched_steal_count[cpu] = sched_steal_count[cpu] + 1;
+            if (pass == 0) {
+                sched_migrate_kernel = sched_migrate_kernel + 1;
+            } else {
+                sched_migrate_user = sched_migrate_user + 1;
+            }
+            return best;
+        }
+    }
+    return SCHED_CPU_NONE;
 }
 
 enum {
@@ -295,6 +427,8 @@ void sched_init(void) {
         threads[i].nice = 0;
         threads[i].weight = NICE0_WEIGHT;
         threads[i].vruntime = 0;
+        threads[i].rq_cpu = SCHED_CPU_NONE;
+        threads[i].on_cpu = SCHED_CPU_NONE;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -322,13 +456,20 @@ void sched_init(void) {
         idle_slot[i] = 0xFFFFFFFF;
         ap_in_sched[i] = 0;
         ap_idle_wakeups[i] = 0;
+        sched_steal_count[i] = 0;
+        syscall_pcpu[i][0] = 0;
+        syscall_pcpu[i][1] = 0;
     }
+    sched_migrate_user = 0;
+    sched_migrate_kernel = 0;
     sched_bsp_cpu = smp_cpuid();
     if (sched_bsp_cpu >= SCHED_MAX_CPUS) {
         sched_bsp_cpu = 0;
     }
     idle_slot[sched_bsp_cpu] = 0;
     cpu_current[sched_bsp_cpu] = 0;
+    threads[0].rq_cpu = sched_bsp_cpu;
+    threads[0].on_cpu = sched_bsp_cpu;
     sched_set_cur(0);
     sched_run_lock = 0;
     ap_sched_go = 0;
@@ -336,47 +477,33 @@ void sched_init(void) {
     user_mode_ticks = 0;
     cfs_min_vruntime = 0;
     /* Until the first user thread runs, SYSCALL/trap entries use the boot
-     * RSP0 stack programmed by gdt_init(). */
-    syscall_kstack_top = arch.gdt_get_rsp0();
+     * RSP0 stack programmed by gdt_init(). GS points at this CPU's conduit. */
+    sched_set_kstack_cpu(sched_bsp_cpu, arch.gdt_get_rsp0());
     active = 1;
 }
 
-/* CFS-lite: pick the RUNNABLE non-idle thread with the lowest vruntime.
- * Per-CPU idle TCBs are never CFS-picked; if nothing else is runnable (or
- * this is an AP in the first SMP slice), return this CPU's idle slot.
- * APs do not steal work yet (no cross-CPU runqueue / no user on AP). */
+/* CFS-lite with per-CPU runqueues: pick lowest-vruntime runnable on this CPU's
+ * RQ. If the local RQ is empty, steal from remote RQs — kernel threads first,
+ * then user — and migrate the victim onto this CPU. Idle TCBs are never
+ * CFS-picked. */
 static u32 pick_next(u32 from) {
-    u32 i;
-    u32 best = 0xFFFFFFFF;
-    u64 best_vr = 0;
-    u32 cpu = smp_cpuid();
+    u32 best;
+    u32 cpu = sched_cpu_index();
     u32 my_idle;
     (void)from;
-    if (cpu >= SCHED_MAX_CPUS) {
-        cpu = 0;
-    }
     my_idle = idle_slot[cpu];
     if (my_idle >= MAX_THREADS) {
         my_idle = 0;
     }
-    if (cpu != sched_bsp_cpu) {
-        return my_idle;
+    best = rq_pick_best(cpu, 2);
+    if (best != SCHED_CPU_NONE) {
+        return best;
     }
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (idle_mark[i]) {
-            continue;
-        }
-        if (threads[i].state == TCB_RUNNABLE) {
-            if (best == 0xFFFFFFFF || threads[i].vruntime < best_vr) {
-                best = i;
-                best_vr = threads[i].vruntime;
-            }
-        }
+    best = rq_steal(cpu);
+    if (best != SCHED_CPU_NONE) {
+        return best;
     }
-    if (best == 0xFFFFFFFF) {
-        return my_idle;
-    }
-    return best;
+    return my_idle;
 }
 
 /* ---------------------------------------------------------------------------
@@ -466,6 +593,8 @@ u32 kthread_create(u64 entry, u64 arg) {
     cwd_set_root(&threads[i]);
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].on_cpu = SCHED_CPU_NONE;
+    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -525,6 +654,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     cwd_set_root(&threads[i]);
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
+    threads[i].on_cpu = SCHED_CPU_NONE;
+    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -616,6 +747,8 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
             threads[i].sig_restorer[s] = threads[sched_cur()].sig_restorer[s];
         }
     }
+    threads[i].on_cpu = SCHED_CPU_NONE;
+    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -696,6 +829,8 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
         threads[i].sig_flags[s] = threads[sched_cur()].sig_flags[s];
         threads[i].sig_restorer[s] = threads[sched_cur()].sig_restorer[s];
     }
+    threads[i].on_cpu = SCHED_CPU_NONE;
+    rq_enqueue(i, sched_cpu_index());
     threads[i].state = TCB_RUNNABLE;
     return i;
 }
@@ -709,12 +844,13 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
  * and address space, then hand the CPU over. Both kernel stacks and kernel
  * text live in the shared higher half, so switching CR3 mid-path is safe. */
 static void schedule_tail(u32 prev, u32 next) {
+    u32 cpu = sched_cpu_index();
     u64 top = threads[next].kstack_top;
     if (top == 0) {
         top = arch.gdt_get_rsp0();      /* Slot 0 (boot/idle context) */
     }
     arch.gdt_set_rsp0(top);
-    syscall_kstack_top = top;
+    sched_set_kstack_cpu(cpu, top);
     if (threads[next].as_h != threads[prev].as_h) {
         mem.as_activate_h(threads[next].as_h);
     }
@@ -729,11 +865,16 @@ static void schedule_tail(u32 prev, u32 next) {
 
 /* Caller must hold sched_run_lock (IRQs off). On return the lock is released. */
 static void sched_switch_to(u32 next) {
+    u32 cpu = sched_cpu_index();
+    u32 prev;
     if (next == sched_cur()) {
         spin_unlock(&sched_run_lock);
         return;
     }
-    u32 prev = sched_cur();
+    prev = sched_cur();
+    threads[prev].on_cpu = SCHED_CPU_NONE;
+    threads[next].on_cpu = cpu;
+    threads[next].rq_cpu = cpu;
     sched_set_cur(next);
     schedule_tail(prev, next);
 }
@@ -916,6 +1057,7 @@ void kthread_exit(void) {
 
     u32 next = pick_next(self);
     if (next == self) {
+        threads[self].on_cpu = SCHED_CPU_NONE;
         spin_unlock(&sched_run_lock);
         for (;;) {
             arch.cpu_sti();
@@ -923,7 +1065,13 @@ void kthread_exit(void) {
             arch.cpu_cli();
         }
     }
-    sched_set_cur(next);
+    {
+        u32 cpu = sched_cpu_index();
+        threads[self].on_cpu = SCHED_CPU_NONE;
+        threads[next].on_cpu = cpu;
+        threads[next].rq_cpu = cpu;
+        sched_set_cur(next);
+    }
     schedule_tail(self, next);
     for (;;) {
         arch.cpu_sti();
@@ -1734,15 +1882,39 @@ u32 sched_has_pending_fatal(void) {
 }
 
 /* ---------------------------------------------------------------------------
- * SMP: release parked APs into per-CPU idle + local APIC timer.
+ * SMP: release parked APs into per-CPU idle + local APIC timer + steal.
  *
- * APs still do not steal user/kernel work. They load the kernel GDT/IDT,
- * LTR a per-CPU TSS (RSP0 + IST1), soft-enable LAPIC, unmask the periodic
- * timer, and sti;hlt in the idle TCB so -smp N smoke proves AP ticks.
+ * APs load GDT/IDT, LTR per-CPU TSS, enable LAPIC timer, install GS for the
+ * SYSCALL conduit, then idle. Timer (and post-halt pick_next) steals runnable
+ * work from remote runqueues — kernel first, then user.
  * ------------------------------------------------------------------------- */
 
 u32 sched_ap_waiting(void) {
     return ap_sched_go == 0 ? 1 : 0;
+}
+
+u64 sched_steal_total(void) {
+    u32 i;
+    u64 s = 0;
+    for (i = 0; i < SCHED_MAX_CPUS; i++) {
+        s = s + sched_steal_count[i];
+    }
+    return s;
+}
+
+u64 sched_steal_on_cpu(u32 cpu) {
+    if (cpu >= SCHED_MAX_CPUS) {
+        return 0;
+    }
+    return sched_steal_count[cpu];
+}
+
+u64 sched_steal_kernel_total(void) {
+    return sched_migrate_kernel;
+}
+
+u64 sched_steal_user_total(void) {
+    return sched_migrate_user;
 }
 
 void sched_ap_enter(u32 cpu) {
@@ -1774,19 +1946,33 @@ void sched_ap_enter(u32 cpu) {
     lapic_ap_timer_enable();
 
     cpu_current[cpu] = slot;
+    threads[slot].rq_cpu = cpu;
+    threads[slot].on_cpu = cpu;
     threads[slot].state = TCB_RUNNABLE;
+    /* SYSCALL conduit + TSS RSP0 before any stolen user thread can trap. */
+    {
+        u64 top = threads[slot].kstack_top;
+        if (top == 0) {
+            top = arch.gdt_get_rsp0();
+        }
+        arch.gdt_set_rsp0(top);
+        sched_set_kstack_cpu(cpu, top);
+    }
     ap_in_sched[cpu] = 1;
     ticks0 = lapic_get_cpu_ticks(cpu);
-    kprintf("[SMP] AP%u entered scheduler (idle slot %u, TSS+timer)\n",
+    kprintf("[SMP] AP%u entered scheduler (idle slot %u, TSS+timer+steal)
+",
             (u64)cpu, (u64)slot);
 
-    /* Idle with interrupts enabled: LAPIC timer (and only that, for now)
-     * wakes halt. pick_next still returns this CPU's idle — no steal. */
+    /* Idle with IRQs on: LAPIC timer runs sched_tick (may steal); after halt
+     * also try pick_next so work enqueued mid-tick is claimed promptly. */
     for (;;) {
         cpu_sti();
         cpu_halt();
         cpu_cli();
         ap_idle_wakeups[cpu] = ap_idle_wakeups[cpu] + 1;
+        spin_lock(&sched_run_lock);
+        sched_switch_to(pick_next(sched_cur()));
         (void)ticks0;
     }
 }
@@ -1836,6 +2022,8 @@ u32 sched_smp_start(void) {
         cwd_set_root(&threads[slot]);
         cfs_set_nice_fields(&threads[slot], 0);
         threads[slot].vruntime = 0;
+        threads[slot].rq_cpu = cpu;
+        threads[slot].on_cpu = SCHED_CPU_NONE;
         threads[slot].state = TCB_RUNNABLE;
         idle_mark[slot] = 1;
         idle_slot[cpu] = slot;

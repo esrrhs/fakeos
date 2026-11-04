@@ -202,6 +202,7 @@ flowchart TD
 - [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后停泊至 `sched_smp_start`。`make qemu-smp`（`-smp 2`）。
 - [x] **AP into scheduler (idle slice)**：per-CPU `current` + idle TCB + `sched_run_lock`；AP 加载内核 GDT/IDT 后进入调度器 idle（尚不偷任务）。自测日志 `[SMP] AP%u entered scheduler`。
 - [x] **AP timer + per-CPU TSS/IST**：共享 GDT 上每 CPU 独立 TSS（RSP0 + IST1）；AP trampoline/`cpu_enable_sse` 打开 OSFXSR；`LTR` 后 `lapic_ap_timer_enable`；ISR XMM 用 `movdqu`（leaf `hlt` 可能仅 8 字节对齐）。`-smp 2` 自测 `[PASS] AP LAPIC timer + per-CPU TSS/IST`。
+- [x] **Cross-CPU runqueue steal**：每线程 `rq_cpu`/`on_cpu`；本地 CFS 优先，空闲则从远端 RQ **先偷内核再偷用户**；`MSR_GS_BASE` 指向 per-CPU SYSCALL 导管（`[gs:0]` kstack / `[gs:8]` user RSP）。`-smp 2` 自测 `[PASS] Cross-CPU steal`。
 - [x] **Ext2 ftruncate(2)**：grow（sparse）/shrink（保留前缀并释放尾块）/zero；自测 `[EXT2] [PASS] ftruncate grow/shrink/zero`。
 - [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。
