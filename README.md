@@ -108,7 +108,7 @@ flowchart TD
 - [x] **执行体抽象（TCB）**：32 槽线程控制块，封装内核栈（buddy 分配 16 KiB）、入口/参数、状态与保存的 RSP；kmain 作为 0 号 idle 上下文。
 - [x] **汇编级上下文切换（`switch_to`）**：纯汇编 callee-saved RSP 上下文切换原语 + 新线程跳板；实现协作式 `sched_yield` 与基于 Local APIC tick 的**CFS-lite 加权公平抢占调度（nice/vruntime）**，`kthread_create/exit` 生命周期完整（退出回收栈且不参与轮转）。
 - [x] **同步原语**：xchg 测试-设置自旋锁与中断标志 save/restore 原语，切换窗口关中断防止 tick 嵌套切换破坏栈帧；并修复 spurious vector 255 滞留 ISR 会把 APIC PPR 抬到 15 级从而饿死定时器的问题（按 ISR 位条件 EOI，未用 LVT 源全部屏蔽）。
-- [x] **调度策略演进（CFS-lite）**：min-vruntime 加权公平调度 + `nice(2)`（nr 89）；等待队列/`kmutex` 已就绪。完整 Linux CFS 红黑树/组调度仍未做。
+- [x] **调度策略演进（CFS rbtree）**：每 CPU 侵入式红黑树按 vruntime 排序；tick/yield 记账后 requeue；`pick_next`/steal 走 leftmost；`nice(2)`（nr 89）。组调度（task_group）仍未做。
 - [x] **睡眠锁与原子操作**：自旋锁 + `kmutex`（owner/`trylock`、unlock 只唤醒一个）+ `ksem` 计数信号量（`down`/`up`/`trydown`）+ 类型化 `wait_queue_head`（`sleep`/`wake`/`wake_n`）；自测覆盖争用计数、waiter 进入 `TCB_SLEEPING`、信号量会合、`wake_n(1)` 再 wake-all。
 - [x] **用户进程与 PCB**：TCB 扩展 pid/地址空间句柄/用户态标志；每进程独立 PML4 低半空间 + 按需分页用户栈，经 `user_iret_trampoline`（IRETQ 帧）首次进入 Ring 3；切换时联动 CR3、TSS RSP0 与 SYSCALL 内核栈；内嵌极简 ELF64 装载器按 `PT_LOAD` 权限预置 RX/RW 段。
 - [x] **原生快速系统调用（`SYSCALL` / `SYSRET`）**：配置 `MSR_STAR`/`MSR_LSTAR`/`MSR_SFMASK`（屏蔽 IF|DF）与 `EFER.SCE`，GDT 布局满足 SYSRET 段选择子推导；`syscall_entry` 在逐线程内核栈上构建 128 字节寄存器帧（用户 RSP 随帧传递，抢占安全），派发 `write/getpid/yield/fork/exit`；`fork` 经 COW 地址空间克隆 + 帧拷贝实现父子双返回；Ring-3 定时器抢占、Ring-3 不可恢复故障单进程猎杀均有自测覆盖。
@@ -193,11 +193,12 @@ flowchart TD
 - [x] **ioctl TTY termios**：nr 16，`TIOCGPGRP`/`TIOCSPGRP`/`TCGETS`/`TCSETS`；真实 ICANON/ECHO/ISIG/ICRNL + `c_cc`；非 ICANON 走 raw 读。
 - [x] **shell session-leader / fg**：`setsid` + 本 pgid 前台（不再清成 0）；回收 TTY 走 ioctl/tcsetpgrp。
 - [x] **VMA_FILE 按需分页 + MAP_SHARED 写回**：文件 `mmap` 建 `VMA_FILE`，缺页填充；`MAP_SHARED` 跨 fork 保写，脏页在 munmap/进程退出时写回；`make qemu-modern` 试现代 virtio-blk/net + MSI-X。
-- [x] **CFS-lite 加权公平调度**：TCB `nice`/`weight`/`vruntime`；tick/yield 按 weight 记账；`pick_next` 选最低 vruntime；`nice(2)`；自测 nice0 ≥2× nice+10。
+- [x] **CFS rbtree 加权公平调度**：每 CPU 侵入式红黑树（vruntime, tid）；tick/yield 记账后 erase+insert；`pick_next`/steal 走 leftmost；`nice(2)`；自测 nice0 ≥2× nice+10 + 树不变量。
 - [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
+- [x] **CFS rbtree**：每 CPU `cfs_root` 红黑树替代线性扫描 `pick_next`；enqueue/dequeue 覆盖 sleep/wakeup/stop/cont/exit/steal；自测 `[PASS] CFS rbtree`（组调度仍未做）。
 - [x] **SMP MADT + AP park**：`arch/smp.c` MADT 发现 + `ap_tramp`；默认 `-smp 1` 不拉 AP；`-smp 2` 时 AP long-mode 后停泊，经 `sched_smp_start` 进入 per-CPU idle。
 - [x] **futex(2) basics**：`FUTEX_WAIT`/`FUTEX_WAKE`（+PRIVATE）；`sched_wakeup_n`；跨 fork `MAP_SHARED` 自测 `[U][PASS] futex WAIT/WAKE`。
 - [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后停泊至 `sched_smp_start`。`make qemu-smp`（`-smp 2`）。

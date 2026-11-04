@@ -192,7 +192,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: CFS rbtree + AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
@@ -207,7 +207,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - 4-level VMM toolchain (map/translate/unmap, NX): OK\n");
     kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");
-    kprintf("           - Kernel threads + CFS-lite (nice/vruntime) + spinlocks: OK\n");
+    kprintf("           - Kernel threads + CFS rbtree (per-CPU min-vruntime) + spinlocks: OK\n");
     kprintf("           - Per-CPU runqueues + cross-CPU steal (kernel then user): OK\n");
     kprintf("           - Load-aware enqueue + vector-34 IPI resched to idle CPUs: OK\n");
     kprintf("           - Signals: IRQ/IPI sigframes, stop/cont, pipe EINTR/SA_RESTART: OK\n");

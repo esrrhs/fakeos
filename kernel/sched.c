@@ -97,6 +97,11 @@ struct tcb {
     u64 vruntime;      /* CFS virtual runtime (nice-0 units)              */
     u32 rq_cpu;        /* Home runqueue CPU (SCHED_CPU_NONE if unbound)   */
     u32 on_cpu;        /* CPU currently executing this TCB, or NONE       */
+    u32 cfs_left;      /* Intrusive CFS rbtree (vruntime order)           */
+    u32 cfs_right;
+    u32 cfs_parent;
+    u32 cfs_color;     /* 0=red, 1=black                                   */
+    u32 cfs_on_rq;     /* 1 => linked in cfs_root[rq_cpu]                 */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
 };
@@ -141,6 +146,13 @@ static volatile u64 sched_ticks;
 static u32 next_pid = 1;             /* User process id allocator          */
 static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
 static u64 cfs_min_vruntime;         /* min vruntime among runnable tasks  */
+/* Roots must be NONE (not BSS 0): thread 0 is a valid TCB id, and virtio RX
+ * may sched_wakeup -> cfs_update_min before sched_init clears the trees. */
+static u32 cfs_root[SCHED_MAX_CPUS] = {
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+};
+static u32 cfs_nr[SCHED_MAX_CPUS];   /* runnable non-idle entities on RQ    */
 
 extern void kprintf(const char *fmt, ...);
 extern void spin_lock(volatile u32 *lock);
@@ -236,21 +248,10 @@ static u32 rq_cpu_is_idle(u32 cpu) {
 
 /* Runnable non-idle threads queued on `cpu` (includes the running one). */
 static u32 rq_load(u32 cpu) {
-    u32 i;
-    u32 n = 0;
-    for (i = 0; i < MAX_THREADS; i++) {
-        if (idle_mark[i]) {
-            continue;
-        }
-        if (threads[i].state != TCB_RUNNABLE) {
-            continue;
-        }
-        if (threads[i].rq_cpu != cpu) {
-            continue;
-        }
-        n = n + 1;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return 0;
     }
-    return n;
+    return cfs_nr[cpu];
 }
 
 /* Kick a remote CPU out of HLT / into pick_next via vector-34 IPI. */
@@ -303,146 +304,13 @@ static u32 rq_select_cpu(void) {
     return best;
 }
 
-/* Enqueue a newly-runnable (or created) thread onto `cpu`'s runqueue. */
-static void rq_enqueue(u32 id, u32 cpu) {
-    if (id >= MAX_THREADS) {
-        return;
-    }
-    if (cpu >= SCHED_MAX_CPUS) {
-        cpu = 0;
-    }
-    threads[id].rq_cpu = cpu;
-}
-
-/* Place a new runnable thread with load-aware balance; IPI idle remotes.
- * Caller must set state=RUNNABLE first so a kicked idle CPU can see it.
- * rq_cpu is cleared before the load walk so this thread is not self-counted. */
-static void rq_enqueue_balanced(u32 id) {
-    u32 cpu;
-    u32 local;
-    if (id >= MAX_THREADS) {
-        return;
-    }
-    local = sched_cpu_index();
-    threads[id].rq_cpu = SCHED_CPU_NONE;
-    cpu = rq_select_cpu();
-    rq_enqueue(id, cpu);
-    if (cpu != local) {
-        sched_balance_remote = sched_balance_remote + 1;
-        if (rq_cpu_is_idle(cpu)) {
-            sched_kick_cpu(cpu);
-        }
-    }
-}
-
-/* After a sleeper becomes RUNNABLE, kick its home RQ if that CPU is idle. */
-static void rq_kick_idle_home(u32 id) {
-    u32 cpu;
-    if (id >= MAX_THREADS) {
-        return;
-    }
-    cpu = threads[id].rq_cpu;
-    if (cpu >= SCHED_MAX_CPUS) {
-        return;
-    }
-    if (rq_cpu_is_idle(cpu)) {
-        sched_kick_cpu(cpu);
-    }
-}
-
-/* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
- * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
-static u32 rq_pick_best(u32 cpu, u32 want_user) {
-    u32 i;
-    u32 best = SCHED_CPU_NONE;
-    u64 best_vr = 0;
-    for (i = 0; i < MAX_THREADS; i++) {
-        if (idle_mark[i]) {
-            continue;
-        }
-        if (threads[i].state != TCB_RUNNABLE) {
-            continue;
-        }
-        if (threads[i].rq_cpu != cpu) {
-            continue;
-        }
-        if (threads[i].on_cpu != SCHED_CPU_NONE && threads[i].on_cpu != cpu) {
-            continue;
-        }
-        if (want_user == 0 && threads[i].is_user != 0) {
-            continue;
-        }
-        if (want_user == 1 && threads[i].is_user == 0) {
-            continue;
-        }
-        if (best == SCHED_CPU_NONE || threads[i].vruntime < best_vr) {
-            best = i;
-            best_vr = threads[i].vruntime;
-        }
-    }
-    return best;
-}
-
-/* Steal one runnable task from a remote RQ onto `cpu`. Prefer kernel, then
- * user. Only takes threads that are not currently executing (on_cpu NONE). */
-static u32 rq_steal(u32 cpu) {
-    u32 i;
-    u32 best;
-    u32 n = smp_cpu_count();
-    u32 pass;
-
-    if (n > SCHED_MAX_CPUS) {
-        n = SCHED_MAX_CPUS;
-    }
-    for (pass = 0; pass < 2; pass++) {
-        best = SCHED_CPU_NONE;
-        {
-            u64 best_vr = 0;
-            for (i = 0; i < MAX_THREADS; i++) {
-                u32 rq;
-                if (idle_mark[i]) {
-                    continue;
-                }
-                if (threads[i].state != TCB_RUNNABLE) {
-                    continue;
-                }
-                if (threads[i].on_cpu != SCHED_CPU_NONE) {
-                    continue;
-                }
-                rq = threads[i].rq_cpu;
-                if (rq == cpu || rq >= SCHED_MAX_CPUS) {
-                    continue;
-                }
-                if (pass == 0 && threads[i].is_user != 0) {
-                    continue;
-                }
-                if (pass == 1 && threads[i].is_user == 0) {
-                    continue;
-                }
-                if (best == SCHED_CPU_NONE || threads[i].vruntime < best_vr) {
-                    best = i;
-                    best_vr = threads[i].vruntime;
-                }
-            }
-        }
-        if (best != SCHED_CPU_NONE) {
-            threads[best].rq_cpu = cpu;
-            sched_steal_count[cpu] = sched_steal_count[cpu] + 1;
-            if (pass == 0) {
-                sched_migrate_kernel = sched_migrate_kernel + 1;
-            } else {
-                sched_migrate_user = sched_migrate_user + 1;
-            }
-            return best;
-        }
-    }
-    return SCHED_CPU_NONE;
-}
-
 enum {
     NICE_WIDTH     = 40,             /* nice -20..19                      */
     NICE0_WEIGHT   = 1024,           /* CFS weight at nice 0              */
-    VRUNTIME_SLICE = 1024            /* charge per tick/yield at nice 0   */
+    VRUNTIME_SLICE = 1024,           /* charge per tick/yield at nice 0   */
+    CFS_RB_NONE    = 0xFFFFFFFF,     /* null child/parent in index tree   */
+    CFS_RB_RED     = 0,
+    CFS_RB_BLACK   = 1
 };
 
 /* Approximate Linux nice->weight (each step ~1.25x). */
@@ -487,6 +355,471 @@ static void cfs_set_nice_fields(struct tcb *t, s32 nice) {
     t->weight = nice_to_weight(nice);
 }
 
+static void cfs_rb_clear_node(u32 id) {
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    threads[id].cfs_left = CFS_RB_NONE;
+    threads[id].cfs_right = CFS_RB_NONE;
+    threads[id].cfs_parent = CFS_RB_NONE;
+    threads[id].cfs_color = CFS_RB_RED;
+    threads[id].cfs_on_rq = 0;
+}
+
+/* Strict weak order for CFS entities: vruntime, then TCB id. */
+static u32 cfs_entity_before(u32 a, u32 b) {
+    if (threads[a].vruntime < threads[b].vruntime) {
+        return 1;
+    }
+    if (threads[a].vruntime > threads[b].vruntime) {
+        return 0;
+    }
+    return a < b;
+}
+
+static u32 cfs_rb_leftmost_from(u32 id) {
+    u32 guard = 0;
+    if (id >= MAX_THREADS) {
+        return CFS_RB_NONE;
+    }
+    while (threads[id].cfs_left < MAX_THREADS) {
+        id = threads[id].cfs_left;
+        guard = guard + 1;
+        if (guard > MAX_THREADS) {
+            return CFS_RB_NONE;
+        }
+    }
+    return id;
+}
+
+static u32 cfs_rq_leftmost(u32 cpu) {
+    u32 root;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return CFS_RB_NONE;
+    }
+    root = cfs_root[cpu];
+    if (root >= MAX_THREADS || !threads[root].cfs_on_rq) {
+        return CFS_RB_NONE;
+    }
+    return cfs_rb_leftmost_from(root);
+}
+
+static u32 cfs_rb_successor(u32 id) {
+    u32 p;
+    u32 guard = 0;
+    if (id >= MAX_THREADS) {
+        return CFS_RB_NONE;
+    }
+    if (threads[id].cfs_right < MAX_THREADS) {
+        return cfs_rb_leftmost_from(threads[id].cfs_right);
+    }
+    p = threads[id].cfs_parent;
+    while (p < MAX_THREADS && id == threads[p].cfs_right) {
+        id = p;
+        p = threads[p].cfs_parent;
+        guard = guard + 1;
+        if (guard > MAX_THREADS) {
+            return CFS_RB_NONE;
+        }
+    }
+    if (p >= MAX_THREADS) {
+        return CFS_RB_NONE;
+    }
+    return p;
+}
+
+static void cfs_rb_rotate_left(u32 cpu, u32 x) {
+    u32 y;
+    u32 yp;
+    if (cpu >= SCHED_MAX_CPUS || x >= MAX_THREADS) {
+        return;
+    }
+    y = threads[x].cfs_right;
+    if (y >= MAX_THREADS) {
+        return;
+    }
+    threads[x].cfs_right = threads[y].cfs_left;
+    if (threads[y].cfs_left != CFS_RB_NONE) {
+        threads[threads[y].cfs_left].cfs_parent = x;
+    }
+    yp = threads[x].cfs_parent;
+    threads[y].cfs_parent = yp;
+    if (yp == CFS_RB_NONE) {
+        cfs_root[cpu] = y;
+    } else if (x == threads[yp].cfs_left) {
+        threads[yp].cfs_left = y;
+    } else {
+        threads[yp].cfs_right = y;
+    }
+    threads[y].cfs_left = x;
+    threads[x].cfs_parent = y;
+}
+
+static void cfs_rb_rotate_right(u32 cpu, u32 x) {
+    u32 y;
+    u32 yp;
+    if (cpu >= SCHED_MAX_CPUS || x >= MAX_THREADS) {
+        return;
+    }
+    y = threads[x].cfs_left;
+    if (y >= MAX_THREADS) {
+        return;
+    }
+    threads[x].cfs_left = threads[y].cfs_right;
+    if (threads[y].cfs_right != CFS_RB_NONE) {
+        threads[threads[y].cfs_right].cfs_parent = x;
+    }
+    yp = threads[x].cfs_parent;
+    threads[y].cfs_parent = yp;
+    if (yp == CFS_RB_NONE) {
+        cfs_root[cpu] = y;
+    } else if (x == threads[yp].cfs_right) {
+        threads[yp].cfs_right = y;
+    } else {
+        threads[yp].cfs_left = y;
+    }
+    threads[y].cfs_right = x;
+    threads[x].cfs_parent = y;
+}
+
+static void cfs_rb_insert_fixup(u32 cpu, u32 z) {
+    while (z != CFS_RB_NONE && threads[z].cfs_parent != CFS_RB_NONE
+           && threads[threads[z].cfs_parent].cfs_color == CFS_RB_RED) {
+        u32 p = threads[z].cfs_parent;
+        u32 g = threads[p].cfs_parent;
+        u32 y;
+        if (g == CFS_RB_NONE) {
+            break;
+        }
+        if (p == threads[g].cfs_left) {
+            y = threads[g].cfs_right;
+            if (y != CFS_RB_NONE && threads[y].cfs_color == CFS_RB_RED) {
+                threads[p].cfs_color = CFS_RB_BLACK;
+                threads[y].cfs_color = CFS_RB_BLACK;
+                threads[g].cfs_color = CFS_RB_RED;
+                z = g;
+            } else {
+                if (z == threads[p].cfs_right) {
+                    z = p;
+                    cfs_rb_rotate_left(cpu, z);
+                    p = threads[z].cfs_parent;
+                    g = (p == CFS_RB_NONE) ? CFS_RB_NONE : threads[p].cfs_parent;
+                }
+                if (p != CFS_RB_NONE) {
+                    threads[p].cfs_color = CFS_RB_BLACK;
+                }
+                if (g != CFS_RB_NONE) {
+                    threads[g].cfs_color = CFS_RB_RED;
+                    cfs_rb_rotate_right(cpu, g);
+                }
+            }
+        } else {
+            y = threads[g].cfs_left;
+            if (y != CFS_RB_NONE && threads[y].cfs_color == CFS_RB_RED) {
+                threads[p].cfs_color = CFS_RB_BLACK;
+                threads[y].cfs_color = CFS_RB_BLACK;
+                threads[g].cfs_color = CFS_RB_RED;
+                z = g;
+            } else {
+                if (z == threads[p].cfs_left) {
+                    z = p;
+                    cfs_rb_rotate_right(cpu, z);
+                    p = threads[z].cfs_parent;
+                    g = (p == CFS_RB_NONE) ? CFS_RB_NONE : threads[p].cfs_parent;
+                }
+                if (p != CFS_RB_NONE) {
+                    threads[p].cfs_color = CFS_RB_BLACK;
+                }
+                if (g != CFS_RB_NONE) {
+                    threads[g].cfs_color = CFS_RB_RED;
+                    cfs_rb_rotate_left(cpu, g);
+                }
+            }
+        }
+    }
+    if (cfs_root[cpu] != CFS_RB_NONE) {
+        threads[cfs_root[cpu]].cfs_color = CFS_RB_BLACK;
+    }
+}
+
+static void cfs_rb_insert(u32 cpu, u32 z) {
+    u32 y;
+    u32 x;
+    if (cpu >= SCHED_MAX_CPUS || z >= MAX_THREADS) {
+        return;
+    }
+    if (threads[z].cfs_on_rq) {
+        return;
+    }
+    threads[z].cfs_left = CFS_RB_NONE;
+    threads[z].cfs_right = CFS_RB_NONE;
+    threads[z].cfs_parent = CFS_RB_NONE;
+    threads[z].cfs_color = CFS_RB_RED;
+    y = CFS_RB_NONE;
+    x = cfs_root[cpu];
+    while (x != CFS_RB_NONE) {
+        y = x;
+        if (cfs_entity_before(z, x)) {
+            x = threads[x].cfs_left;
+        } else {
+            x = threads[x].cfs_right;
+        }
+    }
+    threads[z].cfs_parent = y;
+    if (y == CFS_RB_NONE) {
+        cfs_root[cpu] = z;
+    } else if (cfs_entity_before(z, y)) {
+        threads[y].cfs_left = z;
+    } else {
+        threads[y].cfs_right = z;
+    }
+    threads[z].cfs_on_rq = 1;
+    cfs_nr[cpu] = cfs_nr[cpu] + 1;
+    cfs_rb_insert_fixup(cpu, z);
+}
+
+static void cfs_rb_transplant(u32 cpu, u32 u, u32 v) {
+    u32 up;
+    if (cpu >= SCHED_MAX_CPUS || u >= MAX_THREADS) {
+        return;
+    }
+    up = threads[u].cfs_parent;
+    if (up == CFS_RB_NONE) {
+        cfs_root[cpu] = v;
+    } else if (u == threads[up].cfs_left) {
+        threads[up].cfs_left = v;
+    } else {
+        threads[up].cfs_right = v;
+    }
+    if (v != CFS_RB_NONE) {
+        threads[v].cfs_parent = up;
+    }
+}
+
+static void cfs_rb_erase_fixup(u32 cpu, u32 x, u32 xp) {
+    while ((x == CFS_RB_NONE || threads[x].cfs_color == CFS_RB_BLACK)
+           && x != cfs_root[cpu]) {
+        u32 w;
+        if (xp == CFS_RB_NONE) {
+            break;
+        }
+        if (x == threads[xp].cfs_left) {
+            w = threads[xp].cfs_right;
+            if (w != CFS_RB_NONE && threads[w].cfs_color == CFS_RB_RED) {
+                threads[w].cfs_color = CFS_RB_BLACK;
+                threads[xp].cfs_color = CFS_RB_RED;
+                cfs_rb_rotate_left(cpu, xp);
+                w = threads[xp].cfs_right;
+            }
+            if (w == CFS_RB_NONE) {
+                x = xp;
+                xp = threads[x].cfs_parent;
+                continue;
+            }
+            if ((threads[w].cfs_left == CFS_RB_NONE
+                 || threads[threads[w].cfs_left].cfs_color == CFS_RB_BLACK)
+                && (threads[w].cfs_right == CFS_RB_NONE
+                    || threads[threads[w].cfs_right].cfs_color == CFS_RB_BLACK)) {
+                threads[w].cfs_color = CFS_RB_RED;
+                x = xp;
+                xp = threads[x].cfs_parent;
+            } else {
+                if (threads[w].cfs_right == CFS_RB_NONE
+                    || threads[threads[w].cfs_right].cfs_color == CFS_RB_BLACK) {
+                    if (threads[w].cfs_left != CFS_RB_NONE) {
+                        threads[threads[w].cfs_left].cfs_color = CFS_RB_BLACK;
+                    }
+                    threads[w].cfs_color = CFS_RB_RED;
+                    cfs_rb_rotate_right(cpu, w);
+                    w = threads[xp].cfs_right;
+                }
+                if (w != CFS_RB_NONE) {
+                    threads[w].cfs_color = threads[xp].cfs_color;
+                    if (threads[w].cfs_right != CFS_RB_NONE) {
+                        threads[threads[w].cfs_right].cfs_color = CFS_RB_BLACK;
+                    }
+                }
+                threads[xp].cfs_color = CFS_RB_BLACK;
+                cfs_rb_rotate_left(cpu, xp);
+                x = cfs_root[cpu];
+                xp = CFS_RB_NONE;
+            }
+        } else {
+            w = threads[xp].cfs_left;
+            if (w != CFS_RB_NONE && threads[w].cfs_color == CFS_RB_RED) {
+                threads[w].cfs_color = CFS_RB_BLACK;
+                threads[xp].cfs_color = CFS_RB_RED;
+                cfs_rb_rotate_right(cpu, xp);
+                w = threads[xp].cfs_left;
+            }
+            if (w == CFS_RB_NONE) {
+                x = xp;
+                xp = threads[x].cfs_parent;
+                continue;
+            }
+            if ((threads[w].cfs_right == CFS_RB_NONE
+                 || threads[threads[w].cfs_right].cfs_color == CFS_RB_BLACK)
+                && (threads[w].cfs_left == CFS_RB_NONE
+                    || threads[threads[w].cfs_left].cfs_color == CFS_RB_BLACK)) {
+                threads[w].cfs_color = CFS_RB_RED;
+                x = xp;
+                xp = threads[x].cfs_parent;
+            } else {
+                if (threads[w].cfs_left == CFS_RB_NONE
+                    || threads[threads[w].cfs_left].cfs_color == CFS_RB_BLACK) {
+                    if (threads[w].cfs_right != CFS_RB_NONE) {
+                        threads[threads[w].cfs_right].cfs_color = CFS_RB_BLACK;
+                    }
+                    threads[w].cfs_color = CFS_RB_RED;
+                    cfs_rb_rotate_left(cpu, w);
+                    w = threads[xp].cfs_left;
+                }
+                if (w != CFS_RB_NONE) {
+                    threads[w].cfs_color = threads[xp].cfs_color;
+                    if (threads[w].cfs_left != CFS_RB_NONE) {
+                        threads[threads[w].cfs_left].cfs_color = CFS_RB_BLACK;
+                    }
+                }
+                threads[xp].cfs_color = CFS_RB_BLACK;
+                cfs_rb_rotate_right(cpu, xp);
+                x = cfs_root[cpu];
+                xp = CFS_RB_NONE;
+            }
+        }
+    }
+    if (x != CFS_RB_NONE) {
+        threads[x].cfs_color = CFS_RB_BLACK;
+    }
+}
+
+static void cfs_rb_erase(u32 cpu, u32 z) {
+    u32 y;
+    u32 x;
+    u32 xp;
+    u32 y_orig_color;
+    if (cpu >= SCHED_MAX_CPUS || z >= MAX_THREADS) {
+        return;
+    }
+    if (!threads[z].cfs_on_rq) {
+        return;
+    }
+    y = z;
+    y_orig_color = threads[y].cfs_color;
+    if (threads[z].cfs_left == CFS_RB_NONE) {
+        x = threads[z].cfs_right;
+        xp = threads[z].cfs_parent;
+        cfs_rb_transplant(cpu, z, threads[z].cfs_right);
+    } else if (threads[z].cfs_right == CFS_RB_NONE) {
+        x = threads[z].cfs_left;
+        xp = threads[z].cfs_parent;
+        cfs_rb_transplant(cpu, z, threads[z].cfs_left);
+    } else {
+        y = cfs_rb_leftmost_from(threads[z].cfs_right);
+        y_orig_color = threads[y].cfs_color;
+        x = threads[y].cfs_right;
+        if (threads[y].cfs_parent == z) {
+            xp = y;
+            if (x != CFS_RB_NONE) {
+                threads[x].cfs_parent = y;
+            }
+        } else {
+            xp = threads[y].cfs_parent;
+            cfs_rb_transplant(cpu, y, threads[y].cfs_right);
+            threads[y].cfs_right = threads[z].cfs_right;
+            if (threads[y].cfs_right != CFS_RB_NONE) {
+                threads[threads[y].cfs_right].cfs_parent = y;
+            }
+        }
+        cfs_rb_transplant(cpu, z, y);
+        threads[y].cfs_left = threads[z].cfs_left;
+        if (threads[y].cfs_left != CFS_RB_NONE) {
+            threads[threads[y].cfs_left].cfs_parent = y;
+        }
+        threads[y].cfs_color = threads[z].cfs_color;
+    }
+    threads[z].cfs_on_rq = 0;
+    threads[z].cfs_left = CFS_RB_NONE;
+    threads[z].cfs_right = CFS_RB_NONE;
+    threads[z].cfs_parent = CFS_RB_NONE;
+    threads[z].cfs_color = CFS_RB_RED;
+    if (cfs_nr[cpu] > 0) {
+        cfs_nr[cpu] = cfs_nr[cpu] - 1;
+    }
+    if (y_orig_color == CFS_RB_BLACK) {
+        cfs_rb_erase_fixup(cpu, x, xp);
+    }
+}
+
+/* Link a runnable non-idle TCB into its home CPU CFS tree. */
+static void cfs_enqueue_locked(u32 id) {
+    u32 cpu;
+    if (id >= MAX_THREADS || tcb_is_idle(id)) {
+        return;
+    }
+    if (threads[id].state != TCB_RUNNABLE) {
+        return;
+    }
+    if (threads[id].cfs_on_rq) {
+        return;
+    }
+    cpu = threads[id].rq_cpu;
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = sched_cpu_index();
+        threads[id].rq_cpu = cpu;
+    }
+    cfs_rb_insert(cpu, id);
+}
+
+/* Unlink from whatever CPU tree currently holds this entity. */
+static void cfs_dequeue_locked(u32 id) {
+    u32 cpu;
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    if (!threads[id].cfs_on_rq) {
+        return;
+    }
+    cpu = threads[id].rq_cpu;
+    if (cpu >= SCHED_MAX_CPUS) {
+        /* Orphaned link: drop flag rather than mutating a random RQ. */
+        threads[id].cfs_on_rq = 0;
+        threads[id].cfs_left = CFS_RB_NONE;
+        threads[id].cfs_right = CFS_RB_NONE;
+        threads[id].cfs_parent = CFS_RB_NONE;
+        threads[id].cfs_color = CFS_RB_RED;
+        return;
+    }
+    cfs_rb_erase(cpu, id);
+}
+
+static void cfs_requeue_locked(u32 id) {
+    if (id >= MAX_THREADS || !threads[id].cfs_on_rq) {
+        return;
+    }
+    cfs_dequeue_locked(id);
+    if (threads[id].state == TCB_RUNNABLE && !tcb_is_idle(id)) {
+        cfs_enqueue_locked(id);
+    }
+}
+
+static void cfs_migrate_locked(u32 id, u32 new_cpu) {
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    if (new_cpu >= SCHED_MAX_CPUS) {
+        new_cpu = 0;
+    }
+    if (threads[id].cfs_on_rq) {
+        cfs_dequeue_locked(id);
+    }
+    threads[id].rq_cpu = new_cpu;
+    if (threads[id].state == TCB_RUNNABLE && !tcb_is_idle(id)) {
+        cfs_enqueue_locked(id);
+    } else {
+        threads[id].rq_cpu = new_cpu;
+    }
+}
+
 static void cfs_charge(u32 id, u64 units) {
     u64 w;
     if (id >= MAX_THREADS || tcb_is_idle(id)) {
@@ -499,7 +832,13 @@ static void cfs_charge(u32 id, u64 units) {
     if (w == 0) {
         w = NICE0_WEIGHT;
     }
+    if (threads[id].cfs_on_rq) {
+        cfs_dequeue_locked(id);
+    }
     threads[id].vruntime = threads[id].vruntime + (units * (u64)NICE0_WEIGHT) / w;
+    if (threads[id].state == TCB_RUNNABLE) {
+        cfs_enqueue_locked(id);
+    }
 }
 
 static void cfs_place_entity(u32 id) {
@@ -512,23 +851,203 @@ static void cfs_place_entity(u32 id) {
 }
 
 static void cfs_update_min(void) {
-    u32 i;
+    u32 c;
+    u32 n = smp_cpu_count();
     u64 minv = 0xFFFFFFFFFFFFFFFFULL;
     u32 found = 0;
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (idle_mark[i]) {
+    if (!active) {
+        return;
+    }
+    if (n == 0 || n > SCHED_MAX_CPUS) {
+        n = SCHED_MAX_CPUS;
+    }
+    for (c = 0; c < n; c++) {
+        u32 id = cfs_rq_leftmost(c);
+        if (id == CFS_RB_NONE) {
             continue;
         }
-        if (threads[i].state == TCB_RUNNABLE) {
-            if (!found || threads[i].vruntime < minv) {
-                minv = threads[i].vruntime;
-                found = 1;
-            }
+        if (!found || threads[id].vruntime < minv) {
+            minv = threads[id].vruntime;
+            found = 1;
         }
     }
     if (found) {
         cfs_min_vruntime = minv;
     }
+}
+
+/* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
+ * Skips threads running on a foreign CPU (on_cpu set and != cpu). */
+static u32 rq_pick_best(u32 cpu, u32 want_user) {
+    u32 id;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return SCHED_CPU_NONE;
+    }
+    id = cfs_rq_leftmost(cpu);
+    while (id != CFS_RB_NONE) {
+        if (threads[id].on_cpu != SCHED_CPU_NONE && threads[id].on_cpu != cpu) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        if (want_user == 0 && threads[id].is_user != 0) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        if (want_user == 1 && threads[id].is_user == 0) {
+            id = cfs_rb_successor(id);
+            continue;
+        }
+        return id;
+    }
+    return SCHED_CPU_NONE;
+}
+
+/* Steal one runnable task from a remote RQ onto `cpu`. Prefer kernel, then
+ * user. Only takes threads that are not currently executing (on_cpu NONE). */
+static u32 rq_steal(u32 cpu) {
+    u32 n = smp_cpu_count();
+    u32 pass;
+    u32 remote;
+
+    if (n > SCHED_MAX_CPUS) {
+        n = SCHED_MAX_CPUS;
+    }
+    for (pass = 0; pass < 2; pass++) {
+        for (remote = 0; remote < n; remote++) {
+            u32 id;
+            if (remote == cpu) {
+                continue;
+            }
+            id = cfs_rq_leftmost(remote);
+            while (id != CFS_RB_NONE) {
+                if (threads[id].on_cpu != SCHED_CPU_NONE) {
+                    id = cfs_rb_successor(id);
+                    continue;
+                }
+                if (pass == 0 && threads[id].is_user != 0) {
+                    id = cfs_rb_successor(id);
+                    continue;
+                }
+                if (pass == 1 && threads[id].is_user == 0) {
+                    id = cfs_rb_successor(id);
+                    continue;
+                }
+                cfs_migrate_locked(id, cpu);
+                sched_steal_count[cpu] = sched_steal_count[cpu] + 1;
+                if (pass == 0) {
+                    sched_migrate_kernel = sched_migrate_kernel + 1;
+                } else {
+                    sched_migrate_user = sched_migrate_user + 1;
+                }
+                return id;
+            }
+        }
+    }
+    return SCHED_CPU_NONE;
+}
+
+/* Enqueue a newly-runnable (or created) thread onto `cpu`'s runqueue. */
+static void rq_enqueue(u32 id, u32 cpu) {
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    if (cpu >= SCHED_MAX_CPUS) {
+        cpu = 0;
+    }
+    if (threads[id].cfs_on_rq) {
+        cfs_dequeue_locked(id);
+    }
+    threads[id].rq_cpu = cpu;
+    if (threads[id].state == TCB_RUNNABLE && !tcb_is_idle(id)) {
+        cfs_enqueue_locked(id);
+    }
+}
+
+/* Place a new runnable thread with load-aware balance; IPI idle remotes.
+ * Caller must set state=RUNNABLE first so a kicked idle CPU can see it.
+ * Takes sched_run_lock: create paths are otherwise racy vs tick CFS tree ops.
+ * rq_cpu is cleared before the load walk so this thread is not self-counted. */
+static void rq_enqueue_balanced(u32 id) {
+    u32 cpu;
+    u32 local;
+    u64 flags;
+    u32 kick = 0;
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    local = sched_cpu_index();
+    if (threads[id].cfs_on_rq) {
+        cfs_dequeue_locked(id);
+    }
+    threads[id].rq_cpu = SCHED_CPU_NONE;
+    cpu = rq_select_cpu();
+    rq_enqueue(id, cpu);
+    if (cpu != local) {
+        sched_balance_remote = sched_balance_remote + 1;
+        if (rq_cpu_is_idle(cpu)) {
+            kick = 1;
+        }
+    }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    if (kick) {
+        sched_kick_cpu(cpu);
+    }
+}
+
+/* After a sleeper becomes RUNNABLE, kick its home RQ if that CPU is idle. */
+static void rq_kick_idle_home(u32 id) {
+    u32 cpu;
+    if (id >= MAX_THREADS) {
+        return;
+    }
+    cpu = threads[id].rq_cpu;
+    if (cpu >= SCHED_MAX_CPUS) {
+        return;
+    }
+    if (rq_cpu_is_idle(cpu)) {
+        sched_kick_cpu(cpu);
+    }
+}
+
+/* Validate every per-CPU CFS tree: sorted inorder, nr match, on_rq flags. */
+u32 sched_cfs_rb_check(void) {
+    u32 c;
+    u32 ok = 1;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    for (c = 0; c < SCHED_MAX_CPUS; c++) {
+        u32 id;
+        u32 prev = CFS_RB_NONE;
+        u32 seen = 0;
+        id = cfs_rq_leftmost(c);
+        while (id != CFS_RB_NONE) {
+            if (!threads[id].cfs_on_rq || threads[id].rq_cpu != c
+                || threads[id].state != TCB_RUNNABLE || tcb_is_idle(id)) {
+                ok = 0;
+                break;
+            }
+            if (prev != CFS_RB_NONE && !cfs_entity_before(prev, id)) {
+                ok = 0;
+                break;
+            }
+            prev = id;
+            seen = seen + 1;
+            id = cfs_rb_successor(id);
+        }
+        if (ok == 0) {
+            break;
+        }
+        if (seen != cfs_nr[c]) {
+            ok = 0;
+            break;
+        }
+    }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    return ok;
 }
 
 /* ---------------------------------------------------------------------------
@@ -568,6 +1087,11 @@ void sched_init(void) {
         threads[i].vruntime = 0;
         threads[i].rq_cpu = SCHED_CPU_NONE;
         threads[i].on_cpu = SCHED_CPU_NONE;
+        threads[i].cfs_left = CFS_RB_NONE;
+        threads[i].cfs_right = CFS_RB_NONE;
+        threads[i].cfs_parent = CFS_RB_NONE;
+        threads[i].cfs_color = CFS_RB_RED;
+        threads[i].cfs_on_rq = 0;
         threads[i].sig_ignore = (1u << 17); /* SIGCHLD ignored by default */
         {
             u32 s;
@@ -596,6 +1120,8 @@ void sched_init(void) {
         ap_in_sched[i] = 0;
         ap_idle_wakeups[i] = 0;
         sched_steal_count[i] = 0;
+        cfs_root[i] = CFS_RB_NONE;
+        cfs_nr[i] = 0;
         syscall_pcpu[i][0] = 0;
         syscall_pcpu[i][1] = 0;
     }
@@ -1017,7 +1543,9 @@ static void sched_switch_to(u32 next) {
     prev = sched_cur();
     threads[prev].on_cpu = SCHED_CPU_NONE;
     threads[next].on_cpu = cpu;
-    threads[next].rq_cpu = cpu;
+    if (threads[next].rq_cpu != cpu) {
+        cfs_migrate_locked(next, cpu);
+    }
     sched_set_cur(next);
     schedule_tail(prev, next);
 }
@@ -1047,6 +1575,7 @@ void sched_sleep(u64 chan) {
     arch.cpu_cli();
     spin_lock(&sched_run_lock);
     threads[sched_cur()].wait_chan = chan;
+    cfs_dequeue_locked(sched_cur());
     threads[sched_cur()].state = TCB_SLEEPING;
     sched_switch_to(pick_next(sched_cur()));
     /* Woken: state is RUNNABLE and wait_chan cleared by wakeup. */
@@ -1061,6 +1590,7 @@ void sched_sleep_cli(u64 chan) {
     }
     spin_lock(&sched_run_lock);
     threads[sched_cur()].wait_chan = chan;
+    cfs_dequeue_locked(sched_cur());
     threads[sched_cur()].state = TCB_SLEEPING;
     sched_switch_to(pick_next(sched_cur()));
 }
@@ -1082,6 +1612,7 @@ void sched_wakeup(u64 chan) {
             threads[i].wait_chan = 0;
             cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
+            cfs_enqueue_locked(i);
             cpu = threads[i].rq_cpu;
             if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
                 kick_mask = kick_mask | (1u << cpu);
@@ -1118,6 +1649,7 @@ u32 sched_wakeup_n(u64 chan, u32 n) {
             threads[i].wait_chan = 0;
             cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
+            cfs_enqueue_locked(i);
             cpu = threads[i].rq_cpu;
             if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
                 kick_mask = kick_mask | (1u << cpu);
@@ -1159,6 +1691,7 @@ static u32 wake_chan_locked(u64 chan, u32 n, u32 *kick_mask) {
             threads[i].wait_chan = 0;
             cfs_place_entity(i);
             threads[i].state = TCB_RUNNABLE;
+            cfs_enqueue_locked(i);
             cpu = threads[i].rq_cpu;
             if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
                 *kick_mask = *kick_mask | (1u << cpu);
@@ -1194,6 +1727,7 @@ void kmutex_lock(struct kmutex *m) {
     spin_lock(&sched_run_lock);
     while (m->locked) {
         threads[sched_cur()].wait_chan = (u64)m;
+        cfs_dequeue_locked(sched_cur());
         threads[sched_cur()].state = TCB_SLEEPING;
         sched_switch_to(pick_next(sched_cur()));
         spin_lock(&sched_run_lock);
@@ -1241,6 +1775,7 @@ void ksem_down(struct ksem *s) {
     spin_lock(&sched_run_lock);
     while (s->count <= 0) {
         threads[sched_cur()].wait_chan = (u64)s;
+        cfs_dequeue_locked(sched_cur());
         threads[sched_cur()].state = TCB_SLEEPING;
         sched_switch_to(pick_next(sched_cur()));
         spin_lock(&sched_run_lock);
@@ -1310,6 +1845,7 @@ void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
     m->owner = 0xFFFFFFFFu;
     wake_chan_locked((u64)m, 1, &kick_mask);
     threads[self].wait_chan = (u64)wq;
+    cfs_dequeue_locked(self);
     threads[self].state = TCB_SLEEPING;
     /* Kick mutex waiters before sleeping: schedule_tail drops run_lock. */
     spin_unlock(&sched_run_lock);
@@ -1357,6 +1893,7 @@ void kthread_exit(void) {
         && threads[self].tid != threads[self].pid) {
         free_slot = 1;
     }
+    cfs_dequeue_locked(self);
     threads[self].state = free_slot ? TCB_FREE : TCB_DEAD;
     if (free_slot) {
         threads[self].pid = 0;
@@ -1800,9 +2337,15 @@ u32 sched_should_eintr(void) {
 u32 sched_signal_send(u32 pid, u32 sig) {
     u32 i;
     u32 found = 0;
+    u64 flags;
+    u32 wake_parents[MAX_THREADS];
+    u32 n_wake = 0;
+    u32 kick_mask = 0;
     if (sig > 31) {
         return 0;
     }
+    flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
     for (i = 0; i < MAX_THREADS; i++) {
         if (threads[i].pid == pid && threads[i].state != TCB_FREE
             && threads[i].state != TCB_DEAD) {
@@ -1813,12 +2356,19 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             /* SIGCONT: resume stopped tasks even when ignored; notify waiters. */
             if (sig == SIGCONT_N) {
                 if (threads[i].state == TCB_STOPPED) {
-                    threads[i].state = TCB_RUNNABLE;
+                    u32 cpu;
                     threads[i].wait_chan = 0;
                     threads[i].cont_notify = 1;
-                    rq_kick_idle_home(i);
-                    if (threads[i].ppid != 0) {
-                        sched_wakeup(sched_wait4_chan(threads[i].ppid));
+                    cfs_place_entity(i);
+                    threads[i].state = TCB_RUNNABLE;
+                    cfs_enqueue_locked(i);
+                    cpu = threads[i].rq_cpu;
+                    if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                        kick_mask = kick_mask | (1u << cpu);
+                    }
+                    if (threads[i].ppid != 0 && n_wake < MAX_THREADS) {
+                        wake_parents[n_wake] = threads[i].ppid;
+                        n_wake = n_wake + 1;
                     }
                 }
                 threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
@@ -1827,14 +2377,26 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             threads[i].pending_sigs |= (1u << sig);
             /* Wake sleepers so they can observe stop/kill/cont. */
             if (threads[i].state == TCB_SLEEPING) {
+                u32 cpu;
                 threads[i].wait_chan = 0;
+                cfs_place_entity(i);
                 threads[i].state = TCB_RUNNABLE;
-                rq_kick_idle_home(i);
+                cfs_enqueue_locked(i);
+                cpu = threads[i].rq_cpu;
+                if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                    kick_mask = kick_mask | (1u << cpu);
+                }
             }
             /* KILL must not leave a process stuck STOPPED. */
             if (sig == SIGKILL_N && threads[i].state == TCB_STOPPED) {
+                u32 cpu;
+                cfs_place_entity(i);
                 threads[i].state = TCB_RUNNABLE;
-                rq_kick_idle_home(i);
+                cfs_enqueue_locked(i);
+                cpu = threads[i].rq_cpu;
+                if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                    kick_mask = kick_mask | (1u << cpu);
+                }
             }
             /* Running on a remote CPU: IPI so stop/handler/kill is prompt. */
             if (sig != 0 && threads[i].on_cpu != SCHED_CPU_NONE
@@ -1846,25 +2408,45 @@ u32 sched_signal_send(u32 pid, u32 sig) {
                     sched_ipi_resched = sched_ipi_resched + 1;
                 }
             } else if (sig == SIGCONT_N && threads[i].state == TCB_RUNNABLE) {
-                rq_kick_idle_home(i);
+                u32 cpu = threads[i].rq_cpu;
+                if (cpu < SCHED_MAX_CPUS && rq_cpu_is_idle(cpu)) {
+                    kick_mask = kick_mask | (1u << cpu);
+                }
             }
         }
+    }
+    cfs_update_min();
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    if (kick_mask != 0) {
+        kick_idle_cpus(kick_mask);
+    }
+    for (i = 0; i < n_wake; i++) {
+        sched_wakeup(sched_wait4_chan(wake_parents[i]));
     }
     return found;
 }
 
 /* Stop the sched_cur() process and switch away until SIGCONT. */
 void sched_stop_self(u32 sig) {
-    u32 ppid = threads[sched_cur()].ppid;
-    threads[sched_cur()].state = TCB_STOPPED;
-    threads[sched_cur()].wait_chan = 0;
-    threads[sched_cur()].stop_sig = sig;
-    threads[sched_cur()].stop_notify = 1;
-    threads[sched_cur()].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
+    u32 self;
+    u32 ppid;
+    arch.cpu_cli();
+    spin_lock(&sched_run_lock);
+    self = sched_cur();
+    ppid = threads[self].ppid;
+    cfs_dequeue_locked(self);
+    threads[self].state = TCB_STOPPED;
+    threads[self].wait_chan = 0;
+    threads[self].stop_sig = sig;
+    threads[self].stop_notify = 1;
+    threads[self].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
                                        | (1u << SIGTTIN_N) | (1u << SIGTTOU_N));
+    spin_unlock(&sched_run_lock);
     if (ppid != 0) {
         sched_wakeup(sched_wait4_chan(ppid));
     }
+    spin_lock(&sched_run_lock);
     sched_switch_to(pick_next(sched_cur()));
 }
 

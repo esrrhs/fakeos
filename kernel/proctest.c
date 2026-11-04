@@ -20,6 +20,7 @@ extern void sched_init(void);
 extern u64 sched_tick_count(void);
 extern u32 sched_thread_state(u32 id);
 extern u32 sched_set_nice(u32 id, s32 nice);
+extern u32 sched_cfs_rb_check(void);
 extern u32 sched_current_id(void);
 extern u32 smp_cpuid(void);
 extern u32 smp_cpu_count(void);
@@ -830,9 +831,9 @@ static int test_sock_kmutex_blocking(void) {
 }
 
 void sched_selftest(void) {
-    kprintf("\n[SCHED] Kernel Threads & CFS-lite Weighted Fair Scheduler Online:\n");
+    kprintf("\n[SCHED] Kernel Threads & CFS rbtree Weighted Fair Scheduler Online:\n");
     kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
-    kprintf("      Switch       : callee-saved RSP context, min-vruntime + nice weights\n");
+    kprintf("      Switch       : callee-saved RSP context, per-CPU CFS rbtree + nice weights\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
     kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");
 
@@ -852,6 +853,11 @@ void sched_selftest(void) {
     }
     if (test_weighted_fair()) {
         kprintf("      [PASS] CFS-lite: nice0 spinner got >=2x work of nice+10\n");
+    }
+    if (sched_cfs_rb_check()) {
+        kprintf("      [PASS] CFS rbtree: per-CPU min-vruntime order + nr\n");
+    } else {
+        kprintf("      [FAIL] CFS rbtree invariant check\n");
     }
     if (test_kmutex_workers()) {
         kprintf("      [PASS] kmutex sleep-lock: %u x %u increments + trylock\n",
