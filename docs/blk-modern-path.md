@@ -373,12 +373,20 @@ alias of `/bin/env` (same ELF published twice). Focused virtio login smoke
 covers `/bin/readlink`, `/bin/realpath`, `/bin/printenv`, `xargs /bin/readlink`,
 plus prior interactive greens (smp 1/2).
 
+## /bin/date + /bin/stat — landed
+
+Thin utils (not shell builtins): `date [+%s]` prints `clock_gettime(CLOCK_REALTIME)`
+seconds (boot-relative; no RTC yet), and `stat [-L] FILE...` prints
+type/mode/ino/nlink/uid/gid/size/mtime via `lstat(2)` (default) or `stat(2)`
+with `-L`. Focused virtio login smoke covers `/bin/date`, `/bin/stat` on file
+and symlink (+ `-L`), `xargs /bin/stat`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin utils (`stat`, `date`, `mktemp`,
-   `nl`/`fold`/`rev`/`paste`). Avoid deep jbd / Ext2-redirect duplex races /
-   CFS nesting unless a clear bite-sized fix.
+4. More daily-driver gaps: thin utils (`mktemp`, `nl`/`fold`/`rev`/`paste`).
+   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
+   bite-sized fix.

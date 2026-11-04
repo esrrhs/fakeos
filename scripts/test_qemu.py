@@ -433,6 +433,8 @@ def main():
         "[FS] published /bin/sync (",
         "[FS] published /bin/readlink (",
         "[FS] published /bin/realpath (",
+        "[FS] published /bin/date (",
+        "[FS] published /bin/stat (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
