@@ -305,6 +305,7 @@ flowchart TD
 - [x] **shell set -o**：`set -o`/`+o` 列表；`set -o|+o errexit|nounset`；保留 `set -e/-u`。virtio login smoke（smp 1/2）。
 - [x] **shell type -t**：`type [-t] NAME…` 输出 alias/keyword/function/builtin/file；`hash -r` 已有故未动。virtio login smoke（smp 1/2）。
 - [x] **shell export/readonly -p**：`export -p`/`readonly -p` 可移植列表（与裸列表同形）；`-n` 仍可用。virtio login smoke（smp 1/2）。
+- [x] **shell cd -L/-P**：接受 `-L`/`-P`（内核 cwd 已是物理路径，作 no-op）；`cd -` 仍为 OLDPWD。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

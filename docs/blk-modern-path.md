@@ -1335,6 +1335,15 @@ skipped shell printf (larger), `cd -L/-P` (cwd already physical), and
 `printenv` (env binary already aliases). Focused virtio login smoke covers
 `-p` lists + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell cd -L/-P — landed
+
+Thin `cd [-L|-P] [DIR|-]` (no new `/bin` dent). Kernel cwd is already
+physical (same as `pwd -L/-P`); flags accepted as no-ops. Bare `-` remains
+OLDPWD and is not treated as a flag. Glued `-LP`/`-PL` ok. Focused virtio
+login smoke covers `cd -P /tmp`, `cd -L`, `cd -` + prior greens (smp 1/2).
+Ramfs `/bin` dents ~114/128. Shell printf mirror still larger — defer unless
+clearly bite-sized.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1342,7 +1351,7 @@ skipped shell printf (larger), `cd -L/-P` (cwd already physical), and
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `cd -L/-P` accept flags, shell printf mirror,
-   or other small `/bin`/shell bites (skip large `getopts` / here-doc / trap
-   unless bite-sized; `ulimit` still needs kernel rlimit). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: shell printf mirror of `/bin/printf` if still
+   bite-sized, or other small `/bin`/shell bites (skip large `getopts` /
+   here-doc / trap unless bite-sized; `ulimit` still needs kernel rlimit).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
