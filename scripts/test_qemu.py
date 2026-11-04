@@ -456,6 +456,7 @@ def main():
         "[FS] published /bin/md5sum (",
         "[FS] published /bin/sha1sum (",
         "[FS] published /bin/sha256sum (",
+        "[FS] published /bin/base64 (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

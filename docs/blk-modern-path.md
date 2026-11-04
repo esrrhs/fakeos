@@ -498,6 +498,15 @@ Streaming 64-byte blocks; compact argv (no flags). Focused virtio login smoke
 covers empty/`abc`/`hello` stdin digests, file operand, plus prior interactive
 greens (smp 1/2). Ramfs `/bin` dents 78/128.
 
+## /bin/base64 — landed
+
+Thin encode/decode. `base64 [FILE...]` encodes with 76-column wrap and a
+trailing newline (empty input stays empty). `base64 -d [FILE...]` decodes,
+ignoring whitespace and rejecting other non-alphabet. stdin if no FILE;
+compact `-d` argv. Focused virtio login smoke covers encode/decode round-trip
+(`hello`/`abc`/pad cases), file operand, plus prior interactive greens
+(smp 1/2). Ramfs `/bin` dents 79/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -505,6 +514,6 @@ greens (smp 1/2). Ramfs `/bin` dents 78/128.
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `base64`, `factor`; checksum trio already present) — prefer small
+   (e.g. `factor`; `base64` + checksum trio already present) — prefer small
    coherent chunks. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
    unless a clear bite-sized fix.
