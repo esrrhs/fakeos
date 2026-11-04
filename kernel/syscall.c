@@ -74,6 +74,11 @@ extern u64 sys_nice(u64 inc);
 extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
 extern u64 sys_umask(u64 mask);
+extern u64 sys_chown(u64 path, u64 uid, u64 gid);
+extern u64 sys_getuid(void);
+extern u64 sys_geteuid(void);
+extern u64 sys_getgid(void);
+extern u64 sys_getegid(void);
 extern u64 sys_gettid(void);
 extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
 extern u64 sys_set_tid_address(u64 tidptr);
@@ -153,7 +158,12 @@ enum {
     SC_YIELD = 24,
     SC_GETPID = 39,
     SC_CHMOD = 90,
+    SC_CHOWN = 92,
     SC_UMASK = 95,
+    SC_GETUID = 102,
+    SC_GETGID = 104,
+    SC_GETEUID = 107,
+    SC_GETEGID = 108,
     SC_GETTID = 186,
     SC_CLONE = 56,
     SC_FORK  = 57,
@@ -445,8 +455,23 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_CHMOD) {
         return sys_chmod(f->rdi, f->rsi);
     }
+    if (f->rax == SC_CHOWN) {
+        return sys_chown(f->rdi, f->rsi, f->rdx);
+    }
     if (f->rax == SC_UMASK) {
         return sys_umask(f->rdi);
+    }
+    if (f->rax == SC_GETUID) {
+        return sys_getuid();
+    }
+    if (f->rax == SC_GETEUID) {
+        return sys_geteuid();
+    }
+    if (f->rax == SC_GETGID) {
+        return sys_getgid();
+    }
+    if (f->rax == SC_GETEGID) {
+        return sys_getegid();
     }
     if (f->rax == SC_GETTID) {
         return sys_gettid();

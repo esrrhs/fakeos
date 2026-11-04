@@ -110,6 +110,10 @@ struct tcb {
     char environ[256]; /* /proc/self/environ: NUL-separated NAME=val      */
     u32 environ_len;   /* bytes of environ that are meaningful            */
     u32 umask;         /* file-creation mode mask (POSIX; default 0022)   */
+    u32 uid;           /* real uid (getuid); default 0 = root             */
+    u32 euid;          /* effective uid (geteuid)                         */
+    u32 gid;           /* real gid (getgid)                               */
+    u32 egid;          /* effective gid (getegid)                         */
 };
 
 /* Sleeping locks: wait channel is the object's own address.
@@ -1982,6 +1986,10 @@ void sched_init(void) {
         threads[i].cwd[0] = '/';
         threads[i].cwd[1] = 0;
         threads[i].umask = 0x12;
+        threads[i].uid = 0;
+        threads[i].euid = 0;
+        threads[i].gid = 0;
+        threads[i].egid = 0;
         threads[i].id = i;
         idle_mark[i] = 0;
     }
@@ -2137,6 +2145,10 @@ u32 kthread_create(u64 entry, u64 arg) {
     fd_table_clear(&threads[i]);
     cwd_set_root(&threads[i]);
     threads[i].umask = 0x12; /* 0022 */
+    threads[i].uid = 0;
+    threads[i].euid = 0;
+    threads[i].gid = 0;
+    threads[i].egid = 0;
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
@@ -2204,6 +2216,10 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     fd_table_install_console(&threads[i]);
     cwd_set_root(&threads[i]);
     threads[i].umask = 0x12; /* 0022 */
+    threads[i].uid = 0;
+    threads[i].euid = 0;
+    threads[i].gid = 0;
+    threads[i].egid = 0;
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
@@ -2301,6 +2317,10 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     }
     cwd_copy_from(&threads[i], threads[sched_cur()].cwd);
     threads[i].umask = threads[sched_cur()].umask;
+    threads[i].uid = threads[sched_cur()].uid;
+    threads[i].euid = threads[sched_cur()].euid;
+    threads[i].gid = threads[sched_cur()].gid;
+    threads[i].egid = threads[sched_cur()].egid;
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = threads[sched_cur()].tg;
@@ -2400,6 +2420,10 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     }
     cwd_copy_from(&threads[i], threads[sched_cur()].cwd);
     threads[i].umask = threads[sched_cur()].umask;
+    threads[i].uid = threads[sched_cur()].uid;
+    threads[i].euid = threads[sched_cur()].euid;
+    threads[i].gid = threads[sched_cur()].gid;
+    threads[i].egid = threads[sched_cur()].egid;
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = threads[sched_cur()].tg;
@@ -3167,6 +3191,21 @@ u32 sched_umask_set(u32 mask) {
     return old;
 }
 
+u32 sched_current_uid(void) {
+    return threads[sched_cur()].uid;
+}
+
+u32 sched_current_euid(void) {
+    return threads[sched_cur()].euid;
+}
+
+u32 sched_current_gid(void) {
+    return threads[sched_cur()].gid;
+}
+
+u32 sched_current_egid(void) {
+    return threads[sched_cur()].egid;
+}
 
 u32 sched_current_ppid(void) {
     return threads[sched_cur()].ppid;

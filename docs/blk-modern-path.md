@@ -152,9 +152,19 @@ record layout (`d_type@18`, `d_name@19`) so `ls` works on `/home`. `/bin/ls`
 accepts file operands (`AT_EMPTY_PATH` fstat). Focused virtio login smoke covers
 chmod/umask/`ls -l` on Ramfs+Ext2 plus login/`uname`/`udptest`/`env` (smp 1/2).
 
+## ls -l mtime + getuid/chown stubs — landed
+
+`struct stat` now carries `st_uid`/`st_gid` and atime/mtime/ctime (seconds;
+boot-relative like `clock_gettime(REALTIME)`). Ramfs inodes store uid/gid/mtime;
+Ext2 create/write stamps `i_uid`/`i_gid`/`i_mtime` (and `i_ctime` on chown).
+Syscalls: `getuid`/`geteuid`/`getgid`/`getegid` (nr 102/107/104/108) and
+`chown` (nr 92; `(u32)-1` leaves a field unchanged). Shell builtins: `id`,
+`chown UID[:GID] FILE...`. `/bin/ls -l` prints `mode uid gid size mtime name`.
+Init smoke: `[U][PASS] getuid/chown/mtime`. Focused virtio login smoke covers
+id/chown/`ls -l` on Ramfs+Ext2 plus login/`uname`/`udptest`/`env` (smp 1/2).
+
 ## Suggested next steps
 
-1. Optional shell polish: tab completion, timestamps on `ls -l` (wire Ext2/Ramfs mtime into `stat`).
-2. `chown`/`getuid` stubs if ownership display is wanted.
-3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-4. Deep jbd — avoid unless needed.
+1. Optional shell polish: tab completion (nice if small).
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Deep jbd — avoid unless needed.

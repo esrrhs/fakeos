@@ -1,8 +1,8 @@
 /* fakeos userland - ls: list one directory (default: current directory).
  * Parses the kernel's fixed 48-byte dirent records (name at offset 19).
- * Optional -l uses fstatat(dirfd, name) for mode/size; symlinks show
+ * Optional -l uses fstatat for mode/uid/gid/size/mtime; symlinks show
  * `name -> target` via readlink. File operands print one entry.
- * chmod/umask: modes come from live inode permission bits. */
+ * Ownership and mtime come from live inode fields (chown + write stamps). */
 package user;
 
 typedef unsigned long u64;
@@ -20,7 +20,10 @@ extern void printf(const char *fmt, ...);
 /* Linux x86-64 struct stat field offsets (144 bytes). */
 enum {
     ST_MODE = 24,
+    ST_UID = 28,
+    ST_GID = 32,
     ST_SIZE = 48,
+    ST_MTIME = 88,
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
@@ -132,10 +135,17 @@ static void print_name_long(const char *dirpath, const char *name,
                             const char *stbuf) {
     char mstr[12];
     unsigned int mode;
+    unsigned int uid;
+    unsigned int gid;
     unsigned long size;
+    unsigned long mtime;
     mode = load_u32(stbuf + ST_MODE);
+    uid = load_u32(stbuf + ST_UID);
+    gid = load_u32(stbuf + ST_GID);
     size = load_u64(stbuf + ST_SIZE);
+    mtime = load_u64(stbuf + ST_MTIME);
     mode_string(mode, mstr);
+    /* mode uid gid size mtime name  (mtime = boot-relative seconds) */
     if ((mode & S_IFMT) == S_IFLNK) {
         char full[96];
         char tgt[96];
@@ -144,14 +154,18 @@ static void print_name_long(const char *dirpath, const char *name,
         rn = u_readlink(full, tgt, sizeof(tgt) - 1);
         if (rn >= 0) {
             tgt[rn] = 0;
-            printf("%s %u %s -> %s\n", mstr, (unsigned int)size, name, tgt);
+            printf("%s %u %u %u %u %s -> %s\n", mstr, uid, gid,
+                   (unsigned int)size, (unsigned int)mtime, name, tgt);
         } else {
-            printf("%s %u %s -> ?\n", mstr, (unsigned int)size, name);
+            printf("%s %u %u %u %u %s -> ?\n", mstr, uid, gid,
+                   (unsigned int)size, (unsigned int)mtime, name);
         }
     } else if ((mode & S_IFMT) == S_IFDIR) {
-        printf("%s %u %s/\n", mstr, (unsigned int)size, name);
+        printf("%s %u %u %u %u %s/\n", mstr, uid, gid,
+               (unsigned int)size, (unsigned int)mtime, name);
     } else {
-        printf("%s %u %s\n", mstr, (unsigned int)size, name);
+        printf("%s %u %u %u %u %s\n", mstr, uid, gid,
+               (unsigned int)size, (unsigned int)mtime, name);
     }
 }
 

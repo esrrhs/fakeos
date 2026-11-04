@@ -888,20 +888,25 @@ static void kstat_put_u64(char *k, u32 off, u64 v) {
     }
 }
 
-static void kstat_fill(char *k, u64 ino, u32 mode, u64 size, u64 rdev, u32 nlink) {
+static void kstat_fill(char *k, u64 ino, u32 mode, u64 size, u64 rdev, u32 nlink,
+                       u32 uid, u32 gid, u32 mtime) {
     u64 blocks;
     kstat_zero(k);
     kstat_put_u64(k, 0, 1);                      /* st_dev: fake major */
     kstat_put_u64(k, 8, ino);
     kstat_put_u64(k, 16, (u64)nlink);
     kstat_put_u32(k, 24, mode);
-    kstat_put_u32(k, 28, 0);                     /* uid */
-    kstat_put_u32(k, 32, 0);                     /* gid */
+    kstat_put_u32(k, 28, uid);
+    kstat_put_u32(k, 32, gid);
     kstat_put_u64(k, 40, rdev);
     kstat_put_u64(k, 48, size);
     kstat_put_u64(k, 56, 4096);                  /* blksize */
     blocks = (size + 511) / 512;
     kstat_put_u64(k, 64, blocks);
+    /* timespecs: atime/mtime/ctime share mtime (boot-relative seconds). */
+    kstat_put_u64(k, 72, (u64)mtime);
+    kstat_put_u64(k, 88, (u64)mtime);
+    kstat_put_u64(k, 104, (u64)mtime);
 }
 
 static u32 copy_kstat_to_user(u64 ubuf, const char *k) {
@@ -926,29 +931,34 @@ static u32 kstat_from_fh(u32 fh, char *k) {
     u64 size = 0;
     u32 rdev = 0;
     u32 nlink = 1;
+    u32 uid = 0;
+    u32 gid = 0;
+    u32 mtime = 0;
     if (fh == FD_BAD) {
         return 0;
     }
     if (pipe_fh_is(fh)) {
-        kstat_fill(k, (u64)fh, S_IFIFO | 0x1B6, 0, 0, 1);
+        kstat_fill(k, (u64)fh, S_IFIFO | 0x1B6, 0, 0, 1, 0, 0, 0);
         return 1;
     }
     if (sock_fh_is(fh)) {
-        kstat_fill(k, (u64)fh, S_IFSOCK | 0x1B6, 0, 0, 1);
+        kstat_fill(k, (u64)fh, S_IFSOCK | 0x1B6, 0, 0, 1, 0, 0, 0);
         return 1;
     }
     if (fs.ext2_fh_is(fh)) {
         if (!fs.ext2_fstat(fh, &ino, &mode, &size, &nlink)) {
             return 0;
         }
-        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
         return 1;
     }
     ino = fs.fs_file_ino(fh);
     if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
         return 0;
     }
-    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
+    fs.fs_owner_mtime(ino, &uid, &gid, &mtime);
+    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink, uid, gid, mtime);
     return 1;
 }
 
@@ -958,6 +968,9 @@ static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
     u64 size = 0;
     u32 rdev = 0;
     u32 nlink = 1;
+    u32 uid = 0;
+    u32 gid = 0;
+    u32 mtime = 0;
     if (path == 0) {
         return 0;
     }
@@ -974,14 +987,16 @@ static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
                 return 0;
             }
         }
-        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
         return 1;
     }
     ino = follow ? fs.fs_lookup(path) : fs.fs_lookup_nofollow(path);
     if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
         return 0;
     }
-    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
+    fs.fs_owner_mtime(ino, &uid, &gid, &mtime);
+    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink, uid, gid, mtime);
     return 1;
 }
 
@@ -1075,21 +1090,31 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh)) {
+        u32 uid = 0;
+        u32 gid = 0;
+        u32 mtime = 0;
         if (!fs.ext2_stat_at_flags(fh, rel, &ino, &mode, &size, &nlink, follow)) {
             return (u64)(-1);
         }
-        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1);
+        fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
+        kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
         return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
     }
     if (!fs.fs_file_is_dir(fh)) {
         return (u64)(-1);
     }
-    ino = fs.fs_lookup_at_flags(fs.fs_file_ino(fh), rel, follow);
-    if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
-        return (u64)(-1);
+    {
+        u32 uid = 0;
+        u32 gid = 0;
+        u32 mtime = 0;
+        ino = fs.fs_lookup_at_flags(fs.fs_file_ino(fh), rel, follow);
+        if (ino == 0 || !fs.fs_stat_ino(ino, &mode, &size, &rdev, &nlink)) {
+            return (u64)(-1);
+        }
+        fs.fs_owner_mtime(ino, &uid, &gid, &mtime);
+        kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink, uid, gid, mtime);
+        return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
     }
-    kstat_fill(k, (u64)ino, mode, size, (u64)rdev, nlink);
-    return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
 }
 
 u64 sys_symlink(u64 utarget, u64 ulinkpath) {

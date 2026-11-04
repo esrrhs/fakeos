@@ -71,6 +71,11 @@ global u_lstat
 global u_newfstatat
 global u_chmod
 global u_umask
+global u_chown
+global u_getuid
+global u_geteuid
+global u_getgid
+global u_getegid
 global u_futex
 global u_gettid
 global u_clone
@@ -345,6 +350,21 @@ USYSC1 u_chmod, 90
 
 ; long u_umask(long mask) -- Linux nr 95
 USYSC1 u_umask, 95
+
+; long u_chown(const char *path, long uid, long gid) -- Linux nr 92
+USYSC1 u_chown, 92
+
+; long u_getuid(void) -- Linux nr 102
+USYSC1 u_getuid, 102
+
+; long u_geteuid(void) -- Linux nr 107
+USYSC1 u_geteuid, 107
+
+; long u_getgid(void) -- Linux nr 104
+USYSC1 u_getgid, 104
+
+; long u_getegid(void) -- Linux nr 108
+USYSC1 u_getegid, 108
 
 ; long u_newfstatat(long dfd, const char *path, void *statbuf, long flags)
 ; 4th C arg RCX -> R10

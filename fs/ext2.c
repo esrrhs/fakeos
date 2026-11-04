@@ -9,6 +9,9 @@ typedef types.uint64_t u64;
 
 extern void kprintf(const char *fmt, ...);
 extern u32 sched_umask_get(void);
+extern u64 sched_tick_count(void);
+extern u32 sched_current_uid(void);
+extern u32 sched_current_gid(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
@@ -69,7 +72,12 @@ enum {
     DENT_RECLEN     = 48,
 
     I_MODE          = 0,
+    I_UID           = 2,
     I_SIZE_LO       = 4,
+    I_ATIME         = 8,
+    I_CTIME         = 12,
+    I_MTIME         = 16,
+    I_GID           = 24,
     I_LINKS         = 26,
     I_BLOCKS        = 28,
     I_BLOCK         = 40
@@ -1923,6 +1931,27 @@ static u16 ext2_creat_mode(u32 ifmt, u32 creat_perm) {
     return (u16)((ifmt & EXT2_S_IFMT) | (perm & ~um));
 }
 
+static u32 now_sec(void) {
+    return (u32)(sched_tick_count() / 100);
+}
+
+/* Stamp owner + atime/ctime/mtime on a freshly zeroed inode raw. */
+static void ext2_stamp_new(u8 *raw) {
+    u32 now = now_sec();
+    wr16(raw + I_UID, (u16)(sched_current_uid() & 0xFFFF));
+    wr16(raw + I_GID, (u16)(sched_current_gid() & 0xFFFF));
+    wr32(raw + I_ATIME, now);
+    wr32(raw + I_CTIME, now);
+    wr32(raw + I_MTIME, now);
+}
+
+static void ext2_touch_mtime(u8 *raw) {
+    u32 now = now_sec();
+    wr32(raw + I_MTIME, now);
+    wr32(raw + I_CTIME, now);
+}
+
+
 u32 ext2_open(const char *path, u32 flags) {
     return ext2_open_mode(path, flags, 0x1B6); /* default creat 0666 */
 }
@@ -1977,6 +2006,7 @@ u32 ext2_open_mode(const char *path, u32 flags, u32 creat_mode) {
             wr16(ino_raw + I_LINKS, 1);
             wr32(ino_raw + I_SIZE_LO, 0);
             wr32(ino_raw + I_BLOCKS, 0);
+            ext2_stamp_new(ino_raw);
             if (!inode_write(neu, ino_raw)) { jl_commit(); return 0; }
             if (!dir_add(parent, last, last_n, neu, EXT2_FT_REG)) {
                 jl_commit();
@@ -2082,6 +2112,44 @@ u32 ext2_chmod(const char *path, u32 mode) {
     return 1;
 }
 
+/* chown(2): set i_uid/i_gid; (u32)-1 leaves that field unchanged. */
+u32 ext2_chown(const char *path, u32 uid, u32 gid) {
+    const char *rel;
+    u32 ino;
+    if (!sb.mounted || path == 0) return 0;
+    rel = persist_rel(path);
+    if (rel == 0) return 0;
+    if (rel[0] == 0) {
+        ino = EXT2_ROOT_INO;
+    } else {
+        ino = walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0);
+        if (ino == 0) return 0;
+    }
+    if (!inode_read(ino, ino_raw)) return 0;
+    jl_begin();
+    if (uid != 0xFFFFFFFF) {
+        wr16(ino_raw + I_UID, (u16)(uid & 0xFFFF));
+    }
+    if (gid != 0xFFFFFFFF) {
+        wr16(ino_raw + I_GID, (u16)(gid & 0xFFFF));
+    }
+    wr32(ino_raw + I_CTIME, now_sec());
+    if (!inode_write(ino, ino_raw)) { jl_commit(); return 0; }
+    jl_commit();
+    return 1;
+}
+
+/* Owner + mtime from on-disk inode. */
+u32 ext2_owner_mtime(u32 ino, u32 *uid_out, u32 *gid_out, u32 *mtime_out) {
+    u8 raw[128];
+    if (!sb.mounted || ino == 0) return 0;
+    if (!inode_read(ino, raw)) return 0;
+    if (uid_out) *uid_out = rd16(raw + I_UID);
+    if (gid_out) *gid_out = rd16(raw + I_GID);
+    if (mtime_out) *mtime_out = rd32(raw + I_MTIME);
+    return 1;
+}
+
 /* Path-based Ext2 stat: fills ino/mode/size from the on-disk inode.
  * Returns 1 on success. */
 u32 ext2_stat_path(const char *path, u32 *ino_out, u32 *mode_out, u64 *size_out,
@@ -2149,6 +2217,7 @@ u32 ext2_symlink(const char *target, const char *linkpath) {
     wr16(ino_raw + I_MODE, ext2_creat_mode(EXT2_S_IFLNK, 0x1FF));
     wr16(ino_raw + I_LINKS, 1);
     wr32(ino_raw + I_SIZE_LO, tlen);
+    ext2_stamp_new(ino_raw);
     if (tlen < SYMLINK_FAST_MAX) {
         for (k = 0; k < tlen; k++) ino_raw[I_BLOCK + k] = (u8)target[k];
         wr32(ino_raw + I_BLOCKS, 0);
@@ -2317,6 +2386,7 @@ u64 ext2_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
             wr32(raw + I_SIZE_LO, (u32)size);
         }
     }
+    ext2_touch_mtime(raw);
     if (!inode_write(ino, raw)) {
         jl_commit();
         return done != 0 ? done : (u64)(-1);
@@ -2520,6 +2590,7 @@ u32 ext2_mkdir(const char *path) {
     wr16(ino_raw + I_MODE, ext2_creat_mode(EXT2_S_IFDIR, 0x1FF));
     wr16(ino_raw + I_LINKS, 2);                /* . and parent link */
     wr32(ino_raw + I_SIZE_LO, sb.block_size);
+    ext2_stamp_new(ino_raw);
     phys = alloc_block();
     if (phys == 0) { jl_commit(); return 0; }
     wr32(ino_raw + I_BLOCK, phys);

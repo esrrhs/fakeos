@@ -35,6 +35,11 @@ extern long u_unlink(const char *path);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_lstat(const char *path, void *statbuf);
+extern long u_getuid(void);
+extern long u_geteuid(void);
+extern long u_getgid(void);
+extern long u_getegid(void);
+extern long u_chown(const char *path, long uid, long gid);
 extern long u_stat(const char *path, void *statbuf);
 extern long u_fstat(long fd, void *statbuf);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
@@ -1642,6 +1647,107 @@ static void pthread_create_test(void) {
 }
 
 
+
+static unsigned int st_u32(const char *st, unsigned int off) {
+    return (unsigned int)(unsigned char)st[off]
+         | ((unsigned int)(unsigned char)st[off + 1] << 8)
+         | ((unsigned int)(unsigned char)st[off + 2] << 16)
+         | ((unsigned int)(unsigned char)st[off + 3] << 24);
+}
+
+static unsigned long st_u64(const char *st, unsigned int off) {
+    unsigned long v = 0;
+    unsigned long i;
+    for (i = 0; i < 8; i++) {
+        v |= ((unsigned long)(unsigned char)st[off + i]) << (8 * i);
+    }
+    return v;
+}
+
+/* getuid/chown stubs + mtime stamped into struct stat. */
+static void owner_mtime_test(void) {
+    char st[144];
+    long fd;
+    unsigned int uid;
+    unsigned int gid;
+    unsigned long m0;
+    unsigned long m1;
+    unsigned long i;
+
+    if (u_getuid() != 0 || u_geteuid() != 0 || u_getgid() != 0 || u_getegid() != 0) {
+        puts("[U][FAIL] getuid/getgid not root");
+        return;
+    }
+    fd = u_open("/tmp/own_mtime.txt", 0x40 | 0x200 | 2, 0x1A4); /* CREAT|TRUNC|RDWR 0644 */
+    if (fd < 0) {
+        puts("[U][FAIL] open own_mtime create");
+        return;
+    }
+    if (u_write(fd, "hi", 2) != 2) {
+        puts("[U][FAIL] write own_mtime");
+        u_close(fd);
+        return;
+    }
+    u_close(fd);
+    for (i = 0; i < 144; i++) st[i] = 0;
+    if (u_stat("/tmp/own_mtime.txt", st) != 0) {
+        puts("[U][FAIL] stat own_mtime");
+        return;
+    }
+    uid = st_u32(st, 28);
+    gid = st_u32(st, 32);
+    m0 = st_u64(st, 88);
+    if (uid != 0 || gid != 0) {
+        puts("[U][FAIL] create owner not root");
+        return;
+    }
+    if (u_chown("/tmp/own_mtime.txt", 1, 2) != 0) {
+        puts("[U][FAIL] chown 1:2");
+        return;
+    }
+    for (i = 0; i < 144; i++) st[i] = 0;
+    if (u_stat("/tmp/own_mtime.txt", st) != 0) {
+        puts("[U][FAIL] stat after chown");
+        return;
+    }
+    uid = st_u32(st, 28);
+    gid = st_u32(st, 32);
+    m1 = st_u64(st, 88);
+    if (uid != 1 || gid != 2) {
+        puts("[U][FAIL] chown fields");
+        return;
+    }
+    if (m1 < m0) {
+        puts("[U][FAIL] mtime went backwards");
+        return;
+    }
+    /* Ext2 path when /home is live. */
+    fd = u_open("/home/own_e2.txt", 0x40 | 0x200 | 2, 0x1A4);
+    if (fd >= 0) {
+        if (u_write(fd, "e2", 2) != 2) {
+            puts("[U][FAIL] write own_e2");
+            u_close(fd);
+            return;
+        }
+        u_close(fd);
+        if (u_chown("/home/own_e2.txt", 3, 4) != 0) {
+            puts("[U][FAIL] chown ext2");
+            return;
+        }
+        for (i = 0; i < 144; i++) st[i] = 0;
+        if (u_stat("/home/own_e2.txt", st) != 0) {
+            puts("[U][FAIL] stat own_e2");
+            return;
+        }
+        if (st_u32(st, 28) != 3 || st_u32(st, 32) != 4) {
+            puts("[U][FAIL] ext2 chown fields");
+            return;
+        }
+        puts("[U] Ext2 chown/mtime OK");
+    }
+    puts("[U][PASS] getuid/chown/mtime");
+}
+
 static void symlink_test(void) {
     char st[144];
     char buf[128];
@@ -1933,6 +2039,7 @@ int main(int argc, char **argv) {
     posix_basics_test();
     proc_self_test();
     stat_test();
+    owner_mtime_test();
     symlink_test();
     getcwd_test();
     dirent_test();

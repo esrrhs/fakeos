@@ -232,6 +232,43 @@ u64 sys_umask(u64 mask) {
     return (u64)sched_umask_set((u32)mask);
 }
 
+/* Credential stubs: all processes start as root (uid/gid 0). */
+u64 sys_getuid(void) {
+    extern u32 sched_current_uid(void);
+    return (u64)sched_current_uid();
+}
+
+u64 sys_geteuid(void) {
+    extern u32 sched_current_euid(void);
+    return (u64)sched_current_euid();
+}
+
+u64 sys_getgid(void) {
+    extern u32 sched_current_gid(void);
+    return (u64)sched_current_gid();
+}
+
+u64 sys_getegid(void) {
+    extern u32 sched_current_egid(void);
+    return (u64)sched_current_egid();
+}
+
+/* chown(2): update Ramfs/Ext2 owner; (u32)-1 leaves a field unchanged. */
+u64 sys_chown(u64 upath, u64 uid, u64 gid) {
+    char path[128];
+    extern u32 copy_user_path(char *dst, u64 upath);
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted() || !fs.ext2_chown(path, (u32)uid, (u32)gid)) {
+            return (u64)(-1);
+        }
+        return 0;
+    }
+    return fs.fs_chown(path, (u32)uid, (u32)gid) ? 0 : (u64)(-1);
+}
+
 u64 sys_gettid(void) {
     return (u64)sched_current_tid();
 }

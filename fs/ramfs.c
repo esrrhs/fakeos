@@ -18,6 +18,9 @@ extern u64 procfs_gen_maps(char *buf, u64 cap);
 extern u64 procfs_gen_cmdline(char *buf, u64 cap);
 extern u64 procfs_gen_environ(char *buf, u64 cap);
 extern u32 sched_umask_get(void);
+extern u64 sched_tick_count(void);
+extern u32 sched_current_uid(void);
+extern u32 sched_current_gid(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal in-memory VFS + Ramfs
@@ -103,6 +106,9 @@ struct inode {
     u32 ndent;
     u32 ro;                        /* static incbin-backed file */
     u32 mode;                      /* Linux S_IF* | permission bits */
+    u32 uid;                       /* owner (default 0) */
+    u32 gid;                       /* group (default 0) */
+    u32 mtime;                     /* seconds (boot-relative; matches clock_gettime REALTIME) */
     struct dent dents[MAX_DENTS];
     const char *sdata;             /* static data (kernel rodata) */
     char *buf;                     /* dynamic data (kmalloc) */
@@ -184,6 +190,10 @@ static u32 apply_umask_mode(u32 ifmt, u32 create_perm) {
     return (ifmt & 0xF000) | (perm & ~um);
 }
 
+static u32 now_sec(void) {
+    return (u32)(sched_tick_count() / 100);
+}
+
 static u32 alloc_ino(u32 type, u32 parent) {
     u32 i;
     /* Slots 2..MAX_INODES-1, skipping fixed console/null/zero slots. */
@@ -198,6 +208,9 @@ static u32 alloc_ino(u32 type, u32 parent) {
             inodes[i].ndent = 0;
             inodes[i].ro = 0;
             inodes[i].mode = default_mode_for_type(type);
+            inodes[i].uid = sched_current_uid();
+            inodes[i].gid = sched_current_gid();
+            inodes[i].mtime = now_sec();
             inodes[i].sdata = 0;
             inodes[i].buf = 0;
             inodes[i].size = 0;
@@ -455,6 +468,9 @@ void fs_init(void) {
         inodes[i].ndent = 0;
         inodes[i].ro = 0;
         inodes[i].mode = 0;
+        inodes[i].uid = 0;
+        inodes[i].gid = 0;
+        inodes[i].mtime = 0;
         inodes[i].sdata = 0;
         inodes[i].buf = 0;
         inodes[i].size = 0;
@@ -1257,6 +1273,7 @@ u64 fs_write_h(u32 fh, const char *kbuf, u64 len) {
     if (opens[fh].off > ip->size) {
         ip->size = opens[fh].off;
     }
+    ip->mtime = now_sec();
     return len;
 }
 
@@ -1407,6 +1424,7 @@ u64 fs_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
     if (off + len > ip->size) {
         ip->size = off + len;
     }
+    ip->mtime = now_sec();
     return len;
 }
 
@@ -1437,6 +1455,7 @@ u32 fs_ftruncate_h(u32 fh, u64 size) {
         }
     }
     ip->size = size;
+    ip->mtime = now_sec();
     return 1;
 }
 
@@ -1489,6 +1508,38 @@ u32 fs_chmod(const char *path, u32 mode) {
         cur = default_mode_for_type(inodes[ino].type);
     }
     inodes[ino].mode = (cur & 0xF000) | (mode & 0x0FFF);
+    return 1;
+}
+
+/* chown(2): set uid/gid; (u32)-1 leaves that field unchanged. */
+u32 fs_chown(const char *path, u32 uid, u32 gid) {
+    u32 ino = walk_lookup_nofollow(path);
+    if (ino == 0) {
+        return 0;
+    }
+    if (uid != 0xFFFFFFFF) {
+        inodes[ino].uid = uid;
+    }
+    if (gid != 0xFFFFFFFF) {
+        inodes[ino].gid = gid;
+    }
+    return 1;
+}
+
+/* Owner + mtime for an inode (used by kstat fill). */
+u32 fs_owner_mtime(u32 ino, u32 *uid_out, u32 *gid_out, u32 *mtime_out) {
+    if (ino == 0 || ino >= MAX_INODES || inodes[ino].type == INO_FREE) {
+        return 0;
+    }
+    if (uid_out) {
+        *uid_out = inodes[ino].uid;
+    }
+    if (gid_out) {
+        *gid_out = inodes[ino].gid;
+    }
+    if (mtime_out) {
+        *mtime_out = inodes[ino].mtime;
+    }
     return 1;
 }
 

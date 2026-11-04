@@ -13,6 +13,11 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_chmod(const char *path, long mode);
 extern long u_umask(long mask);
+extern long u_chown(const char *path, long uid, long gid);
+extern long u_getuid(void);
+extern long u_geteuid(void);
+extern long u_getgid(void);
+extern long u_getegid(void);
 extern long u_close(long fd);
 extern long u_dup2(long oldfd, long newfd);
 extern long u_pipe(int *pipefd);
@@ -757,7 +762,8 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill") ||
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "unset") ||
-           eq(cmd, "which") || eq(cmd, "chmod") || eq(cmd, "umask");
+           eq(cmd, "which") || eq(cmd, "chmod") || eq(cmd, "umask")
+        || eq(cmd, "chown") || eq(cmd, "id");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -878,9 +884,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, chown, id, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; echo $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
@@ -1131,6 +1137,63 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 for (ai = 2; tokens[ai] != 0; ai++) {
                     if (u_chmod(tokens[ai], (long)mode) != 0) {
                         printf("sh: chmod: %s: failed\n", tokens[ai]);
+                        rc = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (eq(tokens[0], "id")) {
+        printf("uid=%d euid=%d gid=%d egid=%d\n",
+               (int)u_getuid(), (int)u_geteuid(),
+               (int)u_getgid(), (int)u_getegid());
+        rc = 0;
+    } else if (eq(tokens[0], "chown")) {
+        /* chown UID[:GID] FILE...  (decimal; missing GID keeps old) */
+        if (tokens[1] == 0 || tokens[2] == 0) {
+            puts("usage: chown UID[:GID] FILE...");
+            rc = 1;
+        } else {
+            unsigned long uid = 0;
+            unsigned long gid = 0xFFFFFFFFUL; /* unchanged */
+            const char *spec = tokens[1];
+            long ai;
+            long i = 0;
+            int bad = 0;
+            while (spec[i] >= '0' && spec[i] <= '9') {
+                uid = uid * 10 + (unsigned long)(spec[i] - '0');
+                i++;
+            }
+            if (i == 0) {
+                puts("sh: chown: bad owner");
+                bad = 1;
+            } else if (spec[i] == ':') {
+                long j = i + 1;
+                gid = 0;
+                if (spec[j] == 0) {
+                    puts("sh: chown: bad group");
+                    bad = 1;
+                } else {
+                    while (spec[j] >= '0' && spec[j] <= '9') {
+                        gid = gid * 10 + (unsigned long)(spec[j] - '0');
+                        j++;
+                    }
+                    if (spec[j] != 0) {
+                        puts("sh: chown: bad group");
+                        bad = 1;
+                    }
+                }
+            } else if (spec[i] != 0) {
+                puts("sh: chown: bad owner");
+                bad = 1;
+            }
+            if (bad) {
+                rc = 1;
+            } else {
+                rc = 0;
+                for (ai = 2; tokens[ai] != 0; ai++) {
+                    if (u_chown(tokens[ai], (long)uid, (long)gid) != 0) {
+                        printf("sh: chown: %s: failed\n", tokens[ai]);
                         rc = 1;
                         break;
                     }
@@ -1584,7 +1647,7 @@ int main(int argc, char **argv) {
     }
 
     sh_env_init();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, chmod/umask, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
