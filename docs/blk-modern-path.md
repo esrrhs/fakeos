@@ -1008,8 +1008,8 @@ no `statfs(2)` (thin `df` deferred — Ramfs has no block accounting, so
 statfs+df not clearly bite-sized) and no `utimensat(2)` (touch `-r`/`-d`
 deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
 `cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
-Jobs/`fg`/`bg` already present — left alone. `stty`/`reset`/`tput`/`watch`
-deferred (no `TIOCGWINSZ`).
+Jobs/`fg`/`bg` already present — left alone. (`TIOCGWINSZ` + stty/tput/reset
+landed later; see below.)
 
 `strtok_sh` now emits `;` as its own token (glued `c;do` works). Top-level
 and compound bodies run via `run_seq` (`;`-separated `&&`/`||` lists).
@@ -1021,13 +1021,36 @@ cap 256. No nesting / elif / until. Focused virtio login smoke covers
 for / while+test+arith / if/else / `;` seq / Ext2 prior greens (smp 1/2).
 Ramfs `/bin` dents ~107/128.
 
+## TIOCGWINSZ + stty/tput/reset — landed
+
+`ioctl(TIOCGWINSZ)` returns fixed VGA 80×25 (no SIGWINCH). `/bin/stty`
+(`size|sane|echo|-echo|raw|-raw|[-a]`), `/bin/tput` (`cols|lines|clear|cup`),
+`/bin/reset` (sane + ANSI clear). Ramfs `/bin` dents ~110/128. Focused virtio
+login smoke green on smp 1/2. `watch` still deferred.
+
+## shell until/elif/break/continue — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. `watch` deferred. Left Ext2-redirect
+duplex / multi-nc SMP races, CFS, deep jbd alone.
+
+Forms: `until LIST; do LIST; done` (invert of while), `if`…`elif`…`then`…
+`[else …]` `fi`, builtins `break`/`continue` (error outside loops).
+`run_seq` gathers `for`/`while`/`until`/`if` through nesting-aware
+`done`/`fi`, and re-expands `$` / `$?` / `$(( ))` per `;`-segment so
+mid-body `export` is visible to a later `if test`. `set -e` suppressed on
+until/while/if conditions; iteration cap 256. Focused virtio login smoke
+covers until / elif chain / break+continue in for|while / Ext2 prior greens
+(smp 1/2). Ramfs `/bin` dents ~110/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`for`/`while`/`if` + `$(( ))` +
-   `/bin/sed` + …): prefer small coherent chunks. `stty`/`reset`/`tput`/
-   `watch` only if bite-sized without winsize or add thin `TIOCGWINSZ`.
-   Job polish only if clear gap. Keep `df`/`touch -r|-d`/`mkfifo`/`ps`/
-   `uptime`/`free` deferred. Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+3. More daily-driver gaps after inventory (`until`/`elif`/`break`/`continue` +
+   `for`/`while`/`if` + stty/tput/reset + …): prefer small coherent chunks.
+   Thin `case`/`esac` if still thin; `/bin/watch` only if bite-sized. Keep
+   `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
+   deferred. Leave Ext2 duplex / multi-nc / CFS / jbd alone.
