@@ -468,6 +468,19 @@ keeps argv under `EXEC_MAX_ARGC=8`. stdin if no FILE. Focused virtio
 login smoke covers stdin/`-n`/`-nN`, SOH-separated runs, ELF
 `strings /bin/hello`, plus prior interactive greens (smp 1/2).
 
+
+## /bin/pr + /bin/column — landed
+
+Thin text-layout pair. `pr [-n] [-t] [-w WIDTH|-wWIDTH] [-l LENGTH|-lLENGTH]
+[-h HEADER|-hHEADER] [FILE...]` paginates with a 5-line header (title + Page N)
+and form feeds; body lines per page are LENGTH-5 (default LENGTH 66, WIDTH 72).
+`-t` omits headers/form feeds; `-n` prefixes 5-digit line numbers + tab. `column
+-t [-s SEP|-sSEP] [FILE...]` sizes columns from input and pads fields (default
+whitespace-run split; `-s` treats each SEP char as a separator). Glued
+`-wN`/`-lN`/`-hTEXT`/`-sSEP`/`-tsSEP` keep argv under `EXEC_MAX_ARGC=8`.
+Focused virtio login smoke covers `pr -t`/`-n`/`-w`/`-l`/`-h`, `column -t`/
+`-s`/`-ts:`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -475,6 +488,6 @@ login smoke covers stdin/`-n`/`-nN`, SOH-separated runs, ELF
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `head`/`tail`/`strings` already present; consider `pr`/`column`,
-   `md5sum`/`sha1sum` thin stubs) — prefer small coherent chunks. Avoid deep
+   (e.g. `pr`/`column`/`strings` already present; consider `md5sum`/`sha1sum`
+   thin stubs) — prefer small coherent chunks. Avoid deep
    jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.

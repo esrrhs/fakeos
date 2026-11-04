@@ -451,6 +451,8 @@ def main():
         "[FS] published /bin/cksum (",
         "[FS] published /bin/sum (",
         "[FS] published /bin/strings (",
+        "[FS] published /bin/pr (",
+        "[FS] published /bin/column (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
