@@ -12,6 +12,7 @@ global u_close
 global u_dup2
 global u_lseek
 global u_mmap
+global u_munmap
 global u_brk
 global u_exit
 global u_getpid
@@ -101,6 +102,9 @@ u_mmap:
     mov     eax, 9
     syscall
     ret
+
+; long u_munmap(void *addr, unsigned long len) -- Linux nr 11
+USYSC1 u_munmap, 11
 
 ; unsigned long u_brk(unsigned long addr)
 USYSC1 u_brk, 12

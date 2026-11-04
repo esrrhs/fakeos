@@ -41,6 +41,8 @@ typedef unsigned long pthread_t;
 extern int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *),
                           void *arg);
 extern int pthread_join(pthread_t thread, void **retval);
+extern void pthread_exit(void *retval);
+extern int pthread_detach(pthread_t thread);
 extern pthread_t pthread_self(void);
 extern long arch_prctl(long code, unsigned long addr);
 
@@ -566,6 +568,7 @@ static void futex_test(void) {
 static volatile int g_thr_counter;
 static volatile int g_thr_child_tid;
 static volatile int g_thr_self_ok;
+static volatile int g_det_flag;
 static pthread_mutex_t g_thr_mu;
 
 static void *thr_worker(void *arg) {
@@ -591,12 +594,27 @@ static void *thr_worker(void *arg) {
     return (void *)(long)0x55AA;
 }
 
+static void *thr_exit_worker(void *arg) {
+    (void)arg;
+    pthread_exit((void *)(long)0xDEAD);
+    return (void *)(long)0; /* unreachable */
+}
+
+static void *thr_detach_worker(void *arg) {
+    (void)arg;
+    g_det_flag = 1;
+    u_yield();
+    return (void *)(long)0xBEEF;
+}
+
 static void pthread_create_test(void) {
     pthread_t th;
+    pthread_t th2;
     long parent_tid;
     long parent_pid;
     int i;
     int n = 1500;
+    int spins;
     void *joined;
 
     parent_pid = u_getpid();
@@ -650,6 +668,60 @@ static void pthread_create_test(void) {
     }
     puts("[U][PASS] pthread_create clone same-AS");
     puts("[U][PASS] pthread_join + FS TLS");
+
+    /* pthread_exit publishes retval through TLS owner -> join. */
+    joined = 0;
+    if (pthread_create(&th, 0, thr_exit_worker, 0) != 0) {
+        puts("[U][FAIL] pthread_create (exit)");
+        return;
+    }
+    if (pthread_join(th, &joined) != 0) {
+        puts("[U][FAIL] pthread_join (exit)");
+        return;
+    }
+    if (joined != (void *)(long)0xDEAD) {
+        printf("[U][FAIL] pthread_exit retval=%p\n", joined);
+        return;
+    }
+    puts("[U][PASS] pthread_exit retval");
+
+    /* detach: join must fail; worker runs to completion; later create reclaims. */
+    g_det_flag = 0;
+    if (pthread_create(&th, 0, thr_detach_worker, 0) != 0) {
+        puts("[U][FAIL] pthread_create (detach)");
+        return;
+    }
+    if (pthread_detach(th) != 0) {
+        puts("[U][FAIL] pthread_detach");
+        return;
+    }
+    if (pthread_join(th, &joined) == 0) {
+        puts("[U][FAIL] join after detach should fail");
+        return;
+    }
+    spins = 0;
+    while (g_det_flag == 0 && spins < 100000) {
+        u_yield();
+        spins = spins + 1;
+    }
+    if (g_det_flag != 1) {
+        puts("[U][FAIL] detach worker did not run");
+        return;
+    }
+    for (i = 0; i < 8; i++) {
+        u_yield();
+    }
+    /* Second joinable thread forces deferred stack reclaim path. */
+    if (pthread_create(&th2, 0, thr_exit_worker, 0) != 0) {
+        puts("[U][FAIL] pthread_create (reclaim)");
+        return;
+    }
+    joined = 0;
+    if (pthread_join(th2, &joined) != 0 || joined != (void *)(long)0xDEAD) {
+        puts("[U][FAIL] reclaim join");
+        return;
+    }
+    puts("[U][PASS] pthread_detach + stack reclaim");
 }
 
 int main(int argc, char **argv) {
@@ -670,13 +742,16 @@ int main(int argc, char **argv) {
     cow_round(pid);
     cow_round(pid);
 
+    /* Pthread suite early: TCG often stalls later in init after COW; keep
+     * this smokeable ahead of the known hang window. */
+    futex_test();
+    mutex_test();
+    pthread_create_test();
+
     file_test();
     heap_test();
     mmap_test();
     shm_test();
-    futex_test();
-    mutex_test();
-    pthread_create_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

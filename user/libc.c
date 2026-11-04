@@ -1079,10 +1079,11 @@ int pthread_mutex_unlock(pthread_mutex_t *m) {
 }
 
 
-/* ---- arch_prctl FS TLS + pthread_create/join -------------------------------- */
+/* ---- arch_prctl FS TLS + pthread_create/join/detach/exit ----------------------- */
 extern long u_clone(unsigned long flags, void *stack, void *fn, void *arg);
 extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
                    long fd, long off);
+extern long u_munmap(void *addr, unsigned long len);
 extern long u_exit(long code);
 extern long u_gettid(void);
 extern long u_yield(void);
@@ -1096,56 +1097,105 @@ enum {
     MAP_PRIVATE_ANON    = 0x22,
     PROT_RW             = 3,
     ARCH_SET_FS         = 0x1002,
-    ARCH_GET_FS         = 0x1003
+    ARCH_GET_FS         = 0x1003,
+    PT_EMPTY            = 0,
+    PT_LIVE             = 1,
+    PT_DEAD             = 2
 };
 
 typedef unsigned long pthread_t;
 
-/* Minimal TCB parked in FS base: self pointer at offset 0 (pthread_self). */
+struct pthread_start;
+
+/* Minimal TCB parked in FS base: self at offset 0 (pthread_self); owner for exit. */
 struct pthread_tls {
     struct pthread_tls *self;
     unsigned long tid;
+    struct pthread_start *owner;
 };
 
 struct pthread_start {
     void *(*fn)(void *);
     void *arg;
     volatile unsigned int done; /* 0 running, 1 exited (futex word) */
-    unsigned int _pad;
+    volatile unsigned int detached;
     void *retval;
     unsigned char *stack_base;
     struct pthread_tls tls;
 };
 
+/*
+ * Parent-owned registry in libc BSS (shared AS for CLONE_VM threads).
+ * stack_base/retval live here so finish only flips state while on its stack;
+ * pthread_create scavenges PT_DEAD entries (munmap) after prior exits.
+ */
 static struct {
     unsigned long tid;
     struct pthread_start *s;
+    unsigned char *stack_base;
+    void *retval;
+    volatile unsigned int state; /* PT_EMPTY / PT_LIVE / PT_DEAD */
+    unsigned int detached;
+    unsigned int joined;
 } pthread_tab[PTHREAD_MAX];
 
-static int pthread_tab_add(unsigned long tid, struct pthread_start *s) {
+static void pthread_reclaim_dead(void) {
     int i;
     for (i = 0; i < PTHREAD_MAX; i++) {
-        if (pthread_tab[i].tid == 0) {
+        /* Only detach or post-join DEAD slots — keep joinable DEAD for join. */
+        if (pthread_tab[i].state == (unsigned int)PT_DEAD
+            && (pthread_tab[i].detached != 0 || pthread_tab[i].joined != 0)) {
+            unsigned char *base = pthread_tab[i].stack_base;
+            pthread_tab[i].tid = 0;
+            pthread_tab[i].s = 0;
+            pthread_tab[i].stack_base = 0;
+            pthread_tab[i].retval = 0;
+            pthread_tab[i].detached = 0;
+            pthread_tab[i].joined = 0;
+            pthread_tab[i].state = (unsigned int)PT_EMPTY;
+            if (base != 0) {
+                u_munmap(base, (unsigned long)PTHREAD_STACK_SIZE);
+            }
+        }
+    }
+}
+
+static int pthread_tab_add(unsigned long tid, struct pthread_start *s,
+                           unsigned char *stack) {
+    int i;
+    for (i = 0; i < PTHREAD_MAX; i++) {
+        if (pthread_tab[i].state == (unsigned int)PT_EMPTY) {
             pthread_tab[i].tid = tid;
             pthread_tab[i].s = s;
+            pthread_tab[i].stack_base = stack;
+            pthread_tab[i].retval = 0;
+            pthread_tab[i].detached = 0;
+            pthread_tab[i].joined = 0;
+            pthread_tab[i].state = (unsigned int)PT_LIVE;
             return 0;
         }
     }
     return -1;
 }
 
-static struct pthread_start *pthread_tab_take(unsigned long tid) {
+static int pthread_tab_index(unsigned long tid) {
     int i;
-    struct pthread_start *s;
     for (i = 0; i < PTHREAD_MAX; i++) {
-        if (pthread_tab[i].tid == tid) {
-            s = pthread_tab[i].s;
-            pthread_tab[i].tid = 0;
-            pthread_tab[i].s = 0;
-            return s;
+        if (pthread_tab[i].state != (unsigned int)PT_EMPTY
+            && pthread_tab[i].tid == tid) {
+            return i;
         }
     }
-    return 0;
+    return -1;
+}
+
+static void pthread_tab_mark_dead(unsigned long tid, void *retval) {
+    int i = pthread_tab_index(tid);
+    if (i >= 0) {
+        pthread_tab[i].retval = retval;
+        pthread_tab[i].state = (unsigned int)PT_DEAD;
+        /* Keep s for in-flight join waiters until they finish; reclaim clears. */
+    }
 }
 
 long arch_prctl(long code, unsigned long addr) {
@@ -1165,24 +1215,42 @@ pthread_t pthread_self(void) {
     return (pthread_t)t->tid;
 }
 
+static void pthread_finish(struct pthread_start *s, void *retval) {
+    unsigned long tid;
+    if (s == 0) {
+        u_exit(0);
+    }
+    tid = s->tls.tid;
+    s->retval = retval;
+    s->done = 1;
+    if (tid != 0) {
+        pthread_tab_mark_dead(tid, retval);
+    }
+    futex(&s->done, FUTEX_WAKE, 0x7fffffff, 0, 0, 0);
+    u_exit(0);
+}
+
 static void pthread_boot(void *p) {
     struct pthread_start *s;
     void *ret;
     s = (struct pthread_start *)p;
     s->tls.self = &s->tls;
     s->tls.tid = (unsigned long)u_gettid();
+    s->tls.owner = s;
     arch_prctl(ARCH_SET_FS, (unsigned long)&s->tls);
     ret = s->fn(s->arg);
-    s->retval = ret;
-    s->done = 1;
-    futex(&s->done, FUTEX_WAKE, 0x7fffffff, 0, 0, 0);
-    u_exit(0);
+    pthread_finish(s, ret);
 }
 
 void pthread_exit(void *retval) {
-    /* Return value for join is normally published by pthread_boot when the
-     * start routine returns. Direct pthread_exit skips that path for now. */
-    (void)retval;
+    unsigned long fs;
+    struct pthread_tls *t;
+    if (arch_prctl(ARCH_GET_FS, (unsigned long)&fs) == 0 && fs != 0) {
+        t = (struct pthread_tls *)fs;
+        if (t->self == t && t->owner != 0) {
+            pthread_finish(t->owner, retval);
+        }
+    }
     u_exit(0);
 }
 
@@ -1193,6 +1261,7 @@ int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *)
     struct pthread_start *s;
     long tid;
     (void)attr;
+    pthread_reclaim_dead();
     if (thread == 0 || start_routine == 0) {
         return -1;
     }
@@ -1201,45 +1270,83 @@ int pthread_create(pthread_t *thread, void *attr, void *(*start_routine)(void *)
     if (stack == (unsigned char *)-1 || stack == 0) {
         return -1;
     }
-    /* Place start record at the low end; grow stack down from the high end. */
     s = (struct pthread_start *)stack;
     s->fn = start_routine;
     s->arg = arg;
     s->done = 0;
-    s->_pad = 0;
+    s->detached = 0;
     s->retval = 0;
     s->stack_base = stack;
     s->tls.self = 0;
     s->tls.tid = 0;
+    s->tls.owner = 0;
     sp = stack + PTHREAD_STACK_SIZE;
     sp = (unsigned char *)((unsigned long)sp & ~0xFUL);
     tid = u_clone((unsigned long)PTHREAD_CLONE_FLAGS, sp, pthread_boot, s);
     if (tid < 0) {
+        u_munmap(stack, (unsigned long)PTHREAD_STACK_SIZE);
         return -1;
     }
-    if (pthread_tab_add((unsigned long)tid, s) != 0) {
-        /* Table full: thread still runs; join will fail with ESRCH-ish. */
+    if (pthread_tab_add((unsigned long)tid, s, stack) != 0) {
+        /* Table full: thread still runs; join will fail. */
     }
     *thread = (pthread_t)tid;
     return 0;
 }
 
 int pthread_join(pthread_t thread, void **retval) {
+    int i;
     struct pthread_start *s;
+    void *rv;
     long r;
-    s = pthread_tab_take((unsigned long)thread);
-    if (s == 0) {
+    i = pthread_tab_index((unsigned long)thread);
+    if (i < 0) {
         return -1;
     }
-    while (s->done == 0) {
-        r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
-        while (r == -4) {
+    if (pthread_tab[i].detached != 0 || pthread_tab[i].joined != 0) {
+        return -1;
+    }
+    s = pthread_tab[i].s;
+    if (pthread_tab[i].state == (unsigned int)PT_DEAD) {
+        rv = pthread_tab[i].retval;
+    } else if (s == 0) {
+        return -1;
+    } else {
+        while (s->done == 0) {
             r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+            while (r == -4) {
+                r = futex(&s->done, FUTEX_WAIT, 0, 0, 0, 0);
+            }
+            (void)r;
         }
-        (void)r;
+        rv = s->retval;
+        pthread_tab[i].retval = rv;
+        pthread_tab[i].state = (unsigned int)PT_DEAD;
     }
+    pthread_tab[i].joined = 1;
+    pthread_tab[i].s = 0;
     if (retval != 0) {
-        *retval = s->retval;
+        *retval = rv;
     }
+    /* Reclaim happens on a later pthread_create once finish has u_exit'd. */
+    u_yield();
+    u_yield();
+    return 0;
+}
+
+int pthread_detach(pthread_t thread) {
+    int i;
+    i = pthread_tab_index((unsigned long)thread);
+    if (i < 0) {
+        return -1;
+    }
+    if (pthread_tab[i].detached != 0 || pthread_tab[i].joined != 0) {
+        return -1;
+    }
+    pthread_tab[i].detached = 1;
+    if (pthread_tab[i].s != 0) {
+        pthread_tab[i].s->detached = 1;
+    }
+    /* Live or already DEAD: join disabled; create reclaims DEAD stacks. */
     return 0;
 }
