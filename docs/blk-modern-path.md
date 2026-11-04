@@ -1476,6 +1476,17 @@ dent. Inventory: shell mostly saturated (`exec`/`select`/`coproc` deferred
 or larger); picked clear util flag gap. Focused virtio login smoke covers
 `grep -q` + prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell exec — landed
+
+Thin `exec [CMD [ARG…]]` builtin (no new `/bin` dent). Reuses existing
+redirect push (`<`/`>`/`>>` on stdin/stdout — not `N>file`) and
+`resolve_cmd`/`u_execve`/`sh_build_envp`. Bare `exec` (or redirects only)
+keeps the redirected fds. `exec CMD` replaces the shell image; rejects
+builtins/functions. Failed `execve` keeps redirects and returns 127.
+Focused virtio login smoke uses pipeline/child forms so the login shell
+survives (`exec /bin/echo … | cat`) plus redirect-stick/`/dev/tty` restore
+and prior greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1483,8 +1494,7 @@ or larger); picked clear util flag gap. Focused virtio login smoke covers
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: shell `exec` if bite-sized, other util flag
-   gaps, or a thin `/bin` with dent room (`set --` still deferred; skip
-   large `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
-   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: util flag gaps or thin `/bin` with dent
+   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
+   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
+   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
