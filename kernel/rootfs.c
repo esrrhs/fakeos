@@ -142,6 +142,8 @@ extern char user_cksum_start;
 extern char user_cksum_end;
 extern char user_sum_start;
 extern char user_sum_end;
+extern char user_strings_start;
+extern char user_strings_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -263,6 +265,7 @@ void rootfs_publish(void) {
     publish_one("/bin/which", (u64)(&user_which_start), (u64)(&user_which_end));
     publish_one("/bin/cksum", (u64)(&user_cksum_start), (u64)(&user_cksum_end));
     publish_one("/bin/sum", (u64)(&user_sum_start), (u64)(&user_sum_end));
+    publish_one("/bin/strings", (u64)(&user_strings_start), (u64)(&user_strings_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));

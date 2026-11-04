@@ -450,6 +450,7 @@ def main():
         "[FS] published /bin/which (",
         "[FS] published /bin/cksum (",
         "[FS] published /bin/sum (",
+        "[FS] published /bin/strings (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

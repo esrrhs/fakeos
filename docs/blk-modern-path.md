@@ -459,6 +459,15 @@ argv-friendly; no glued forms needed. Focused virtio login smoke covers
 `printf|cksum`, file `cksum`, `sum`/`-r`/`-s`, plus prior interactive
 greens (smp 1/2).
 
+## /bin/strings — landed
+
+Thin printable-run extractor. `strings [-a] [-n N|-nN] [FILE...]` emits
+runs of bytes in `0x20..0x7e` of length at least N (default 4); `-a` is
+accepted as a no-op (whole-stream scan is the only mode). Glued `-nN`
+keeps argv under `EXEC_MAX_ARGC=8`. stdin if no FILE. Focused virtio
+login smoke covers stdin/`-n`/`-nN`, SOH-separated runs, ELF
+`strings /bin/hello`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -466,6 +475,6 @@ greens (smp 1/2).
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `head`/`tail` already present; consider `pr`, `column`, `strings`,
+   (e.g. `head`/`tail`/`strings` already present; consider `pr`/`column`,
    `md5sum`/`sha1sum` thin stubs) — prefer small coherent chunks. Avoid deep
    jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
