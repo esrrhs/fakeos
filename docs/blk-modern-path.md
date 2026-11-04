@@ -981,20 +981,35 @@ escapes), `d` (delete/suppress print), `p` (print), `q` (quit after line).
 alt delim / `-n`+`p` / `d` / `q` / pipe+file / Ext2 / prior greens (smp 1/2).
 Ramfs `/bin` dents ~107/128.
 
+## shell $(( )) arithmetic expand — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred — Ramfs has no block accounting, so
+statfs+df not clearly bite-sized) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+Jobs/`fg`/`bg` already present — left alone. Thin `for`/`while`/`if` deferred
+(need per-iteration re-expand of `$NAME`); `stty`/`reset`/`tput`/`watch`
+deferred (no `TIOCGWINSZ`).
+
+`expand_token` now scans each argv token for `$?`, `$NAME`, and
+`$((...))` (not whole-token-only). Thin integer arith: `+ - * / %`,
+parentheses, unary `+/-`, whitespace inside `$(( ))` (or quote the token).
+Inside arith, `$NAME` or bare `NAME` loads the shell env (unset → `0`;
+`set -u` errors). Division by zero / syntax errors abort the line
+(`expand_err`). Focused virtio login smoke covers basic ops / parens /
+`$VAR` / bare name / `$?` / inline mix / div0 / Ext2 prior greens (smp 1/2).
+Ramfs `/bin` dents ~107/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`/bin/sed` + `grep -E`/`[]` +
-   `dd conv=` + `od -t u1/d1`/`*` + …): prefer small coherent chunks; thin
-   `df` **only if** `statfs(2)` is clearly bite-sized (Ramfs needs invented
-   capacity + Ext2 `sb.blocks_count`/`free_blocks`/`block_size`), or
-   `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only
-   if `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex
-   / multi-nc SMP races and CFS/jbd alone. Other thin polish after inventory:
-   job/fg/bg only if a clear gap remains; shell `$(( ))` / for/while if thin
-   gaps; `/bin/stty` thin, `/bin/reset`, `/bin/tput cols/lines` (needs
-   `TIOCGWINSZ`), `/bin/watch`; skip `dirname -z`. `/bin/sed`, `/bin/tee -a`,
-   `/bin/head`, `/bin/tr`, `/bin/cut`, `/bin/printf` `%x`/`%o`, `/bin/date`
-   FORMAT, `/bin/dirname` multi, `/bin/realpath`, `/bin/true` already present.
+3. More daily-driver gaps after inventory (`$(( ))` + `/bin/sed` + `grep -E`/`[]`
+   + …): prefer small coherent chunks. Prefer thin shell `for`/`while`/`if`
+   next (needs per-iteration `$` re-expand + `;` or keyword forms). Keep
+   `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free` deferred; `stty`/`reset`/
+   `tput`/`watch` only if bite-sized without winsize or add thin
+   `TIOCGWINSZ`. Job polish only if clear gap. Leave Ext2 duplex / multi-nc /
+   CFS / jbd alone.

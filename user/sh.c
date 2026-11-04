@@ -1,9 +1,10 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf], readlink,
- * realpath, env/export/unset/which, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
+ * readlink, realpath, env/export/unset/which, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
- * pipelines, &&/||, & jobs. set -e errexit (skip mid &&/||); set -u nounset. */
+ * pipelines, &&/||, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
+ * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith). */
 package user;
 
 typedef unsigned long u64;
@@ -969,67 +970,353 @@ static char **sh_build_envp(void) {
 }
 
 /* Expand whole-token $? / $NAME (no ${} / mid-string). Writes into out. */
-static void expand_token(const char *in, char *out, int outsz, long rc_in) {
+static int fmt_long_dec(char *out, int outsz, long v) {
+    char tmp[24];
+    int t = 0;
+    int i = 0;
+    int neg = 0;
+    long x = v;
+    if (outsz <= 0) return 0;
+    if (x < 0) {
+        neg = 1;
+        x = -x;
+    }
+    if (x == 0) {
+        tmp[t++] = '0';
+    } else {
+        while (x > 0 && t < 23) {
+            tmp[t++] = (char)('0' + (x % 10));
+            x = x / 10;
+        }
+    }
+    if (neg && i + 1 < outsz) out[i++] = '-';
+    while (t > 0 && i + 1 < outsz) {
+        t--;
+        out[i++] = tmp[t];
+    }
+    out[i] = 0;
+    return i;
+}
+
+static void arith_skip_ws(const char **pp) {
+    while (**pp == ' ' || **pp == '\t') (*pp)++;
+}
+
+static int arith_name_start(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+
+static int arith_name_char(char c) {
+    return arith_name_start(c) || (c >= '0' && c <= '9');
+}
+
+/* Look up NAME in arith: unset -> 0; set -u errors. */
+static int arith_lookup(const char *name, long rc_in, long *out) {
     const char *val;
-    int i;
-    int n;
+    long v = 0;
+    int i = 0;
+    int neg = 0;
+    (void)rc_in;
+    if (name == 0 || name[0] == 0) {
+        *out = 0;
+        return 0;
+    }
+    val = sh_getenv(name);
+    if (val == 0) {
+        if (shell_opt_u) {
+            printf("sh: %s: unbound variable\n", name);
+            expand_err = 1;
+            return -1;
+        }
+        *out = 0;
+        return 0;
+    }
+    if (val[0] == 0) {
+        *out = 0;
+        return 0;
+    }
+    if (val[0] == '-') {
+        neg = 1;
+        i = 1;
+        if (val[i] == 0) {
+            *out = 0;
+            return 0;
+        }
+    } else if (val[0] == '+') {
+        i = 1;
+        if (val[i] == 0) {
+            *out = 0;
+            return 0;
+        }
+    }
+    if (val[i] < '0' || val[i] > '9') {
+        *out = 0;
+        return 0;
+    }
+    while (val[i] >= '0' && val[i] <= '9') {
+        v = v * 10 + (val[i] - '0');
+        i++;
+    }
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static int arith_expr(const char **pp, long rc_in, long *out);
+
+static int arith_factor(const char **pp, long rc_in, long *out) {
+    char name[ENV_NAME];
+    int nlen;
+    long v;
+    arith_skip_ws(pp);
+    if (**pp == '+') {
+        (*pp)++;
+        return arith_factor(pp, rc_in, out);
+    }
+    if (**pp == '-') {
+        (*pp)++;
+        if (arith_factor(pp, rc_in, &v) != 0) return -1;
+        *out = -v;
+        return 0;
+    }
+    if (**pp == '(') {
+        (*pp)++;
+        if (arith_expr(pp, rc_in, out) != 0) return -1;
+        arith_skip_ws(pp);
+        if (**pp != ')') {
+            puts("sh: arithmetic syntax error");
+            expand_err = 1;
+            return -1;
+        }
+        (*pp)++;
+        return 0;
+    }
+    if (**pp == '$') {
+        (*pp)++;
+        if (**pp == '?') {
+            (*pp)++;
+            *out = rc_in;
+            return 0;
+        }
+        nlen = 0;
+        if (!arith_name_start(**pp)) {
+            puts("sh: arithmetic syntax error");
+            expand_err = 1;
+            return -1;
+        }
+        while (arith_name_char(**pp) && nlen + 1 < ENV_NAME) {
+            name[nlen++] = **pp;
+            (*pp)++;
+        }
+        name[nlen] = 0;
+        return arith_lookup(name, rc_in, out);
+    }
+    if (**pp >= '0' && **pp <= '9') {
+        v = 0;
+        while (**pp >= '0' && **pp <= '9') {
+            v = v * 10 + (**pp - '0');
+            (*pp)++;
+        }
+        *out = v;
+        return 0;
+    }
+    if (arith_name_start(**pp)) {
+        nlen = 0;
+        while (arith_name_char(**pp) && nlen + 1 < ENV_NAME) {
+            name[nlen++] = **pp;
+            (*pp)++;
+        }
+        name[nlen] = 0;
+        return arith_lookup(name, rc_in, out);
+    }
+    puts("sh: arithmetic syntax error");
+    expand_err = 1;
+    return -1;
+}
+
+static int arith_term(const char **pp, long rc_in, long *out) {
+    long lhs;
+    long rhs;
+    char op;
+    if (arith_factor(pp, rc_in, &lhs) != 0) return -1;
+    for (;;) {
+        arith_skip_ws(pp);
+        op = **pp;
+        if (op != '*' && op != '/' && op != '%') break;
+        (*pp)++;
+        if (arith_factor(pp, rc_in, &rhs) != 0) return -1;
+        if (op == '*') {
+            lhs = lhs * rhs;
+        } else if (rhs == 0) {
+            puts("sh: division by 0");
+            expand_err = 1;
+            return -1;
+        } else if (op == '/') {
+            lhs = lhs / rhs;
+        } else {
+            lhs = lhs % rhs;
+        }
+    }
+    *out = lhs;
+    return 0;
+}
+
+static int arith_expr(const char **pp, long rc_in, long *out) {
+    long lhs;
+    long rhs;
+    char op;
+    if (arith_term(pp, rc_in, &lhs) != 0) return -1;
+    for (;;) {
+        arith_skip_ws(pp);
+        op = **pp;
+        if (op != '+' && op != '-') break;
+        (*pp)++;
+        if (arith_term(pp, rc_in, &rhs) != 0) return -1;
+        if (op == '+') lhs = lhs + rhs;
+        else lhs = lhs - rhs;
+    }
+    *out = lhs;
+    return 0;
+}
+
+/* Evaluate text inside $(( ... )). Trailing junk is an error. */
+static int arith_eval(const char *s, long rc_in, long *out) {
+    const char *p = s;
+    if (arith_expr(&p, rc_in, out) != 0) return -1;
+    arith_skip_ws(&p);
+    if (*p != 0) {
+        puts("sh: arithmetic syntax error");
+        expand_err = 1;
+        return -1;
+    }
+    return 0;
+}
+
+/* Find closing )) of $(( starting at s (s points at first char inside). */
+static const char *arith_match_close(const char *s) {
+    int depth = 0;
+    const char *p = s;
+    while (*p != 0) {
+        if (*p == '(') {
+            depth++;
+            p++;
+            continue;
+        }
+        if (*p == ')') {
+            if (depth == 0) {
+                if (p[1] == ')') return p;
+                return 0;
+            }
+            depth--;
+            p++;
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static void expand_token(const char *in, char *out, int outsz, long rc_in) {
+    const char *p;
+    int oi;
     if (outsz <= 0) return;
     if (in == 0) {
         out[0] = 0;
         return;
     }
-    if (in[0] == '$' && in[1] == '?' && in[2] == 0) {
-        /* decimal of last status into out */
-        long v = rc_in;
-        char tmp[16];
-        int t = 0;
-        int neg = 0;
-        if (v < 0) {
-            neg = 1;
-            v = -v;
+    p = in;
+    oi = 0;
+    out[0] = 0;
+    while (*p != 0 && oi + 1 < outsz) {
+        if (*p != '$') {
+            out[oi++] = *p++;
+            out[oi] = 0;
+            continue;
         }
-        if (v == 0) {
-            tmp[t++] = '0';
-        } else {
-            while (v > 0 && t < 15) {
-                tmp[t++] = (char)('0' + (v % 10));
-                v = v / 10;
-            }
-        }
-        i = 0;
-        if (neg && i + 1 < outsz) out[i++] = '-';
-        while (t > 0 && i + 1 < outsz) {
-            t--;
-            out[i++] = tmp[t];
-        }
-        out[i] = 0;
-        return;
-    }
-    if (in[0] == '$' && in[1] != 0 && env_name_ok(in + 1)) {
-        val = sh_getenv(in + 1);
-        if (val == 0) {
-            if (shell_opt_u) {
-                printf("sh: %s: unbound variable\n", in + 1);
+        /* $((arith)) */
+        if (p[1] == '(' && p[2] == '(') {
+            const char *inner = p + 3;
+            const char *close = arith_match_close(inner);
+            char abuf[96];
+            int n;
+            long v;
+            if (close == 0) {
+                puts("sh: arithmetic syntax error");
                 expand_err = 1;
                 out[0] = 0;
                 return;
             }
-            val = "";
+            n = (int)(close - inner);
+            if (n < 0 || n >= (int)sizeof(abuf)) {
+                puts("sh: arithmetic syntax error");
+                expand_err = 1;
+                out[0] = 0;
+                return;
+            }
+            {
+                int k;
+                for (k = 0; k < n; k++) abuf[k] = inner[k];
+                abuf[n] = 0;
+            }
+            if (arith_eval(abuf, rc_in, &v) != 0) {
+                out[0] = 0;
+                return;
+            }
+            {
+                char num[24];
+                int nl = fmt_long_dec(num, 24, v);
+                int k;
+                for (k = 0; k < nl && oi + 1 < outsz; k++) out[oi++] = num[k];
+                out[oi] = 0;
+            }
+            p = close + 2;
+            continue;
         }
-        n = 0;
-        while (val[n] != 0 && n + 1 < outsz) {
-            out[n] = val[n];
-            n++;
+        /* $? */
+        if (p[1] == '?') {
+            char num[24];
+            int nl = fmt_long_dec(num, 24, rc_in);
+            int k;
+            for (k = 0; k < nl && oi + 1 < outsz; k++) out[oi++] = num[k];
+            out[oi] = 0;
+            p += 2;
+            continue;
         }
-        out[n] = 0;
-        return;
+        /* $NAME */
+        if (arith_name_start(p[1])) {
+            char name[ENV_NAME];
+            int nlen = 0;
+            const char *val;
+            const char *np = p + 1;
+            while (arith_name_char(*np) && nlen + 1 < ENV_NAME) {
+                name[nlen++] = *np;
+                np++;
+            }
+            name[nlen] = 0;
+            val = sh_getenv(name);
+            if (val == 0) {
+                if (shell_opt_u) {
+                    printf("sh: %s: unbound variable\n", name);
+                    expand_err = 1;
+                    out[0] = 0;
+                    return;
+                }
+                val = "";
+            }
+            {
+                int k = 0;
+                while (val[k] != 0 && oi + 1 < outsz) {
+                    out[oi++] = val[k];
+                    k++;
+                }
+                out[oi] = 0;
+            }
+            p = np;
+            continue;
+        }
+        /* lone '$' */
+        out[oi++] = *p++;
+        out[oi] = 0;
     }
-    n = 0;
-    while (in[n] != 0 && n + 1 < outsz) {
-        out[n] = in[n];
-        n++;
-    }
-    out[n] = 0;
 }
 
 static void expand_argv(char **tokens, long rc_in) {
@@ -1262,7 +1549,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2418,7 +2705,7 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
