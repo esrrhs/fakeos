@@ -1,8 +1,11 @@
 /* fakeos userland - nl: number lines (thin POSIX subset).
- * Forms: nl [-b a|t] [-v START] [-i INCR] [-n ln|rn|rz] [-w WIDTH] [-s SEP] [FILE...]
+ * Forms: nl [-b a|t] [-v START] [-i INCR] [-n ln|rn|rz] [-p] [-w WIDTH] [-s SEP] [FILE...]
  * Default: -b t (non-empty), -v 1, -i 1, -n rn, -w 6, -s tab. stdin if no FILE.
  * -n: ln left-pad spaces after digits; rn right spaces (default); rz right zeros.
- * Glued -ba/-bt/-vN/-iN/-nln/-nrn/-nrz/-wN/-sSEP keep argv under EXEC_MAX_ARGC=8.
+ * Logical page delimiters (default CC "\:"): lines "\:", "\:\:", "\:\:\:" are
+ * omitted; without -p the next number resets to -v. -p keeps numbering across
+ * those markers. Glued -ba/-bt/-vN/-iN/-nln/-nrn/-nrz/-wN/-sSEP keep argv under
+ * EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -20,11 +23,12 @@ static int body_all;      /* -b a: number all; else -b t non-empty */
 static long start_num = 1;
 static long incr = 1;     /* -i: number increment */
 static int num_fmt;       /* 0=rn (default), 1=ln, 2=rz */
+static int opt_p;         /* -p: do not reset at page delimiters */
 static int width = 6;
 static const char *sep = "\t";
 
 static void usage(void) {
-    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-n ln|rn|rz] [-w N] [-s SEP] [FILE...]\n", 73);
+    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-n ln|rn|rz] [-p] [-w N] [-s SEP] [FILE...]\n", 78);
 }
 
 static int is_digits(const char *s) {
@@ -79,13 +83,30 @@ static void emit_num(long num) {
     u_write(1, sep, strlen(sep));
 }
 
+/* Default section delimiter CC is "\:". Header/body/footer markers are
+ * CC repeated 3/2/1 times — lines "\:\:\:", "\:\:", "\:" — omitted from
+ * output. Without -p, numbering resets to start_num. */
+static int is_page_delim(const char *line, int len) {
+    if (len == 2 && line[0] == '\\' && line[1] == ':') return 1;
+    if (len == 4 && line[0] == '\\' && line[1] == ':' &&
+        line[2] == '\\' && line[3] == ':') return 1;
+    if (len == 6 && line[0] == '\\' && line[1] == ':' &&
+        line[2] == '\\' && line[3] == ':' &&
+        line[4] == '\\' && line[5] == ':') return 1;
+    return 0;
+}
+
 static void emit_line(const char *line, int len, long *num) {
     int empty = (len == 0);
+    if (is_page_delim(line, len)) {
+        if (!opt_p) *num = start_num;
+        return;
+    }
     if (body_all || !empty) {
         emit_num(*num);
         (*num) += incr;
     } else {
-        /* blank body lines: spaces matching number column + sep omitted
+        /* blank body lines: spaces matching number column + sep
          * (POSIX leaves leading whitespace empty for unnumbered). */
         int j;
         for (j = 0; j < width; j++) u_write(1, " ", 1);
@@ -165,6 +186,9 @@ int main(int argc, char **argv) {
             i += 2;
         } else if (a[1] == 'n' && a[2] != 0) {
             if (set_num_fmt(a + 2) != 0) { usage(); return 1; }
+            i++;
+        } else if (strcmp(a, "-p") == 0) {
+            opt_p = 1;
             i++;
         } else if (strcmp(a, "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
