@@ -410,6 +410,8 @@ def main():
         "[FS] published /bin/seq (",
         "[FS] published /bin/cut (",
         "[FS] published /bin/tr (",
+        "[FS] published /bin/test (",
+        "[FS] published /bin/[ (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

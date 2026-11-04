@@ -233,6 +233,15 @@ SET2` translates and `tr -d SET` deletes (`a-z` ranges; `\n`/`\t`/`\r`/`\0`/
 `\\` escapes). Focused virtio login smoke covers both plus login/`uname`/
 `ls -l`/`udptest`/`id` (smp 1/2).
 
+## /bin/test + /bin/[ — landed
+
+Thin POSIX `test`/`[` (exit 0 true / 1 false / 2 error). Unary file/string
+ops (`-e/-f/-d/-h/-L/-s/-r/-w/-x/-z/-n` plus `-b/-c/-p/-S`), string `=`/`!=`,
+integer `-eq/-ne/-lt/-le/-gt/-ge`, and a single leading `!`. The `[` form
+requires a closing `]` (same ELF published as `/bin/test` and `/bin/[`).
+Focused virtio login smoke covers file/string/int forms with `&&`/`||` plus
+prior interactive greens (smp 1/2).
+
 ## hard link(2) + shell ln — landed
 
 Linux nr `link(86)`. Ramfs tracks `inode.nlink` (files/symlinks); Ext2 bumps

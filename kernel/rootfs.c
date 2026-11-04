@@ -64,6 +64,8 @@ extern char user_cut_start;
 extern char user_cut_end;
 extern char user_tr_start;
 extern char user_tr_end;
+extern char user_test_start;
+extern char user_test_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -145,6 +147,8 @@ void rootfs_publish(void) {
     publish_one("/bin/seq", (u64)(&user_seq_start), (u64)(&user_seq_end));
     publish_one("/bin/cut", (u64)(&user_cut_start), (u64)(&user_cut_end));
     publish_one("/bin/tr", (u64)(&user_tr_start), (u64)(&user_tr_end));
+    publish_one("/bin/test", (u64)(&user_test_start), (u64)(&user_test_end));
+    publish_one("/bin/[", (u64)(&user_test_start), (u64)(&user_test_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
     publish_one("/bin/dumpbin", (u64)(&user_dumpbin_start), (u64)(&user_dumpbin_end));
