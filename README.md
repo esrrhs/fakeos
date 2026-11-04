@@ -370,6 +370,7 @@ flowchart TD
 - [x] **join -o**：输出字段序（`-o LIST`/`-oLIST`；`0`/`1.N`/`2.N`；逗号或空白分隔）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **comm -z**：NUL 记录（`-z`/`-123z`；输入输出以 NUL 分记录；可与 sort -z 配对）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **dd conv=lcase/ucase**：ASCII 大小写转换（`conv=lcase`/`ucase`；可与 notrunc/sync/fsync 组合；后者覆盖前者）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **od -t a**：命名字符（`-t a`/`-ta`；nul/ht/sp/del 等宽 3；可打印字形）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

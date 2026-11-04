@@ -1,11 +1,11 @@
 /* fakeos userland - od: thin octal/hex dump (POSIX-ish subset).
- * Forms: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1] [-N COUNT|-NCOUNT]
+ * Forms: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1|a] [-N COUNT|-NCOUNT]
  *        [-j SKIP|-jSKIP] [-w BYTES|-wBYTES] [FILE...]
  * Default: -A o -t x1, 16 bytes per line. -w sets bytes per output line
- * (1..32). stdin if no FILE. -j skips SKIP input bytes before dumping
- * (seek when possible, else read-discard). Duplicate full-width lines are
- * collapsed to a single "*" (disable with -v). Compact argv for
- * EXEC_MAX_ARGC=8.
+ * (1..32). -t a prints named ASCII (nul/ht/sp/del/…) or the glyph, width 3.
+ * stdin if no FILE. -j skips SKIP input bytes before dumping (seek when
+ * possible, else read-discard). Duplicate full-width lines are collapsed to
+ * a single "*" (disable with -v). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -15,6 +15,7 @@ extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_lseek(long fd, long off, long whence);
 extern int strcmp(const char *a, const char *b);
+extern unsigned long strlen(const char *s);
 extern long strtol_dec(const char *s);
 extern void printf(const char *fmt, ...);
 
@@ -29,7 +30,8 @@ enum {
     TYPE_O1 = 1,
     TYPE_C = 2,
     TYPE_U1 = 3,
-    TYPE_D1 = 4
+    TYPE_D1 = 4,
+    TYPE_A = 5
 };
 
 static int addr_mode = ADDR_OCT;
@@ -175,11 +177,42 @@ static void emit_c(unsigned char b) {
     }
 }
 
+/* Named ASCII (-t a): 3-wide field (GNU-ish). High bytes as octal. */
+static void emit_a(unsigned char b) {
+    static const char *names[33] = {
+        "nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel",
+        "bs", "ht", "nl", "vt", "ff", "cr", "so", "si",
+        "dle", "dc1", "dc2", "dc3", "dc4", "nak", "syn", "etb",
+        "can", "em", "sub", "esc", "fs", "gs", "rs", "us",
+        "sp"
+    };
+    const char *s;
+    int len;
+    int pad;
+    int i;
+    if (b <= 32) {
+        s = names[b];
+        len = (int)strlen(s);
+        pad = 3 - len;
+        for (i = 0; i < pad; i++) putc1(' ');
+        u_write(1, s, (unsigned long)len);
+    } else if (b == 127) {
+        u_write(1, "del", 3);
+    } else if (b < 127) {
+        putc1(' ');
+        putc1(' ');
+        putc1((char)b);
+    } else {
+        emit_oct3(b);
+    }
+}
+
 static void emit_byte(unsigned char b) {
     if (type_mode == TYPE_X1) emit_hex2(b);
     else if (type_mode == TYPE_O1) emit_oct3(b);
     else if (type_mode == TYPE_U1) emit_u1(b);
     else if (type_mode == TYPE_D1) emit_d1(b);
+    else if (type_mode == TYPE_A) emit_a(b);
     else emit_c(b);
 }
 
@@ -283,6 +316,7 @@ static int parse_type(const char *s) {
     if (strcmp(s, "c") == 0) { type_mode = TYPE_C; return 0; }
     if (strcmp(s, "u1") == 0) { type_mode = TYPE_U1; return 0; }
     if (strcmp(s, "d1") == 0) { type_mode = TYPE_D1; return 0; }
+    if (strcmp(s, "a") == 0) { type_mode = TYPE_A; return 0; }
     return -1;
 }
 
@@ -353,6 +387,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-td1") == 0) {
             type_mode = TYPE_D1;
             i++;
+        } else if (strcmp(argv[i], "-ta") == 0) {
+            type_mode = TYPE_A;
+            i++;
         } else if (strcmp(argv[i], "-vtx1") == 0) {
             show_all = 1;
             type_mode = TYPE_X1;
@@ -372,6 +409,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-vtd1") == 0) {
             show_all = 1;
             type_mode = TYPE_D1;
+            i++;
+        } else if (strcmp(argv[i], "-vta") == 0) {
+            show_all = 1;
+            type_mode = TYPE_A;
             i++;
         } else if (argv[i][0] == '-' && argv[i][1] == 'N' && argv[i][2] != 0 &&
                    is_digits(argv[i] + 2)) {

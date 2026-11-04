@@ -1854,6 +1854,13 @@ conversions appear, the later token wins. No new `/bin` dent. Focused virtio
 login smoke covers `dd conv=lcase|ucase` + prior greens including comm -z
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## od -t a — landed
+
+`/bin/od -t a` / `-ta` prints named ASCII characters (nul/ht/sp/del/…, width
+3) or the printable glyph. Keeps `-v`/`-A`/`-t`/`-N`/`-j`/`-w`. No new `/bin`
+dent. Focused virtio login smoke covers `od -t a` + prior greens including
+dd conv=lcase (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1861,6 +1868,6 @@ login smoke covers `dd conv=lcase|ucase` + prior greens including comm -z
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `od -t a` / `expr :` / other util flags on
-   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `expr :` / other util flags on existing `/bin`
+   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
