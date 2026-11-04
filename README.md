@@ -318,6 +318,7 @@ flowchart TD
 - [x] **shell hash -p**：`hash -p PATH NAME` 直接记 PATH（不搜 PATH）；保留 `-r`/list/`hash NAME`。virtio login smoke（smp 1/2）。
 - [x] **shell hash -t/-l**：`-t NAME` 打印缓存路径（多 NAME 为 `NAME\tPATH`）；`-l` 以 `hash -p PATH NAME` 列出；`-lt` 混合。virtio login smoke（smp 1/2）。
 - [x] **test/[ </> lex**：`/bin/test` 与 `/bin/[` 增加字符串 `<`/`>`（strcmp 字节序；与 shell `[[ </> ]]` 对齐）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **shell local -r/-x**：函数内 `local [-rx] NAME[=VAL]`；restore 还原 export/readonly。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

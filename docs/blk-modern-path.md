@@ -1450,6 +1450,14 @@ dents ~114/128.
 Focused virtio login smoke covers `test`/`[` lex + prior greens including
 hash -t/-l (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell local -r/-x — landed
+
+Thin `local [-rx] NAME[=VAL]…` (glued `-rx` ok) inside functions. Reuses
+`sh_mark_export` / `sh_mark_readonly`; local frame save/restore now tracks
+`was_readonly` and unwinds with `sh_ro_override`. No new `/bin` dent.
+Focused virtio login smoke covers `-r`/`-x`/restore + prior greens
+including test lex (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1457,8 +1465,8 @@ hash -t/-l (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `local -r`/`-x`, `break N`/`continue N` if
-   loop frames allow, or other small `/bin`/shell bites (`set --` still
+   deferred. Next thin polish: `break N`/`continue N` if loop_ctrl levels
+   are bite-sized, or other small `/bin`/shell bites (`set --` still
    deferred; skip large `getopts` / here-doc / trap / `fc` / `bind` /
    `=~`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
    multi-nc / CFS / jbd alone.

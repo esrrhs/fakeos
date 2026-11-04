@@ -1476,6 +1476,7 @@ struct sh_local {
     int depth;
     int had;
     int was_exported;
+    int was_readonly;
     char name[ENV_NAME];
     char val[ENV_VAL];
 };
@@ -1680,13 +1681,21 @@ static void locals_restore_frame(int depth) {
     int i;
     for (i = MAX_LOCAL - 1; i >= 0; i--) {
         if (!sh_locals[i].used || sh_locals[i].depth != depth) continue;
+        /* local -r may have marked the slot readonly; override to unwind. */
+        sh_ro_override = 1;
         if (sh_locals[i].had) {
+            (void)sh_mark_readonly(sh_locals[i].name, 0);
             sh_setenv(sh_locals[i].name, sh_locals[i].val);
             sh_mark_export(sh_locals[i].name, sh_locals[i].was_exported);
+            sh_mark_readonly(sh_locals[i].name, sh_locals[i].was_readonly);
         } else {
+            (void)sh_mark_readonly(sh_locals[i].name, 0);
             sh_unsetenv(sh_locals[i].name);
         }
+        sh_ro_override = 0;
         sh_locals[i].used = 0;
+        sh_locals[i].was_exported = 0;
+        sh_locals[i].was_readonly = 0;
         sh_locals[i].name[0] = 0;
         sh_locals[i].val[0] = 0;
     }
@@ -1720,15 +1729,19 @@ static int local_save(const char *name) {
     sh_locals[free_slot].name[nlen] = 0;
     sh_locals[free_slot].had = existed ? 1 : 0;
     sh_locals[free_slot].was_exported = 0;
+    sh_locals[free_slot].was_readonly = 0;
     sh_locals[free_slot].val[0] = 0;
     if (existed) {
+        int ro = 0;
         for (i = 0; i < MAX_ENV; i++) {
             if (sh_envs[i].used && eq(sh_envs[i].name, name)) {
                 exp = sh_envs[i].exported;
+                ro = sh_envs[i].readonly;
                 break;
             }
         }
         sh_locals[free_slot].was_exported = exp;
+        sh_locals[free_slot].was_readonly = ro;
         vlen = 0;
         while (cur[vlen] != 0 && vlen + 1 < ENV_VAL) {
             sh_locals[free_slot].val[vlen] = cur[vlen];
@@ -2656,7 +2669,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "wait", "wait [PID|%N]" },
     { "kill", "kill [-SIG] PID..." },
     { "shift", "shift [N]" },
-    { "local", "local [NAME[=VALUE]...]" },
+    { "local", "local [-rx] NAME[=VALUE]..." },
     { "return", "return [N]" },
     { "break", "break" },
     { "continue", "continue" },
@@ -3173,18 +3186,44 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "local")) {
+        /* Thin local [-rx] NAME[=VAL]... — reuse export/readonly marks;
+         * frame restore unwinds both flags via was_exported/was_readonly. */
         int ai = 1;
+        int want_r = 0;
+        int want_x = 0;
+        int bad = 0;
         if (func_depth <= 0) {
             puts("sh: local: can only be used in a function");
             return 1;
         }
-        if (tokens[1] == 0) {
-            puts("usage: local NAME[=VAL]...");
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'r') want_r = 1;
+                else if (o[j] == 'x') want_x = 1;
+                else {
+                    puts("usage: local [-rx] NAME[=VALUE]...");
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad) break;
+            ai++;
+        }
+        if (bad) {
+            return 1;
+        }
+        if (tokens[ai] == 0) {
+            puts("usage: local [-rx] NAME[=VALUE]...");
             return 1;
         }
         for (; tokens[ai] != 0; ai++) {
             char name[ENV_NAME];
             const char *eqp = 0;
+            const char *bind_name;
+            const char *bind_val;
             int n = 0;
             int k;
             for (k = 0; tokens[ai][k] != 0; k++) {
@@ -3200,14 +3239,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     puts("sh: local: bad name");
                     return 1;
                 }
-                if (local_save(tokens[ai]) != 0) {
-                    printf("sh: local: %s: failed\n", tokens[ai]);
-                    return 1;
-                }
-                if (sh_setenv_local(tokens[ai], "") != 0) {
-                    printf("sh: local: %s: failed\n", tokens[ai]);
-                    return 1;
-                }
+                bind_name = tokens[ai];
+                bind_val = "";
             } else {
                 n = (int)(eqp - tokens[ai]);
                 if (n <= 0 || n >= ENV_NAME) {
@@ -3220,14 +3253,27 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     puts("sh: local: bad name");
                     return 1;
                 }
-                if (local_save(name) != 0) {
-                    printf("sh: local: %s: failed\n", name);
-                    return 1;
-                }
-                if (sh_setenv_local(name, eqp + 1) != 0) {
-                    printf("sh: local: %s: failed\n", name);
-                    return 1;
-                }
+                bind_name = name;
+                bind_val = eqp + 1;
+            }
+            if (local_save(bind_name) != 0) {
+                printf("sh: local: %s: failed\n", bind_name);
+                return 1;
+            }
+            sh_ro_override = 1;
+            if (sh_setenv_local(bind_name, bind_val) != 0) {
+                sh_ro_override = 0;
+                printf("sh: local: %s: failed\n", bind_name);
+                return 1;
+            }
+            sh_ro_override = 0;
+            if (want_x && sh_mark_export(bind_name, 1) != 0) {
+                printf("sh: local: %s: failed\n", bind_name);
+                return 1;
+            }
+            if (want_r && sh_mark_readonly(bind_name, 1) != 0) {
+                printf("sh: local: %s: failed\n", bind_name);
+                return 1;
             }
         }
         return 0;
@@ -3262,9 +3308,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
