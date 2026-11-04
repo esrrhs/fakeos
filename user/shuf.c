@@ -1,10 +1,11 @@
 /* fakeos userland - shuf: shuffle lines or a number range (thin).
- *   shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]
+ *   shuf [-z] [-n N] [-i LO-HI] [-e ARG...] [FILE...]
  * Reads lines into RAM (MAX_LINES), Fisher-Yates shuffle, prints.
  * -i LO-HI: ignore FILE/stdin; emit inclusive decimal range then shuffle.
  * -e: remaining args are input lines (compact; EXEC_MAX_ARGC=8).
- * -n N / -nN: output at most N lines. Seed: clock_gettime + getpid.
- * No -z/-o/--random-source. Default FILE is stdin.
+ * -n N / -nN: output at most N lines. -z: NUL-terminated records
+ * (input+output; GNU-ish). Seed: clock_gettime + getpid.
+ * No -o/--random-source. Default FILE is stdin. Glued -nN.
  */
 package user;
 
@@ -30,10 +31,11 @@ enum {
 static char *lines[MAX_LINES];
 static int nlines;
 static long out_limit = -1; /* -1 = all */
+static int opt_z; /* NUL records */
 static unsigned int rng_state;
 
 static void usage(void) {
-    u_write(2, "usage: shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]\n", 52);
+    u_write(2, "usage: shuf [-z] [-n N] [-i LO-HI] [-e ARG...] [FILE...]\n", 57);
 }
 
 static int is_digits(const char *s) {
@@ -138,7 +140,7 @@ static int load_fd(long fd) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            if (opt_z ? (c == 0) : (c == '\n')) {
                 if (add_line_n(line, li) != 0) return 1;
                 li = 0;
                 continue;
@@ -168,7 +170,8 @@ static void print_out(void) {
     for (i = 0; i < nlines; i++) {
         if (left == 0) break;
         u_write(1, lines[i], strlen(lines[i]));
-        u_write(1, "\n", 1);
+        if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+        else u_write(1, "\n", 1);
         if (left > 0) left--;
     }
 }
@@ -272,6 +275,11 @@ int main(int argc, char **argv) {
         }
         if (argv[i][0] == '-' && argv[i][1] == 'n' && is_digits(argv[i] + 2)) {
             out_limit = strtol_dec(argv[i] + 2);
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
             i++;
             continue;
         }

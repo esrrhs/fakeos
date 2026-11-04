@@ -663,7 +663,7 @@ interactive greens (smp 1/2). Ramfs `/bin` dents 100/128.
 
 ## /bin/shuf + head/tail -c — landed
 
-Thin POSIX polish. `/bin/shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]` loads
+Thin POSIX polish. `/bin/shuf [-z] [-n N] [-i LO-HI] [-e ARG...] [FILE...]` loads
 lines (or an inclusive decimal range / `-e` argv lines), Fisher-Yates shuffles
 with a clock_gettime+getpid xorshift seed, then prints (`-n` caps output).
 `head`/`tail` gain `-c N`/`-cN` byte modes alongside existing `-n`/`-N` line
@@ -1999,6 +1999,13 @@ Marker lines are CC / CC×2 / CC×3; omitted; reset/`-p` unchanged. Keeps
 `-b`/`-v`/`-i`/`-n`/`-p`/`-w`/`-s`. No new `/bin` dent. Focused virtio login
 smoke covers `nl -d` + prior greens including nl -p (smp 1/2). Ramfs `/bin`
 dents ~114/128.
+
+## shuf -z — landed
+
+`/bin/shuf -z` uses NUL-terminated records for input and output (GNU-ish;
+pairs with `cut -z` / `tac -z` / `rev -z`). Keeps `-n`/`-i`/`-e`. No new
+`/bin` dent. Focused virtio login smoke covers `shuf -z` + prior greens
+including nl -d (smp 1/2). Ramfs `/bin` dents ~114/128.
 
 ## Suggested next steps
 
