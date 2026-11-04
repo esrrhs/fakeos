@@ -247,6 +247,7 @@ flowchart TD
 - [x] **/bin/sha256sum**：外部 `sha256sum` 真实 FIPS 180-4 SHA-256 摘要；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/base64**：外部 `base64 [-d] [FILE...]` 编码/解码（76 列换行；`-d` 忽略空白）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/factor + /bin/clear + /bin/tty + /bin/whoami**：外部 `factor [NUMBER...]` 质因数、`clear` ANSI 清屏（shell-mirror）、`tty [-s]`（TCGETS→`/dev/tty`）、`whoami`（geteuid+/etc/passwd）；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/id + /bin/groups**：外部 `id`（shell-mirror：uid/euid/gid/egid + groups=）与 `groups`（egid + getgroups，经 `/etc/group` 解析名）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。

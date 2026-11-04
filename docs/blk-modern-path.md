@@ -517,6 +517,16 @@ stdin and prints `/dev/tty` or `not a tty`. `whoami` maps geteuid() via
 12/17/1/100, tty, whoami=root, clear escape, prior interactive greens
 (smp 1/2). Ramfs `/bin` dents 83/128.
 
+## /bin/id + /bin/groups — landed
+
+External shell-mirrors. `/bin/id` prints `uid= euid= gid= egid=` and optional
+`groups=` (comma-separated getgroups numbers), matching the shell builtin —
+no USERNAME/`-n`/`-G` flags (compact argv). `/bin/groups` prints primary egid
+then supplementary getgroups names via `/etc/group` (numeric fallback; skips
+duplicate egid). Focused virtio login smoke covers `/bin/id` (root + wheel
+supp), `groups` (`root wheel`), plus prior interactive greens (smp 1/2).
+Ramfs `/bin` dents 85/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -524,7 +534,7 @@ stdin and prints `/dev/tty` or `not a tty`. `whoami` maps geteuid() via
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX after inventory (e.g.
-   external `id`/`groups`/`cal`/`install -d`; factor/clear/tty/whoami +
-   base64 + checksum trio already present) — prefer small coherent chunks.
+   `cal`/`install -d`; id/groups + factor/clear/tty/whoami + base64 +
+   checksum trio already present) — prefer small coherent chunks.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.
