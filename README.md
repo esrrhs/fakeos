@@ -161,6 +161,7 @@ flowchart TD
 - [x] **PS/2 键盘 IRQ1**：i8042 + set-1 扫描码；I/O APIC IRQ1→vector 33；`tty_push_byte` 与串口共享行规程，回显至 UART+VGA。
 - [x] **Ext2 persist-root UX**：`/home` 路径别名到 Ext2 卷；Ramfs 保留 `/bin` `/etc` `/tmp` 等；VirtIO-blk 轮询夹带 port I/O，FLUSH 超时最佳努力以免卡死队列。
 - [x] **现代 VirtIO-net + MSI/MSI-X RX**：与 blk 共用 cap map；vector 40；`make qemu-modern`。
+- [x] **VirtIO-net multi-vector MSI-X TX/RX**：`pci_msix_enable_n`；RX=40/TX=43；TX `sched_sleep`；modern VERSION_1 hdr=12；`[VNET] [PASS] MSI-X TX/RX split`（`make qemu-modern`）。
 - [x] **VirtIO-blk MSI-X/IRQ 完成**：vector 41；used-ring `sched_sleep` 唤醒 + 轮询回退。
 - [x] **IRQ 驱动 VirtIO-net**：PCI INTx → I/O APIC level → vector 40；`virtio_net_irq` ack ISR 后 `net_poll` 收包；idle 轮询仅作备份。
 - [x] **TCP 握手与流**：`listen`/`accept` + 三次握手；已连接 `send`/`recv`（sendto/recvfrom 与 read/write）；环回自测；`/bin/nc` TCP 模式（`nc -l PORT` / `nc HOST PORT`）。SYN/数据经 100Hz 定时器重传。

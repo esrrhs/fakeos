@@ -20,16 +20,24 @@ extern u32 pci_virtio_map_cap(u8 bus, u8 slot, u8 func, u8 cfg_type,
                               u64 *mmio_phys, u32 *len, u32 *notify_mult);
 extern u32 pci_msi_enable(u8 bus, u8 slot, u8 func, u8 vector);
 extern u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector);
+extern u32 pci_msix_enable_n(u8 bus, u8 slot, u8 func, u8 *vectors, u32 n);
 extern void ioapic_route_irq_level(u32 irq, u32 vector);
+extern void io_wait(void);
+extern void cpu_cli(void);
+extern void cpu_sti(void);
+extern void sched_sleep(u64 chan);
+extern void sched_wakeup(u64 chan);
+extern u32 sched_is_active(void);
 
 /* ---------------------------------------------------------------------------
- * VirtIO-net PCI driver - legacy I/O BAR + modern MMIO, IRQ RX + polled TX.
+ * VirtIO-net PCI driver - legacy I/O BAR + modern MMIO, IRQ RX + TX.
  *
  * Default `make qemu` keeps disable-modern=on (legacy BAR + INTx). When the
  * device exposes modern vendor caps (or `make qemu-modern` / disable-legacy),
  * the modern path maps common/notify/ISR/device cfg and programs both RX/TX
- * queues. MSI-X (preferred) or MSI on vector 40 drives RX; INTx remains the
- * fallback. Idle net_poll is still a backup drain.
+ * queues. Modern prefers multi-vector MSI-X (RX vector 40 / TX vector 43) so
+ * each queue has its own table entry; single-vector MSI/MSI-X or INTx remain
+ * fallbacks (RX on 40, TX polled). Idle net_poll is still a backup drain.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -88,12 +96,15 @@ enum {
 
     VIRTIO_MSI_NO_VECTOR  = 0xFFFF,
 
-    NET_HDR_SIZE          = 10,
+    NET_HDR_LEGACY        = 10,  /* without VERSION_1 / MRG_RXBUF */
+    NET_HDR_V1            = 12,  /* VERSION_1 includes num_buffers */
     ETH_MAX               = 1514,
     PKT_BUF_SIZE          = 2048,
     RX_BUFS               = 16,
     QUEUE_MAX             = 1024,
-    VNET_IRQ_VECTOR       = 40,
+    VNET_IRQ_VECTOR_RX    = 40,
+    VNET_IRQ_VECTOR_TX    = 43,
+    VNET_IRQ_VECTOR       = 40, /* alias: single-vector / INTx RX */
     PCI_INTERRUPT_LINE    = 0x3C,
     ARENA_ORDER           = 6,
     ARENA_BYTES           = 262144
@@ -113,6 +124,7 @@ struct virtio_net {
     u32 present;
     u32 modern;
     u32 msi;                  /* 1 = MSI/MSI-X armed (no INTx needed) */
+    u32 msix_multi;           /* 1 = MSI-X table entry 0=RX, 1=TX */
     u16 iobase;
     u8  mac[6];
     u8  pci_irq;
@@ -131,7 +143,13 @@ struct virtio_net {
 };
 
 static volatile u64 vnet_irq_count;
+static volatile u64 vnet_tx_irq_count;
+static const u64 VNET_TX_WAIT_CHAN = 0x564E455400000001ULL; /* "VNET" */
 static struct virtio_net vn;
+
+static u32 net_hdr_size(void) {
+    return vn.modern ? (u32)NET_HDR_V1 : (u32)NET_HDR_LEGACY;
+}
 
 static volatile u8 *hhdm8(u64 phys) {
     return (volatile u8 *)(HHDM_BASE + phys);
@@ -284,9 +302,16 @@ static u32 setup_one_queue(struct virtq *q, u16 sel, u64 *cursor) {
         *m64(vn.common_phys, M_Q_DRIVER) = q->avail_phys;
         *m64(vn.common_phys, M_Q_DEVICE) = q->used_phys;
         q->notify_off = *m16(vn.common_phys, M_Q_NOTIFY_OFF);
-        /* MSI-X table entry 0 for both queues when MSI-X is armed. */
+        /* Per-queue MSI-X: RX -> entry 0, TX -> entry 1 when multi-vector. */
         if (vn.msi) {
-            *m16(vn.common_phys, M_Q_MSIX) = 0;
+            if (vn.msix_multi) {
+                *m16(vn.common_phys, M_Q_MSIX) = (sel == 0) ? 0 : 1;
+            } else {
+                *m16(vn.common_phys, M_Q_MSIX) = 0;
+            }
+            if (sel == 0) {
+                *m16(vn.common_phys, M_MSIX_CONFIG) = (u16)VIRTIO_MSI_NO_VECTOR;
+            }
         }
         *m16(vn.common_phys, M_Q_ENABLE) = 1;
     } else {
@@ -347,19 +372,19 @@ u32 virtio_net_tx(const void *frame, u32 len) {
         return 0;
     }
     buf = vn.tx_buf_phys;
-    for (i = 0; i < NET_HDR_SIZE; i++) {
+    for (i = 0; i < net_hdr_size(); i++) {
         hhdm8(buf)[i] = 0;
     }
     src = (const u8 *)frame;
     for (i = 0; i < len; i++) {
-        hhdm8(buf)[NET_HDR_SIZE + i] = src[i];
+        hhdm8(buf)[net_hdr_size() + i] = src[i];
     }
 
     d0 = alloc_desc(&vn.tx);
     if (d0 == 0xFFFF) {
         return 0;
     }
-    desc_write(&vn.tx, d0, buf, NET_HDR_SIZE + len, 0, 0);
+    desc_write(&vn.tx, d0, buf, net_hdr_size() + len, 0, 0);
 
     avail_idx = *hhdm16(vn.tx.avail_phys + 2);
     *hhdm16(vn.tx.avail_phys + 4 + ((u64)(avail_idx % vn.tx.size)) * 2) = d0;
@@ -375,6 +400,11 @@ u32 virtio_net_tx(const void *frame, u32 len) {
             break;
         }
         spins++;
+        if (vn.msix_multi && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(VNET_TX_WAIT_CHAN);
+        } else if ((spins & 255) == 0) {
+            io_wait();
+        }
         if (spins > 2000000) {
             kprintf("[VNET] tx timeout\n");
             free_desc(&vn.tx, d0);
@@ -419,7 +449,7 @@ u32 virtio_net_rx(void *frame, u32 maxlen) {
             break;
         }
     }
-    if (slot == 0xFFFF || len <= NET_HDR_SIZE) {
+    if (slot == 0xFFFF || len <= net_hdr_size()) {
         if (slot != 0xFFFF) {
             free_desc(&vn.rx, (u16)id);
             rx_post(slot);
@@ -427,7 +457,7 @@ u32 virtio_net_rx(void *frame, u32 maxlen) {
         return 0;
     }
     buf = vn.rx_buf_phys + ((u64)slot) * PKT_BUF_SIZE;
-    len = len - NET_HDR_SIZE;
+    len = len - net_hdr_size();
     if (len > maxlen) {
         len = maxlen;
     }
@@ -436,14 +466,14 @@ u32 virtio_net_rx(void *frame, u32 maxlen) {
     }
     dst = (u8 *)frame;
     for (i = 0; i < len; i++) {
-        dst[i] = hhdm8(buf)[NET_HDR_SIZE + i];
+        dst[i] = hhdm8(buf)[net_hdr_size() + i];
     }
     free_desc(&vn.rx, (u16)id);
     rx_post(slot);
     return len;
 }
 
-/* Ack device interrupt. MSI/MSI-X deliveries are edge and need no ISR ack;
+/* Ack RX interrupt. MSI/MSI-X deliveries are edge and need no ISR ack;
  * INTx / legacy ISR is read-to-clear. */
 u32 virtio_net_irq(void) {
     if (!vn.present) {
@@ -463,15 +493,96 @@ u32 virtio_net_irq(void) {
     }
 }
 
+/* TX queue MSI-X (vector 43): wake TX waiters. */
+u32 virtio_net_tx_irq(void) {
+    if (!vn.present || !vn.msix_multi) {
+        return 0;
+    }
+    vnet_tx_irq_count++;
+    sched_wakeup(VNET_TX_WAIT_CHAN);
+    return 1;
+}
+
 u64 virtio_net_irq_count_total(void) {
     return vnet_irq_count;
 }
 
+u64 virtio_net_tx_irq_count_total(void) {
+    return vnet_tx_irq_count;
+}
+
+u32 virtio_net_msix_multi(void) {
+    return vn.msix_multi;
+}
+
+/* Confirm multi-vector TX MSI-X: boot selftests run under cli, so briefly
+ * sti, kick a TX, and check vector-43 handler bumped the counter. */
+void virtio_net_msix_selftest(void) {
+    u8 frame[64];
+    u64 tx_before;
+    u64 rx_before;
+    u32 i;
+    u32 ok;
+
+    if (!vn.present) {
+        return;
+    }
+    if (!vn.msix_multi) {
+        kprintf("[VNET] MSI-X TX/RX split selftest skipped (single-vector/INTx)\n");
+        return;
+    }
+
+    for (i = 0; i < 64; i++) {
+        frame[i] = 0xFF;
+    }
+    /* Ethertype 0x0000 broadcast probe — device still completes the TX desc. */
+    frame[12] = 0;
+    frame[13] = 0;
+
+    tx_before = vnet_tx_irq_count;
+    rx_before = vnet_irq_count;
+    cpu_sti();
+    ok = virtio_net_tx(frame, 64);
+    for (i = 0; i < 50000; i++) {
+        io_wait();
+        if (vnet_tx_irq_count != tx_before) {
+            break;
+        }
+    }
+    cpu_cli();
+
+    if (!ok) {
+        kprintf("[VNET] [FAIL] MSI-X TX/RX split (tx submit failed)\n");
+        return;
+    }
+    if (vnet_tx_irq_count == tx_before) {
+        kprintf("[VNET] [FAIL] MSI-X TX/RX split (tx_irq=%u->%u rx=%u->%u)\n",
+                tx_before, vnet_tx_irq_count, rx_before, vnet_irq_count);
+        return;
+    }
+    kprintf("[VNET] [PASS] MSI-X TX/RX split (tx_irq=%u rx_irq=%u)\n",
+            vnet_tx_irq_count, vnet_irq_count);
+}
+
 static void arm_irq(u8 bus, u8 slot, u8 func) {
+    u8 vecs[2];
     vn.msi = 0;
+    vn.msix_multi = 0;
     vn.irq_armed = 0;
-    /* Prefer MSI-X, then MSI; both land on VNET_IRQ_VECTOR. */
-    /* MSI first (config-space only). MSI-X needs a BAR inside boot HHDM. */
+    /* Modern: prefer multi-vector MSI-X (RX entry0 / TX entry1). */
+    if (vn.modern) {
+        vecs[0] = (u8)VNET_IRQ_VECTOR_RX;
+        vecs[1] = (u8)VNET_IRQ_VECTOR_TX;
+        if (pci_msix_enable_n(bus, slot, func, vecs, 2)) {
+            vn.msi = 1;
+            vn.msix_multi = 1;
+            vn.irq_armed = 1;
+            kprintf("[VNET] MSI-X multi-vector RX=%u TX=%u\n",
+                    (u64)VNET_IRQ_VECTOR_RX, (u64)VNET_IRQ_VECTOR_TX);
+            return;
+        }
+    }
+    /* Single-vector MSI (config-space only) or MSI-X entry 0 on RX. */
     if (pci_msi_enable(bus, slot, func, VNET_IRQ_VECTOR)
         || pci_msix_enable_one(bus, slot, func, VNET_IRQ_VECTOR)) {
         vn.msi = 1;
@@ -537,14 +648,11 @@ static u32 finish_queues_and_mac(u8 bus, u8 slot, u8 func) {
     vn.present = 1;
     rx_fill();
 
-    if (vn.modern && vn.msi) {
-        *m16(vn.common_phys, M_MSIX_CONFIG) = (u16)VIRTIO_MSI_NO_VECTOR;
-    }
-
     dev_id = pci_read16(bus, slot, func, 0x02);
-    kprintf("[VNET] ready: pci %u:%u.%u io=0x%x id=0x%x modern=%u msi=%u irq=%u vec=%u mac=%x:%x:%x:%x:%x:%x\n",
+    kprintf("[VNET] ready: pci %u:%u.%u io=0x%x id=0x%x modern=%u msi=%u multi=%u irq=%u vec=%u mac=%x:%x:%x:%x:%x:%x\n",
             (u64)bus, (u64)slot, (u64)func, (u64)vn.iobase, (u64)dev_id,
-            (u64)vn.modern, (u64)vn.msi, (u64)vn.pci_irq, (u64)VNET_IRQ_VECTOR,
+            (u64)vn.modern, (u64)vn.msi, (u64)vn.msix_multi, (u64)vn.pci_irq,
+            (u64)VNET_IRQ_VECTOR_RX,
             (u64)vn.mac[0], (u64)vn.mac[1], (u64)vn.mac[2],
             (u64)vn.mac[3], (u64)vn.mac[4], (u64)vn.mac[5]);
     return 1;
@@ -680,6 +788,8 @@ void virtio_net_init(void) {
     vn.pci_irq = 0;
     vn.irq_armed = 0;
     vnet_irq_count = 0;
+    vnet_tx_irq_count = 0;
+    vn.msix_multi = 0;
     for (i = 0; i < 6; i++) {
         vn.mac[i] = 0;
     }

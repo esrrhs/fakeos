@@ -187,11 +187,18 @@ void isr_dispatch(struct trap_frame *f) {
         return;
     }
 
-    /* Vector 40: VirtIO-net MSI/MSI-X or PCI INTx. Ack then drain RX. */
+    /* Vector 40: VirtIO-net RX MSI/MSI-X or PCI INTx. Ack then drain RX. */
     if (v == 40) {
         if (drivers.virtio_net_irq()) {
             net_poll();
         }
+        arch.lapic_send_eoi();
+        return;
+    }
+
+    /* Vector 43: VirtIO-net TX MSI-X (multi-vector modern path). */
+    if (v == 43) {
+        (void)drivers.virtio_net_tx_irq();
         arch.lapic_send_eoi();
         return;
     }

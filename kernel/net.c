@@ -13,6 +13,7 @@ extern u32 virtio_net_present(void);
 extern void virtio_net_mac(u8 *out);
 extern u32 virtio_net_tx(const void *frame, u32 len);
 extern u32 virtio_net_rx(void *frame, u32 maxlen);
+extern void virtio_net_msix_selftest(void);
 extern void sched_yield(void);
 extern void select_kick(void);
 extern u64 sched_tick_count(void);
@@ -2497,6 +2498,7 @@ void net_selftest(void) {
     }
     net_udp_selftest();
     net_tcp_selftest();
+    virtio_net_msix_selftest();
 }
 
 void net_init(void) {

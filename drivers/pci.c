@@ -13,8 +13,9 @@ typedef types.uint64_t u64;
  *
  * Enough to enumerate bus 0 and locate a VirtIO-blk function by vendor /
  * device id (or AHCI by class 01.06), then read BARs and enable I/O +
- * bus-master in the command register. VirtIO modern vendor caps, MSI (single-message), and MSI-X (one
- * table entry) can be programmed; no bridges yet — see docs/blk-modern-path.md.
+ * bus-master in the command register. VirtIO modern vendor caps, MSI (single-message), and MSI-X (one or more
+ * table entries via pci_msix_enable_n) can be programmed; no bridges yet —
+ * see docs/blk-modern-path.md.
  * ------------------------------------------------------------------------- */
 
 enum {
@@ -285,45 +286,56 @@ u32 pci_msi_enable(u8 bus, u8 slot, u8 func, u8 vector) {
     return 1;
 }
 
-/* Enable MSI-X with a single unmasked table entry delivering `vector`.
- * Returns 1 on success. Disables INTx. Does not touch MSI (caller may prefer
- * MSI-X exclusively; QEMU virtio accepts either). */
-u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector) {
+/* Enable MSI-X with `n` unmasked table entries. `vectors[i]` is the IDT
+ * vector for table entry i. Returns 1 on success. Disables INTx. Does not
+ * touch MSI. Table Size (Message Control[10:0] + 1) must be >= n; n in 1..8. */
+u32 pci_msix_enable_n(u8 bus, u8 slot, u8 func, u8 *vectors, u32 n) {
     u8 cap;
     u16 msg_ctl;
     u32 table_info;
     u8 bir;
     u32 table_off;
+    u32 table_size;
     u64 bar_addr = 0;
     u32 is_io = 0;
     u64 entry_phys;
     volatile u32 *entry;
     u32 addr_lo;
+    u32 i;
     extern u32 lapic_get_id(void);
     extern void kprintf(const char *fmt, ...);
     static const u64 HHDM = 0xFFFF800000000000ULL;
 
+    if (vectors == 0 || n == 0 || n > 8) {
+        return 0;
+    }
     cap = pci_find_cap(bus, slot, func, PCI_CAP_MSIX);
     if (cap == 0) {
         return 0;
     }
     msg_ctl = pci_read16(bus, slot, func, (u8)(cap + 2));
+    table_size = (u32)((msg_ctl & 0x7FFu) + 1);
+    if (table_size < n) {
+        return 0;
+    }
     table_info = pci_read32(bus, slot, func, (u8)(cap + 4));
     bir = (u8)(table_info & 0x7);
     table_off = table_info & ~0x7u;
     if (!pci_bar64(bus, slot, func, bir, &bar_addr, &is_io) || is_io || bar_addr == 0) {
         return 0;
     }
-    entry_phys = bar_addr + (u64)table_off; /* entry 0 */
-    if (!mem.vmm_map_mmio(entry_phys, 16)) {
+    entry_phys = bar_addr + (u64)table_off;
+    if (!mem.vmm_map_mmio(entry_phys, (u64)n * 16)) {
         return 0;
     }
-    entry = (volatile u32 *)(HHDM + entry_phys);
     addr_lo = 0xFEE00000u | (lapic_get_id() << 12);
-    entry[0] = addr_lo;
-    entry[1] = 0;
-    entry[2] = (u32)vector;          /* data: vector, edge, fixed */
-    entry[3] = 0;                    /* unmasked */
+    for (i = 0; i < n; i++) {
+        entry = (volatile u32 *)(HHDM + entry_phys + (u64)i * 16);
+        entry[0] = addr_lo;
+        entry[1] = 0;
+        entry[2] = (u32)vectors[i]; /* data: vector, edge, fixed */
+        entry[3] = 0;               /* unmasked */
+    }
 
     msg_ctl = (u16)(msg_ctl | 0x8000); /* MSI-X Enable */
     msg_ctl = (u16)(msg_ctl & ~(u16)0x4000); /* clear Function Mask */
@@ -333,9 +345,22 @@ u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector) {
         pci_write16(bus, slot, func, PCI_COMMAND,
                     (u16)(cmd | PCI_CMD_INTX_DISABLE));
     }
-    kprintf("[PCI] MSI-X enabled %u:%u.%u vector=%u table_bir=%u off=0x%x\n",
-            (u64)bus, (u64)slot, (u64)func, (u64)vector, (u64)bir, (u64)table_off);
+    if (n == 1) {
+        kprintf("[PCI] MSI-X enabled %u:%u.%u vector=%u table_bir=%u off=0x%x\n",
+                (u64)bus, (u64)slot, (u64)func, (u64)vectors[0], (u64)bir,
+                (u64)table_off);
+    } else {
+        kprintf("[PCI] MSI-X enabled %u:%u.%u n=%u v0=%u v1=%u table_bir=%u off=0x%x\n",
+                (u64)bus, (u64)slot, (u64)func, (u64)n, (u64)vectors[0],
+                (u64)vectors[1], (u64)bir, (u64)table_off);
+    }
     return 1;
+}
+
+/* Enable MSI-X with a single unmasked table entry delivering `vector`. */
+u32 pci_msix_enable_one(u8 bus, u8 slot, u8 func, u8 vector) {
+    u8 vec = vector;
+    return pci_msix_enable_n(bus, slot, func, &vec, 1);
 }
 
 /* Walk PCI caps; log VirtIO modern capability ids (9) when present. */
