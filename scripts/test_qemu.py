@@ -417,7 +417,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
+        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI bio queue + async NCQ + Ext2 journal commit-block + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

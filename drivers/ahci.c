@@ -23,19 +23,22 @@ extern void cpu_pause(void);
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
 extern u32 sched_is_active(void);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
 
 /* ---------------------------------------------------------------------------
- * AHCI (SATA) driver: one port, multi-slot command list.
+ * AHCI (SATA) driver: one port, multi-slot command list + cross-caller bio
+ * queue.
  *
  * Target: QEMU `-device ahci,id=ahci0 -device ide-hd,drive=...,bus=ahci0.0`
  * with PCI class 01.06 ABAR (BAR5). DMA via HHDM + low physical frames.
  * Completion: MSI/MSI-X (vector 42) or INTx with sched_sleep; poll fallback.
  *
- * Async NCQ (first smokeable bite): when CAP.SNCQ and IDENTIFY NCQ are set,
- * large read/write transfers pipeline up to ASYNC_DEPTH FPDMA commands with
- * per-slot bounce buffers (multi-outstanding). Public blk API stays sync and
- * serializes one transfer at a time via `busy`. Non-NCQ falls back to one
- * outstanding DMA EXT. See docs/blk-modern-path.md.
+ * Async NCQ: CAP.SNCQ + IDENTIFY NCQ → up to ASYNC_DEPTH FPDMA commands with
+ * per-HW-slot bounce. Public blk API stays sync (caller waits), but a shared
+ * bio queue lets multiple callers' transfers share the NCQ window — true
+ * cross-caller concurrency beyond the earlier single-transfer pipeline.
+ * See docs/blk-modern-path.md.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -103,6 +106,12 @@ enum {
     BOUNCE_MAX_SEC  = 16,
     BOUNCE_SLOT_BYTES = 16 * 512,    /* BOUNCE_MAX_SEC * SECTOR_SIZE */
     ASYNC_DEPTH     = 4,             /* per-slot bounce windows */
+    BIO_Q           = 8,             /* cross-caller bio queue depth */
+
+    BIO_FREE        = 0,
+    BIO_ACTIVE      = 1,
+    BIO_DONE_OK     = 2,
+    BIO_DONE_FAIL   = 3,
 
     POLL_SPINS      = 5000000,
 
@@ -129,18 +138,32 @@ struct ahci {
     u32 ncq;                         /* FPDMA path armed */
     u32 nslots;                      /* 1..32 from CAP.NCS */
     u32 depth;                       /* active async window (1..ASYNC_DEPTH) */
-    u32 busy;                        /* public API serialize */
     u32 inflight;                    /* current outstanding cmds */
     u32 peak_inflight;               /* high-water for selftest/log */
+    u32 hw_active;                   /* bitmask of HW slots owned by bios */
     u8  pci_irq;
 };
 
-static struct ahci ah;
+/* One sync transfer enqueued by a caller; multiple may share NCQ slots. */
+struct ahci_bio {
+    u32 state;
+    u32 write;
+    u32 nsec;
+    u32 submitted;
+    u32 completed;
+    u64 sector;
+    u8 *kbuf;
+};
 
-/* Per-HW-slot bookkeeping for one pipelined transfer (indices < ASYNC_DEPTH). */
+static struct ahci ah;
+static struct ahci_bio bios[BIO_Q];
+static volatile u32 ahci_qlock;
+
+/* Per-HW-slot bookkeeping (indices < ASYNC_DEPTH). */
 static u32 slot_nsec[ASYNC_DEPTH];
 static u32 slot_off[ASYNC_DEPTH];
 static u8  slot_cmd[ASYNC_DEPTH];
+static u32 slot_bio[ASYNC_DEPTH];    /* owning bio index */
 
 static volatile u8 *hhdm8(u64 phys) {
     return (volatile u8 *)(HHDM_BASE + phys);
@@ -165,6 +188,15 @@ static u64 ct_phys_for(u32 slot) {
 
 static u64 bounce_phys_for(u32 slot) {
     return ah.arena_phys + BOUNCE_OFF + (u64)slot * (u64)BOUNCE_SLOT_BYTES;
+}
+
+static u32 ahci_popcount(u32 mask) {
+    u32 n = 0;
+    while (mask != 0) {
+        n = n + (mask & 1u);
+        mask = mask >> 1;
+    }
+    return n;
 }
 
 static void ahci_stop_port(void) {
@@ -259,52 +291,6 @@ static u32 ahci_wait_slot(u8 ata_cmd, u32 slot) {
     return 1;
 }
 
-/* Wait until any bit in active_mask completes; return that slot index. */
-static u32 ahci_wait_any(u32 active_mask, u32 *oslot) {
-    u32 spins = 0;
-    u32 i;
-    u8 probe_cmd = (u8)ATA_CMD_READ_FPDMA;
-    if (active_mask == 0) {
-        return 0;
-    }
-    for (i = 0; i < ASYNC_DEPTH; i++) {
-        if (((active_mask >> i) & 1u) != 0) {
-            probe_cmd = slot_cmd[i];
-            break;
-        }
-    }
-    while (1) {
-        for (i = 0; i < ASYNC_DEPTH; i++) {
-            if (((active_mask >> i) & 1u) == 0) {
-                continue;
-            }
-            if (!ahci_slot_busy(i)) {
-                *oslot = i;
-                *port_reg(PxIS) = 0xFFFFFFFFu;
-                *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
-                return 1;
-            }
-        }
-        if (ahci_check_fatal(probe_cmd)) {
-            return 0;
-        }
-        spins++;
-        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
-            sched_sleep(AHCI_WAIT_CHAN);
-        } else {
-            arch.inb(0x80);
-            cpu_pause();
-        }
-        if (spins > POLL_SPINS) {
-            kprintf("[AHCI] timeout-any mask=0x%x CI=0x%x SACT=0x%x\n",
-                    (u64)active_mask, (u64)(*port_reg(PxCI)),
-                    (u64)(*port_reg(PxSACT)));
-            return 0;
-        }
-    }
-    return 0;
-}
-
 u32 ahci_irq(void) {
     u32 is;
     u32 pis;
@@ -333,20 +319,11 @@ static u32 ahci_pick_slot(void) {
         lim = ASYNC_DEPTH;
     }
     for (i = 0; i < lim; i++) {
-        if (((busy >> i) & 1u) == 0) {
+        if (((busy >> i) & 1u) == 0 && ((ah.hw_active >> i) & 1u) == 0) {
             return i;
         }
     }
     return 0xFFFFFFFFu;
-}
-
-static u32 ahci_popcount(u32 mask) {
-    u32 n = 0;
-    while (mask != 0) {
-        n = n + (mask & 1u);
-        mask = mask >> 1;
-    }
-    return n;
 }
 
 /* Program H2D FIS + PRDT on `slot` and ring CI (and SACT for NCQ). No wait.
@@ -507,8 +484,242 @@ static void ahci_drain(void) {
         }
     }
     ah.inflight = 0;
+    ah.hw_active = 0;
     *port_reg(PxIS) = 0xFFFFFFFFu;
     *ghc_reg(GHC_IS) = 0xFFFFFFFFu;
+}
+
+static void ahci_bio_fail_all_active(void) {
+    u32 i;
+    for (i = 0; i < BIO_Q; i++) {
+        if (bios[i].state == BIO_ACTIVE) {
+            bios[i].state = BIO_DONE_FAIL;
+        }
+    }
+    ah.hw_active = 0;
+}
+
+/* Harvest completed HW slots and submit new chunks from active bios.
+ * Caller must hold ahci_qlock. */
+static void ahci_bio_pump_locked(void) {
+    u32 i;
+    u32 depth;
+    u32 progressed;
+    u32 spins_guard;
+
+    depth = ah.ncq ? ah.depth : 1;
+    if (depth < 1) {
+        depth = 1;
+    }
+    if (depth > ASYNC_DEPTH) {
+        depth = ASYNC_DEPTH;
+    }
+
+    spins_guard = 0;
+    while (1) {
+        progressed = 0;
+
+        /* ---- harvest ---- */
+        for (i = 0; i < ASYNC_DEPTH; i++) {
+            u32 bid;
+            u32 n;
+            u32 off;
+            u32 b;
+            u64 bounce;
+            if (((ah.hw_active >> i) & 1u) == 0) {
+                continue;
+            }
+            if (ahci_slot_busy(i)) {
+                continue;
+            }
+            if (ahci_check_fatal(slot_cmd[i])) {
+                ahci_drain();
+                ahci_bio_fail_all_active();
+                return;
+            }
+            bid = slot_bio[i];
+            n = slot_nsec[i];
+            off = slot_off[i];
+            bounce = bounce_phys_for(i);
+            if (bid < BIO_Q && bios[bid].state == BIO_ACTIVE && !bios[bid].write) {
+                for (b = 0; b < n * SECTOR_SIZE; b++) {
+                    bios[bid].kbuf[(u64)off * SECTOR_SIZE + b] = hhdm8(bounce)[b];
+                }
+            }
+            ah.hw_active = ah.hw_active & ~(1u << i);
+            if (ah.inflight > 0) {
+                ah.inflight = ah.inflight - 1;
+            }
+            if (bid < BIO_Q && bios[bid].state == BIO_ACTIVE) {
+                bios[bid].completed = bios[bid].completed + n;
+                if (bios[bid].completed >= bios[bid].nsec) {
+                    bios[bid].state = BIO_DONE_OK;
+                }
+            }
+            progressed = 1;
+        }
+
+        /* ---- submit ---- */
+        for (i = 0; i < BIO_Q; i++) {
+            while (bios[i].state == BIO_ACTIVE
+                   && bios[i].submitted < bios[i].nsec
+                   && ahci_popcount(ah.hw_active) < depth) {
+                u32 n = bios[i].nsec - bios[i].submitted;
+                u32 slot;
+                u64 bounce;
+                u32 b;
+                u32 write = bios[i].write;
+                if (n > BOUNCE_MAX_SEC) {
+                    n = BOUNCE_MAX_SEC;
+                }
+                slot = ahci_pick_slot();
+                if (slot == 0xFFFFFFFFu) {
+                    break;
+                }
+                bounce = bounce_phys_for(slot);
+                if (write) {
+                    for (b = 0; b < n * SECTOR_SIZE; b++) {
+                        hhdm8(bounce)[b] =
+                            bios[i].kbuf[(u64)bios[i].submitted * SECTOR_SIZE + b];
+                    }
+                }
+                if (!ahci_submit((u8)(write ? ATA_CMD_WRITE_DMA_EXT
+                                            : ATA_CMD_READ_DMA_EXT),
+                                 bios[i].sector + (u64)bios[i].submitted,
+                                 (u16)n, bounce, write, slot, &slot)) {
+                    ahci_drain();
+                    ahci_bio_fail_all_active();
+                    return;
+                }
+                slot_nsec[slot] = n;
+                slot_off[slot] = bios[i].submitted;
+                slot_bio[slot] = i;
+                ah.hw_active = ah.hw_active | (1u << slot);
+                bios[i].submitted = bios[i].submitted + n;
+                progressed = 1;
+            }
+        }
+
+        if (!progressed) {
+            break;
+        }
+        spins_guard++;
+        if (spins_guard > 100000) {
+            break;
+        }
+    }
+}
+
+static u32 ahci_bio_alloc_locked(void) {
+    u32 i;
+    for (i = 0; i < BIO_Q; i++) {
+        if (bios[i].state == BIO_FREE) {
+            bios[i].state = BIO_ACTIVE;
+            bios[i].write = 0;
+            bios[i].nsec = 0;
+            bios[i].submitted = 0;
+            bios[i].completed = 0;
+            bios[i].sector = 0;
+            bios[i].kbuf = 0;
+            return i;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+static void ahci_bio_free_locked(u32 idx) {
+    if (idx < BIO_Q) {
+        bios[idx].state = BIO_FREE;
+        bios[idx].kbuf = 0;
+    }
+}
+
+static u32 ahci_bios_busy(void) {
+    u32 i;
+    for (i = 0; i < BIO_Q; i++) {
+        if (bios[i].state == BIO_ACTIVE) {
+            return 1;
+        }
+    }
+    return ah.hw_active != 0;
+}
+
+/* Wait until bio `idx` leaves ACTIVE. Releases qlock around sleep/poll. */
+static u32 ahci_bio_wait(u32 idx) {
+    u32 spins = 0;
+    u32 st;
+    while (1) {
+        spin_lock(&ahci_qlock);
+        ahci_bio_pump_locked();
+        st = bios[idx].state;
+        if (st != BIO_ACTIVE) {
+            spin_unlock(&ahci_qlock);
+            return st == BIO_DONE_OK ? 1 : 0;
+        }
+        spin_unlock(&ahci_qlock);
+
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            arch.inb(0x80);
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            kprintf("[AHCI] bio wait timeout idx=%u CI=0x%x SACT=0x%x\n",
+                    (u64)idx, (u64)(*port_reg(PxCI)),
+                    (u64)(*port_reg(PxSACT)));
+            spin_lock(&ahci_qlock);
+            if (bios[idx].state == BIO_ACTIVE) {
+                bios[idx].state = BIO_DONE_FAIL;
+            }
+            spin_unlock(&ahci_qlock);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* Enqueue one transfer; returns bio index or 0xFFFFFFFF. Does not wait. */
+static u32 ahci_bio_enqueue(u64 sector, void *kbuf, u32 count, u32 write) {
+    u32 idx;
+    u32 spins = 0;
+
+    if (!ah.present || count == 0) {
+        return 0xFFFFFFFFu;
+    }
+    if (sector + (u64)count > ah.capacity) {
+        return 0xFFFFFFFFu;
+    }
+
+    while (1) {
+        spin_lock(&ahci_qlock);
+        idx = ahci_bio_alloc_locked();
+        if (idx != 0xFFFFFFFFu) {
+            bios[idx].write = write;
+            bios[idx].nsec = count;
+            bios[idx].submitted = 0;
+            bios[idx].completed = 0;
+            bios[idx].sector = sector;
+            bios[idx].kbuf = (u8 *)kbuf;
+            ahci_bio_pump_locked();
+            spin_unlock(&ahci_qlock);
+            return idx;
+        }
+        ahci_bio_pump_locked();
+        spin_unlock(&ahci_qlock);
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            kprintf("[AHCI] bio queue full timeout\n");
+            return 0xFFFFFFFFu;
+        }
+    }
+    return 0xFFFFFFFFu;
 }
 
 u32 ahci_present_p(void) {
@@ -519,116 +730,19 @@ u64 ahci_capacity(void) {
     return ah.capacity;
 }
 
-/* Pipelined NCQ transfer (or serial DMA when depth==1 / !ncq). */
+/* Sync transfer via bio queue (may overlap other callers' bios). */
 static u32 ahci_xfer(u64 sector, void *kbuf, u32 count, u32 write) {
-    u8 *buf = (u8 *)kbuf;
-    u32 submitted = 0;
-    u32 completed = 0;
-    u32 active = 0;
-    u32 depth;
-
-    if (!ah.present || count == 0) {
+    u32 idx;
+    u32 ok;
+    idx = ahci_bio_enqueue(sector, kbuf, count, write);
+    if (idx == 0xFFFFFFFFu) {
         return 0;
     }
-    if (sector + (u64)count > ah.capacity) {
-        return 0;
-    }
-
-    while (ah.busy) {
-        cpu_pause();
-    }
-    ah.busy = 1;
-
-    depth = ah.ncq ? ah.depth : 1;
-    if (depth < 1) {
-        depth = 1;
-    }
-
-    while (completed < count) {
-        /* Fill the async window. */
-        while (submitted < count && ahci_popcount(active) < depth) {
-            u32 n = count - submitted;
-            u32 slot = 0;
-            u64 bounce;
-            u32 b;
-            if (n > BOUNCE_MAX_SEC) {
-                n = BOUNCE_MAX_SEC;
-            }
-            /* Pre-pick: need a free slot before filling bounce for writes. */
-            {
-                u32 busybits = *port_reg(PxCI) | *port_reg(PxSACT);
-                u32 i;
-                u32 found = 0xFFFFFFFFu;
-                u32 lim = depth;
-                if (lim > ASYNC_DEPTH) {
-                    lim = ASYNC_DEPTH;
-                }
-                for (i = 0; i < lim; i++) {
-                    if (((busybits >> i) & 1u) == 0
-                        && ((active >> i) & 1u) == 0) {
-                        found = i;
-                        break;
-                    }
-                }
-                if (found == 0xFFFFFFFFu) {
-                    break;
-                }
-                slot = found;
-            }
-            bounce = bounce_phys_for(slot);
-            if (write) {
-                for (b = 0; b < n * SECTOR_SIZE; b++) {
-                    hhdm8(bounce)[b] = buf[(u64)submitted * SECTOR_SIZE + b];
-                }
-            }
-            if (!ahci_submit((u8)(write ? ATA_CMD_WRITE_DMA_EXT
-                                        : ATA_CMD_READ_DMA_EXT),
-                             sector + (u64)submitted, (u16)n, bounce, write,
-                             slot, &slot)) {
-                ahci_drain();
-                ah.busy = 0;
-                return 0;
-            }
-            slot_nsec[slot] = n;
-            slot_off[slot] = submitted;
-            active = active | (1u << slot);
-            submitted = submitted + n;
-        }
-
-        if (active == 0) {
-            ah.busy = 0;
-            return 0;
-        }
-
-        {
-            u32 done_slot = 0;
-            u32 n;
-            u32 off;
-            u32 b;
-            u64 bounce;
-            if (!ahci_wait_any(active, &done_slot)) {
-                ahci_drain();
-                ah.busy = 0;
-                return 0;
-            }
-            n = slot_nsec[done_slot];
-            off = slot_off[done_slot];
-            bounce = bounce_phys_for(done_slot);
-            if (!write) {
-                for (b = 0; b < n * SECTOR_SIZE; b++) {
-                    buf[(u64)off * SECTOR_SIZE + b] = hhdm8(bounce)[b];
-                }
-            }
-            active = active & ~(1u << done_slot);
-            if (ah.inflight > 0) {
-                ah.inflight = ah.inflight - 1;
-            }
-            completed = completed + n;
-        }
-    }
-
-    ah.busy = 0;
-    return 1;
+    ok = ahci_bio_wait(idx);
+    spin_lock(&ahci_qlock);
+    ahci_bio_free_locked(idx);
+    spin_unlock(&ahci_qlock);
+    return ok;
 }
 
 u32 ahci_read(u64 sector, void *kbuf, u32 count) {
@@ -641,13 +755,31 @@ u32 ahci_write(u64 sector, const void *kbuf, u32 count) {
 
 u32 ahci_flush(void) {
     u64 bounce;
+    u32 spins = 0;
     if (!ah.present) {
         return 0;
     }
-    while (ah.busy) {
-        cpu_pause();
+    /* Drain bio queue before issuing non-NCQ FLUSH on slot 0. */
+    while (1) {
+        spin_lock(&ahci_qlock);
+        ahci_bio_pump_locked();
+        if (!ahci_bios_busy()) {
+            spin_unlock(&ahci_qlock);
+            break;
+        }
+        spin_unlock(&ahci_qlock);
+        spins++;
+        if (ah.irq_armed && sched_is_active() && (spins & 63) == 0) {
+            sched_sleep(AHCI_WAIT_CHAN);
+        } else {
+            cpu_pause();
+        }
+        if (spins > POLL_SPINS) {
+            kprintf("[AHCI] flush drain timeout\n");
+            return 0;
+        }
     }
-    ah.busy = 1;
+    spin_lock(&ahci_qlock);
     ahci_drain();
     bounce = ah.arena_phys + IDENT_OFF;
     {
@@ -675,16 +807,15 @@ u32 ahci_flush(void) {
         *hhdm32(cl_phys + 8) = (u32)(ct_phys & 0xFFFFFFFFu);
         *hhdm32(cl_phys + 12) = (u32)(ct_phys >> 32);
         *port_reg(PxCI) = 1;
+        spin_unlock(&ahci_qlock);
         if (!ahci_wait_slot((u8)ATA_CMD_FLUSH, 0)) {
-            ah.busy = 0;
             return 0;
         }
-        ah.busy = 0;
     }
     return 1;
 }
 
-/* Save/restore tail sectors; prove multi-outstanding NCQ depth >= 2. */
+/* Save/restore tail sectors; prove multi-outstanding + cross-caller bio queue. */
 void ahci_selftest(void) {
     u64 lba;
     u32 secs = AHCI_TEST_SECS;
@@ -695,6 +826,10 @@ void ahci_selftest(void) {
     u32 i;
     u32 ok;
     u32 peak;
+    u32 half;
+    u32 b0;
+    u32 b1;
+    u32 peak_x;
 
     if (!ah.present) {
         return;
@@ -762,8 +897,102 @@ void ahci_selftest(void) {
         }
     }
 
+    if (!ok) {
+        kprintf("[AHCI] [FAIL] async NCQ data mismatch\n");
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    if (peak < 2) {
+        kprintf("[AHCI] [FAIL] async NCQ peak_inflight=%u (want >=2)\n",
+                (u64)peak);
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    kprintf("[AHCI] [PASS] async NCQ multi-outstanding (peak=%u depth=%u secs=%u)\n",
+            (u64)peak, (u64)ah.depth, (u64)secs);
+
+    /* Cross-caller bio queue: two overlapping bios share the NCQ window.
+     * Same thread enqueues both before waiting — proves queue concurrency
+     * without requiring sched (selftest runs before sched_init). */
+    half = secs / 2;
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        pat[i] = (u8)(0x5A ^ (u8)i ^ (u8)(i >> 7));
+    }
+    ah.peak_inflight = 0;
+    b0 = ahci_bio_enqueue(lba, pat, half, 1);
+    b1 = ahci_bio_enqueue(lba + (u64)half, pat + (u64)half * SECTOR_SIZE, half, 1);
+    if (b0 == 0xFFFFFFFFu || b1 == 0xFFFFFFFFu) {
+        kprintf("[AHCI] [FAIL] bio queue enqueue\n");
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    if (!ahci_bio_wait(b0) || !ahci_bio_wait(b1)) {
+        kprintf("[AHCI] [FAIL] bio queue dual-write wait\n");
+        spin_lock(&ahci_qlock);
+        ahci_bio_free_locked(b0);
+        ahci_bio_free_locked(b1);
+        spin_unlock(&ahci_qlock);
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    peak_x = ah.peak_inflight;
+    spin_lock(&ahci_qlock);
+    ahci_bio_free_locked(b0);
+    ahci_bio_free_locked(b1);
+    spin_unlock(&ahci_qlock);
+
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        pat[i] = 0;
+    }
+    /* Overlapping dual-read similarly. */
+    ah.peak_inflight = 0;
+    b0 = ahci_bio_enqueue(lba, pat, half, 0);
+    b1 = ahci_bio_enqueue(lba + (u64)half, pat + (u64)half * SECTOR_SIZE, half, 0);
+    if (b0 == 0xFFFFFFFFu || b1 == 0xFFFFFFFFu) {
+        kprintf("[AHCI] [FAIL] bio queue read enqueue\n");
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    if (!ahci_bio_wait(b0) || !ahci_bio_wait(b1)) {
+        kprintf("[AHCI] [FAIL] bio queue dual-read wait\n");
+        spin_lock(&ahci_qlock);
+        ahci_bio_free_locked(b0);
+        ahci_bio_free_locked(b1);
+        spin_unlock(&ahci_qlock);
+        ahci_write(lba, save, secs);
+        mem.pmm_free_pages(save_phys, 3);
+        mem.pmm_free_pages(pat_phys, 3);
+        return;
+    }
+    if (ah.peak_inflight > peak_x) {
+        peak_x = ah.peak_inflight;
+    }
+    spin_lock(&ahci_qlock);
+    ahci_bio_free_locked(b0);
+    ahci_bio_free_locked(b1);
+    spin_unlock(&ahci_qlock);
+
+    ok = 1;
+    for (i = 0; i < secs * SECTOR_SIZE; i++) {
+        u8 expect = (u8)(0x5A ^ (u8)i ^ (u8)(i >> 7));
+        if (pat[i] != expect) {
+            ok = 0;
+            break;
+        }
+    }
+
     if (!ahci_write(lba, save, secs)) {
-        kprintf("[AHCI] [FAIL] async NCQ restore-write\n");
+        kprintf("[AHCI] [FAIL] bio queue restore-write\n");
         mem.pmm_free_pages(save_phys, 3);
         mem.pmm_free_pages(pat_phys, 3);
         return;
@@ -773,16 +1002,16 @@ void ahci_selftest(void) {
     mem.pmm_free_pages(pat_phys, 3);
 
     if (!ok) {
-        kprintf("[AHCI] [FAIL] async NCQ data mismatch\n");
+        kprintf("[AHCI] [FAIL] bio queue data mismatch\n");
         return;
     }
-    if (peak < 2) {
-        kprintf("[AHCI] [FAIL] async NCQ peak_inflight=%u (want >=2)\n",
-                (u64)peak);
+    if (peak_x < 2) {
+        kprintf("[AHCI] [FAIL] bio queue peak_inflight=%u (want >=2)\n",
+                (u64)peak_x);
         return;
     }
-    kprintf("[AHCI] [PASS] async NCQ multi-outstanding (peak=%u depth=%u secs=%u)\n",
-            (u64)peak, (u64)ah.depth, (u64)secs);
+    kprintf("[AHCI] [PASS] bio queue cross-caller (peak=%u depth=%u half=%u)\n",
+            (u64)peak_x, (u64)ah.depth, (u64)half);
 }
 
 void ahci_init(void) {
@@ -801,6 +1030,7 @@ void ahci_init(void) {
     u32 z;
     u16 *id;
     u32 ncs;
+    u32 i;
 
     ah.present = 0;
     ah.capacity = 0;
@@ -812,10 +1042,21 @@ void ahci_init(void) {
     ah.ncq = 0;
     ah.nslots = 1;
     ah.depth = 1;
-    ah.busy = 0;
     ah.inflight = 0;
     ah.peak_inflight = 0;
+    ah.hw_active = 0;
     ah.pci_irq = 0;
+    ahci_qlock = 0;
+    for (i = 0; i < BIO_Q; i++) {
+        bios[i].state = BIO_FREE;
+        bios[i].kbuf = 0;
+    }
+    for (i = 0; i < ASYNC_DEPTH; i++) {
+        slot_bio[i] = 0xFFFFFFFFu;
+        slot_nsec[i] = 0;
+        slot_off[i] = 0;
+        slot_cmd[i] = 0;
+    }
 
     if (!pci_find_class(0x01, 0x06, &bus, &slot, &func)) {
         return;
@@ -962,9 +1203,9 @@ void ahci_init(void) {
             (u64)ah.port, ah.capacity, ah.capacity / 2,
             ah.irq_armed ? " [IRQ]" : " [poll]",
             ah.ncq ? " [NCQ]" : "",
-            ah.ncq ? " [async]" : "");
+            ah.ncq ? " [async+bioq]" : "");
     if (ah.ncq) {
-        kprintf("[AHCI] async NCQ depth=%u bounce=%u secs/slot\n",
-                (u64)ah.depth, (u64)BOUNCE_MAX_SEC);
+        kprintf("[AHCI] async NCQ depth=%u bounce=%u secs/slot bioq=%u\n",
+                (u64)ah.depth, (u64)BOUNCE_MAX_SEC, (u64)BIO_Q);
     }
 }

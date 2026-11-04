@@ -10,7 +10,7 @@ the in-tree drivers already speak.
 |------|-----------|--------|-------|
 | VirtIO-blk (legacy) | `-device virtio-blk-pci,disable-modern=on,...` | `drivers/virtio_blk.c` | PIO legacy virtio-pci; multi-sector R/W; FLUSH best-effort |
 | **VirtIO-blk (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_blk.c` | MMIO common/notify/ISR/device caps; MSI-X/MSI vector 41; IRQ wake + poll fallback |
-| **AHCI (SATA)** | `make qemu-ahci` / `-device ahci` + `ide-hd` | `drivers/ahci.c` | Single port, multi-slot CL; DMA R/W/FLUSH; async NCQ with per-slot bounce (depth 4) when CAP.SNCQ; public blk API still sync/serialized; MSI/MSI-X or INTx vector 42 + `sched_sleep`; ABAR relocated into boot HHDM when QEMU maps it high |
+| **AHCI (SATA)** | `make qemu-ahci` / `-device ahci` + `ide-hd` | `drivers/ahci.c` | Single port, multi-slot CL; DMA R/W/FLUSH; async NCQ + cross-caller bio queue (depth 4 HW / 8 bios) when CAP.SNCQ; public blk API sync wait but overlapping callers share NCQ; MSI/MSI-X or INTx vector 42 + `sched_sleep`; ABAR relocated into boot HHDM when QEMU maps it high |
 | ATA PIO | IDE disk | `drivers/ata.c` | Identify + LBA28 PIO; fallback when virtio/AHCI absent |
 | VirtIO-net (legacy) | `virtio-net-pci,disable-modern=on` | `drivers/virtio_net.c` | MSI-X/MSI or INTx; DHCP/TCP/UDP |
 | **VirtIO-net (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_net.c` | Same cap map as blk; MSI-X/MSI vector 40 on RX |
@@ -29,13 +29,13 @@ block layer (journal-lite markers, multi-bg, triple-indirect).
   MSI-X; both mask INTx). Net vector 40; blk vector 41. Blk `sched_sleep`s on
   used-ring IRQ when the scheduler is live (spin fallback otherwise).
 - **AHCI IRQ**: MSI/MSI-X (preferred) or INTx on vector 42; `sched_sleep` on completion with poll fallback.
-- **AHCI async NCQ**: multi-slot CL + per-slot bounce (depth 4); large R/W pipelines multiple FPDMA commands (multi-outstanding). Public blk API remains sync and serializes one transfer via `busy`. Selftest: `[AHCI] [PASS] async NCQ multi-outstanding`.
+- **AHCI async NCQ + bio queue**: multi-slot CL + per-slot bounce (depth 4); large R/W pipelines multiple FPDMA commands. Shared bio queue (8) lets overlapping callers share the NCQ window (cross-caller). Public blk API remains sync wait. Selftests: `[AHCI] [PASS] async NCQ multi-outstanding` and `[AHCI] [PASS] bio queue cross-caller`.
 
 ## Suggested next steps
 
 1. Multi-vector MSI-X (per-queue) for net TX/RX split.
-2. Cross-caller AHCI bio queue (true async beyond single-transfer pipeline).
-3. AP trampoline + per-CPU stacks (SMP stubs/ICR helpers already land).
+2. True non-blocking bio completion callbacks / blk_async beyond sync wait.
+3. Journal descriptor/revoke + multi-txn ring (still not full jbd).
 
 Until then, Makefile default keeps `disable-modern=on` for blk and net; use
 `make qemu-modern` to exercise the MMIO + MSI-X path.

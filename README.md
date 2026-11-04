@@ -198,6 +198,7 @@ flowchart TD
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
+- [x] **AHCI bio queue（跨调用方）**：共享 bio 队列（8）让多个同步调用方共用 NCQ 窗口；`ahci_selftest` 双 bio 重叠提交；`make qemu-ahci` 见 `[AHCI] [PASS] bio queue cross-caller`。
 - [x] **CFS rbtree**：每 CPU `cfs_root` 红黑树替代线性扫描 `pick_next`；enqueue/dequeue 覆盖 sleep/wakeup/stop/cont/exit/steal；自测 `[PASS] CFS rbtree`。
 - [x] **CFS task_group SE rbtree（层级公平）**：`task_group` shares（默认 1024）；每 CPU 组 SE 侵入式红黑树（vruntime, tg id）+ nr；enqueue/dequeue 维护组 SE；charge 后 requeue；`pick_next` leftmost 组再选成员；`sched_tg_create/attach`；自测 shares / aggregate / nested mid+leaf shares+aggregate / SE 树不变量；非完整 cgroup。
 - [x] **SMP MADT + AP park**：`arch/smp.c` MADT 发现 + `ap_tramp`；默认 `-smp 1` 不拉 AP；`-smp 2` 时 AP long-mode 后停泊，经 `sched_smp_start` 进入 per-CPU idle。
