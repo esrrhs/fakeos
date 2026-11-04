@@ -1817,6 +1817,13 @@ virtio login smoke covers `expand -i` + prior greens including fmt -u
 covers `join -e` + prior greens including expand -i (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## pr -s — landed
+
+`/bin/pr -s SEP` / `-sSEP` (empty SEP allowed) sets the separator after the
+`-n` line number (default TAB). Keeps `-n`/`-t`/`-w`/`-l`/`-h`. No new
+`/bin` dent. Focused virtio login smoke covers `pr -s` + prior greens
+including join -e (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1824,6 +1831,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `pr` polish / other util flags on existing
-   `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `pr -d` / `join -o` / other util flags on
+   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

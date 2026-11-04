@@ -1,11 +1,12 @@
 /* fakeos userland - pr: paginate with headers (thin POSIX subset).
- * Forms: pr [-n] [-t] [-w WIDTH|-wWIDTH] [-l LENGTH|-lLENGTH]
+ * Forms: pr [-n] [-t] [-s SEP|-sSEP] [-w WIDTH|-wWIDTH] [-l LENGTH|-lLENGTH]
  *           [-h HEADER|-hHEADER] [FILE...]
  * Default WIDTH 72, LENGTH 66. Without -t, a 5-line header (blanks + title +
  * "Page N") precedes each page of (LENGTH-5) body lines (min 1), then a form
  * feed. -t omits headers and form feeds. -n prefixes body lines with a
- * 5-digit number and a tab. Glued -wN/-lN/-hTEXT keep argv under
- * EXEC_MAX_ARGC=8. stdin if no FILE.
+ * 5-digit number and a separator (default TAB; -s SEP replaces it; empty
+ * SEP allowed; glued -sSEP ok). Glued -wN/-lN/-hTEXT/-sSEP keep
+ * argv under EXEC_MAX_ARGC=8. stdin if no FILE.
  */
 package user;
 
@@ -24,10 +25,11 @@ static int omit_header; /* -t */
 static int width = WIDTH_DEFAULT;
 static int length = LENGTH_DEFAULT;
 static const char *header = 0; /* -h; else file name / empty */
+static const char *num_sep = "\t"; /* -s: after -n number; default TAB */
 static long page_no = 1;
 
 static void usage(void) {
-    u_write(2, "usage: pr [-n] [-t] [-w N] [-l N] [-h HDR] [FILE...]\n", 52);
+    u_write(2, "usage: pr [-n] [-t] [-s SEP] [-w N] [-l N] [-h HDR] [FILE...]\n", 62);
 }
 
 static int is_digits(const char *s) {
@@ -58,7 +60,7 @@ static void emit_num5(long num) {
         i--;
         u_write(1, &tmp[i], 1);
     }
-    u_write(1, "\t", 1);
+    if (num_sep && num_sep[0]) u_write(1, num_sep, strlen(num_sep));
 }
 
 static void emit_page_hdr(const char *title) {
@@ -179,6 +181,17 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "-t") == 0) {
             omit_header = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            num_sep = argv[i + 1];
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 's' && argv[i][2] != 0) {
+            num_sep = argv[i] + 2;
             i++;
             continue;
         }
