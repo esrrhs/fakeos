@@ -470,6 +470,8 @@ def main():
         "[FS] published /bin/tac (",
         "[FS] published /bin/nproc (",
         "[FS] published /bin/timeout (",
+        "[FS] published /bin/rmdir (",
+        "[FS] published /bin/unlink (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",

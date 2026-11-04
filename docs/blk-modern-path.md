@@ -564,14 +564,24 @@ as `/bin/COMMAND`. Compact argv for `EXEC_MAX_ARGC=8`. Focused virtio login
 smoke covers tac reverse, nproc on smp 1/2, timeout success + timed-out sleep,
 plus prior interactive greens. Ramfs `/bin` dents 92/128.
 
+## /bin/rmdir + /bin/unlink — landed
+
+Thin shell/POSIX mirrors for scripts/`xargs`. `rmdir DIR...` removes empty
+directories via `rmdir(2)` (no `-p` yet). `unlink FILE...` removes directory
+entries via `unlink(2)` (directories refused — use rmdir). Completes the
+external mkdir/rm family. Focused virtio login smoke covers Ramfs+Ext2 empty
+rmdir, unlink file, refuse unlink-on-dir / rmdir-on-file, plus prior interactive
+greens (smp 1/2). Ramfs `/bin` dents 94/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (tac/nproc/
-   timeout + chown/chgrp + install + cal + id/groups + factor/clear/tty/whoami
-   + base64 + checksum trio already present) — prefer small coherent chunks.
-   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
-   bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (rmdir/unlink +
+   tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
+   factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
+   small coherent chunks such as `tsort`/`pathchk`, `logname`/`nohup`, or
+   cp/mv polish. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
+   unless a clear bite-sized fix.
