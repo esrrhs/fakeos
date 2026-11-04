@@ -399,6 +399,7 @@ flowchart TD
 - [x] **cmp -i**：跳过初始字节再比较（`-i SKIP`/`-iSKIP`/`-i SKIP1:SKIP2`；可与 `-n`/`-l`/`-s` 并用）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **find -ipath**：全路径 glob 忽略大小写（与 `-iname` 对称；`*,?`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **sed s///i**：固定串替换忽略大小写（`i`/`I`；可与 `g` 组合如 `gi`/`ig`）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **sed -e**：多表达式（`-e SCRIPT`/`-eSCRIPT`，以 `;` 拼接；最多 4 条；有 `-e` 则无位置 SCRIPT）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

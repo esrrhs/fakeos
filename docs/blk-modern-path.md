@@ -2079,6 +2079,14 @@ order (`gi`/`ig`). Keeps existing `-n`/`-i` (in-place) and `s///g`. No new
 `/bin` dent. Focused virtio login smoke covers `s///i` + `s///gi` + prior
 greens (smp 1/2).
 
+## sed -e — landed
+
+`/bin/sed -e SCRIPT` (glued `-eSCRIPT`, also inside `-ne…`) appends a script
+expression; multiple `-e` join with `;` (cap MAX_EXPR=4 for EXEC_MAX_ARGC=8).
+With any `-e`, there is no positional SCRIPT operand (POSIX). Keeps `-n`/`-i`
+and `s///gi`. No new `/bin` dent. Focused virtio login smoke covers dual `-e`
++ prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2086,6 +2094,6 @@ greens (smp 1/2).
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   sed `-e`; `cp -p` waits on utimensat; `set --` deferred; skip large
+   deferred. Next thin polish: other util flags on existing `/bin` (inspect
+   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
    shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

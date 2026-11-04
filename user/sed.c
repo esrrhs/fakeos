@@ -1,5 +1,5 @@
 /* fakeos userland - sed: thin stream editor (s///g + d/p/q).
- * Forms: sed [-n] [-i] SCRIPT [FILE...]
+ * Forms: sed [-n] [-i] [-e SCRIPT]... [SCRIPT] [FILE...]
  * SCRIPT: semicolon-separated commands (no addresses):
  *   s/PAT/REPL/[gi] fixed-string substitute (g=all; i/I=ignore case)
  *   d               delete line (suppress default print)
@@ -7,10 +7,11 @@
  *   q               quit after this line
  * Delimiter after s may be any non-NUL (e.g. s#a#b#). PAT/REPL: literals plus
  * \\ \n \t escapes. Flags after closing delim: g, i/I (any order, e.g. gi).
- * -n suppresses default print. -i edits FILE in place via a same-dir temp then
- * rename(2) (no backup ext; refuses stdin/-). stdin if no FILE (without -i);
- * "-" stdin. Compact argv for EXEC_MAX_ARGC=8. No regex, no addresses, no
- * hold space.
+ * -e SCRIPT appends an expression (joined with ';'; glued -eSCRIPT). With any
+ * -e, there is no positional SCRIPT operand (POSIX). Cap MAX_EXPR for
+ * EXEC_MAX_ARGC=8. -n suppresses default print. -i edits FILE in place via a
+ * same-dir temp then rename(2) (no backup ext; refuses stdin/-). stdin if no
+ * FILE (without -i); "-" stdin. No regex, no addresses, no hold space.
  */
 package user;
 
@@ -28,6 +29,8 @@ enum {
     LINE_MAX = 512,
     OUT_MAX = 1024,
     PATH_CAP = 128,
+    SCRIPT_CAP = 512,
+    MAX_EXPR = 4,
     O_WRONLY = 1,
     O_CREAT = 0x40,
     O_TRUNC = 0x200,
@@ -38,9 +41,41 @@ static int quiet; /* -n */
 static int inplace; /* -i */
 static int quit_flag;
 static long out_fd = 1;
+static char joined[SCRIPT_CAP];
+static int join_len;
+static int n_expr;
 
 static void usage(void) {
-    u_write(2, "usage: sed [-ni] SCRIPT [FILE...]\n", 34);
+    u_write(2, "usage: sed [-ni] [-e SCRIPT]... [SCRIPT] [FILE...]\n", 52);
+}
+
+static int append_expr(const char *s) {
+    unsigned long n;
+    unsigned long i;
+    if (s == 0 || s[0] == 0) return 0;
+    if (n_expr >= MAX_EXPR) {
+        u_write(2, "sed: too many -e\n", 17);
+        return 0;
+    }
+    n = strlen(s);
+    if (join_len > 0) {
+        if ((unsigned long)join_len + 1 + n >= SCRIPT_CAP) {
+            u_write(2, "sed: script too long\n", 21);
+            return 0;
+        }
+        joined[join_len++] = ';';
+    } else if (n >= SCRIPT_CAP) {
+        u_write(2, "sed: script too long\n", 21);
+        return 0;
+    }
+    if ((unsigned long)join_len + n >= SCRIPT_CAP) {
+        u_write(2, "sed: script too long\n", 21);
+        return 0;
+    }
+    for (i = 0; i < n; i++) joined[join_len++] = s[i];
+    joined[join_len] = 0;
+    n_expr++;
+    return 1;
 }
 
 static void emit_out(const char *buf, unsigned long n) {
@@ -349,6 +384,10 @@ int main(int argc, char **argv) {
     quiet = 0;
     inplace = 0;
     out_fd = 1;
+    join_len = 0;
+    n_expr = 0;
+    joined[0] = 0;
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         int j;
         if (strcmp(argv[i], "--") == 0) {
@@ -356,25 +395,65 @@ int main(int argc, char **argv) {
             break;
         }
         if (strcmp(argv[i], "-") == 0) break;
+        if (strcmp(argv[i], "-e") == 0) {
+            if (i + 1 >= argc || !append_expr(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'e' && argv[i][2] != 0) {
+            if (!append_expr(argv[i] + 2)) {
+                usage();
+                return 1;
+            }
+            i++;
+            continue;
+        }
         for (j = 1; argv[i][j]; j++) {
-            if (argv[i][j] == 'n') quiet = 1;
-            else if (argv[i][j] == 'i') inplace = 1;
-            else {
+            if (argv[i][j] == 'n') {
+                quiet = 1;
+            } else if (argv[i][j] == 'i') {
+                inplace = 1;
+            } else if (argv[i][j] == 'e') {
+                if (argv[i][j + 1] != 0) {
+                    if (!append_expr(argv[i] + j + 1)) {
+                        usage();
+                        return 1;
+                    }
+                    j = 0;
+                    break; /* consumed rest of this argv */
+                }
+                if (i + 1 >= argc || !append_expr(argv[i + 1])) {
+                    usage();
+                    return 1;
+                }
+                i += 2;
+                goto next_arg;
+            } else {
                 usage();
                 return 1;
             }
         }
         i++;
+    next_arg:
+        ;
     }
-    if (i >= argc) {
-        usage();
-        return 1;
-    }
-    script = argv[i];
-    i++;
-    if (script[0] == 0) {
-        usage();
-        return 1;
+
+    if (n_expr > 0) {
+        script = joined;
+    } else {
+        if (i >= argc) {
+            usage();
+            return 1;
+        }
+        script = argv[i];
+        i++;
+        if (script[0] == 0) {
+            usage();
+            return 1;
+        }
     }
 
     if (i >= argc) {
