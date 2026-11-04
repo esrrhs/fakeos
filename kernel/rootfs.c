@@ -128,6 +128,11 @@ void rootfs_publish(void) {
     } else {
         kprintf("[FS] published /dev/null /dev/zero /dev/tty\n");
     }
+    if (!fs.fs_publish_procfs()) {
+        kprintf("[FS] FAILED to publish /proc/self/{status,maps,cmdline}\n");
+    } else {
+        kprintf("[FS] published /proc/self/status maps cmdline\n");
+    }
 
     for (i = 0; i < m5_blob_count; i++) {
         u64 msize = (u64)m5_blob_table[i].end - (u64)m5_blob_table[i].start;

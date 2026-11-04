@@ -339,6 +339,7 @@ def main():
         "[PASS] MAP_SHARED anon",
         "[U][PASS] POSIX shm_open/mmap/unlink",
         "[U][PASS] /dev/null /dev/zero /dev/tty",
+        "[U][PASS] /proc/self status/maps/cmdline",
         "[U][PASS] stat/fstat/newfstatat",
         "[U][PASS] futex WAIT/WAKE",
         "[U][PASS] pthread_mutex futex lock/unlock",

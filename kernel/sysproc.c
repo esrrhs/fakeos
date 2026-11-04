@@ -289,3 +289,90 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
     }
     return ENOSYS_NEG;
 }
+
+/* ---------------------------------------------------------------------------
+ * /proc/self/{status,maps,cmdline} generators (snapshotted by ramfs on open)
+ * ------------------------------------------------------------------------- */
+
+extern u32 sched_current_ppid(void);
+extern u32 sched_current_threads(void);
+extern u64 sched_cmdline_copy(char *buf, u64 cap);
+extern void sched_set_cmdline(const char *data, u64 n);
+extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
+extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
+
+static u64 proc_put(char *dst, u64 cap, u64 at, const char *s) {
+    u64 i = 0;
+    while (s[i] != 0) {
+        if (at + i >= cap) {
+            return at;
+        }
+        dst[at + i] = s[i];
+        i++;
+    }
+    return at + i;
+}
+
+static u64 proc_put_u32(char *dst, u64 cap, u64 at, u32 v) {
+    char tmp[16];
+    u32 n = 0;
+    u32 i;
+    if (v == 0) {
+        tmp[0] = '0';
+        n = 1;
+    } else {
+        while (v != 0 && n < 15) {
+            tmp[n++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+        /* reverse */
+        for (i = 0; i < n / 2; i++) {
+            char c = tmp[i];
+            tmp[i] = tmp[n - 1 - i];
+            tmp[n - 1 - i] = c;
+        }
+    }
+    tmp[n] = 0;
+    return proc_put(dst, cap, at, tmp);
+}
+
+u64 procfs_gen_status(char *buf, u64 cap) {
+    char name[64];
+    u64 at = 0;
+    u64 cn;
+    u64 i;
+    u32 slash = 0;
+    u64 vmkb;
+    if (buf == 0 || cap == 0) {
+        return 0;
+    }
+    cn = sched_cmdline_copy(name, 63);
+    name[cn < 63 ? cn : 63] = 0;
+    /* Basename of argv[0] (stop at first NUL). */
+    for (i = 0; i < cn && name[i] != 0; i++) {
+        if (name[i] == '/') {
+            slash = (u32)(i + 1);
+        }
+    }
+    at = proc_put(buf, cap, at, "Name:\t");
+    at = proc_put(buf, cap, at, name + slash);
+    at = proc_put(buf, cap, at, "\nState:\tR (running)\nPid:\t");
+    at = proc_put_u32(buf, cap, at, sched_current_pid());
+    at = proc_put(buf, cap, at, "\nPPid:\t");
+    at = proc_put_u32(buf, cap, at, sched_current_ppid());
+    at = proc_put(buf, cap, at, "\nThreads:\t");
+    at = proc_put_u32(buf, cap, at, sched_current_threads());
+    vmkb = mem.as_vma_kb_h(sched_current_as_h());
+    at = proc_put(buf, cap, at, "\nVmSize:\t");
+    at = proc_put_u32(buf, cap, at, (u32)vmkb);
+    at = proc_put(buf, cap, at, " kB\n");
+    return at;
+}
+
+u64 procfs_gen_maps(char *buf, u64 cap) {
+    return mem.as_format_maps_h(sched_current_as_h(), buf, cap);
+}
+
+u64 procfs_gen_cmdline(char *buf, u64 cap) {
+    return sched_cmdline_copy(buf, cap);
+}

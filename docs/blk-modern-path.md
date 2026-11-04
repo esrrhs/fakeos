@@ -81,10 +81,16 @@ Ext2 reads on-disk mode/size/nlink; pipes → `S_IFIFO`, sockets → `S_IFSOCK`.
 `AT_EMPTY_PATH`. `ls -l` uses `fstatat(dirfd, name)` for mode/size. Init smoke:
 `[U][PASS] stat/fstat/newfstatat`.
 
+## /proc/self/{status,maps,cmdline} — landed
+
+Synthetic Ramfs nodes beside existing `environ`. Open snapshots live content:
+`status` (Name/Pid/PPid/Threads/VmSize), `maps` (VMA lines + `[stack]`/`[heap]`),
+`cmdline` (NUL-separated argv from exec/pid1). Init smoke:
+`[U][PASS] /proc/self status/maps/cmdline`.
+
 ## Suggested next steps
 
 1. PROT_NONE + mmap addr hint (+ optional MAP_FIXED replace) — small follow-on.
-2. /proc/self/{status,maps,cmdline} — partial /proc already (environ).
-3. nanosleep / clock_gettime / getppid/uname — interactive POSIX basics.
-4. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-5. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
+2. nanosleep / clock_gettime / getppid/uname — interactive POSIX basics.
+3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+4. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).

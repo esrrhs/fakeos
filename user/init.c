@@ -783,6 +783,110 @@ static void shm_test(void) {
 }
 
 
+
+static int proc_has(const char *buf, long n, const char *needle) {
+    long i;
+    long m = 0;
+    while (needle[m] != 0) {
+        m++;
+    }
+    if (m == 0 || n < m) {
+        return 0;
+    }
+    for (i = 0; i + m <= n; i++) {
+        long k;
+        for (k = 0; k < m; k++) {
+            if (buf[i + k] != needle[k]) {
+                break;
+            }
+        }
+        if (k == m) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void proc_self_test(void) {
+    long fd;
+    long n;
+    char buf[1024];
+    char name_line[16];
+
+    fd = u_open("/proc/self/status", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/self/status");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n <= 0) {
+        puts("[U][FAIL] read /proc/self/status");
+        return;
+    }
+    if (!proc_has(buf, n, "Name:") || !proc_has(buf, n, "Pid:")
+        || !proc_has(buf, n, "PPid:") || !proc_has(buf, n, "VmSize:")) {
+        puts("[U][FAIL] /proc/self/status fields");
+        return;
+    }
+    /* Name:<tab>init */
+    name_line[0] = 'N'; name_line[1] = 'a'; name_line[2] = 'm';
+    name_line[3] = 'e'; name_line[4] = ':'; name_line[5] = '\t';
+    name_line[6] = 'i'; name_line[7] = 'n'; name_line[8] = 'i';
+    name_line[9] = 't'; name_line[10] = 0;
+    if (!proc_has(buf, n, name_line)) {
+        puts("[U][FAIL] /proc/self/status Name not init");
+        return;
+    }
+
+    fd = u_open("/proc/self/maps", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/self/maps");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n <= 0) {
+        puts("[U][FAIL] read /proc/self/maps");
+        return;
+    }
+    if (!proc_has(buf, n, "[stack]")) {
+        puts("[U][FAIL] /proc/self/maps missing [stack]");
+        return;
+    }
+
+    fd = u_open("/proc/self/cmdline", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/self/cmdline");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n < 9 || !proc_has(buf, n, "/bin/init")) {
+        puts("[U][FAIL] /proc/self/cmdline not /bin/init");
+        return;
+    }
+
+    fd = u_open("/proc/self/environ", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/self/environ");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n <= 0 || !proc_has(buf, n, "FAKECC_PKG=/src")) {
+        puts("[U][FAIL] /proc/self/environ");
+        return;
+    }
+
+    if (u_unlink("/proc/self/status") == 0) {
+        puts("[U][FAIL] unlink /proc/self/status should fail");
+        return;
+    }
+
+    puts("[U][PASS] /proc/self status/maps/cmdline");
+}
+
 static void stat_test(void) {
     char st[144];
     long fd;
@@ -1363,6 +1467,7 @@ int main(int argc, char **argv) {
     mmap_test();
     shm_test();
     dev_nodes_test();
+    proc_self_test();
     stat_test();
     dirent_test();
     bad_exec_test();

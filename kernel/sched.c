@@ -105,6 +105,8 @@ struct tcb {
     u32 tg;            /* task_group id (0 = root)                        */
     u32 fd[FD_MAX];    /* Per-process open-file handles (VFS layer)       */
     char cwd[CWD_LEN]; /* Current working directory, NUL terminated       */
+    char cmdline[128]; /* /proc/self/cmdline: NUL-separated argv bytes    */
+    u32 cmdline_len;   /* bytes of cmdline that are meaningful            */
 };
 
 /* Sleeping locks: wait channel is the object's own address.
@@ -1937,6 +1939,8 @@ void sched_init(void) {
         threads[i].wait_chan = 0;
         threads[i].fs_base = 0;
         threads[i].clear_child_tid = 0;
+        threads[i].cmdline[0] = 0;
+        threads[i].cmdline_len = 0;
         threads[i].pid = 0;
         threads[i].tid = 0;
         threads[i].ppid = 0;
@@ -2167,6 +2171,8 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].as_h = as_h;
     threads[i].wait_chan = 0;
     threads[i].fs_base = 0;
+    threads[i].cmdline[0] = 0;
+    threads[i].cmdline_len = 0;
     threads[i].pid = pid;
     threads[i].tid = pid;              /* leader: tid == pid */
     threads[i].ppid = 0;
@@ -2244,6 +2250,13 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].wait_chan = 0;
     threads[i].fs_base = threads[sched_cur()].fs_base; /* fork inherits TLS base */
     threads[i].clear_child_tid = 0; /* Linux: child does not inherit CLEARTID */
+    {
+        u32 c;
+        for (c = 0; c < 128; c++) {
+            threads[i].cmdline[c] = threads[sched_cur()].cmdline[c];
+        }
+        threads[i].cmdline_len = threads[sched_cur()].cmdline_len;
+    }
     threads[i].pid = child_pid;
     threads[i].tid = child_pid;        /* new process leader */
     threads[i].ppid = threads[sched_cur()].pid;
@@ -2335,6 +2348,13 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     threads[i].wait_chan = 0;
     threads[i].fs_base = 0;            /* child installs TLS via arch_prctl */
     threads[i].clear_child_tid = 0;    /* child registers via set_tid_address */
+    {
+        u32 c;
+        for (c = 0; c < 128; c++) {
+            threads[i].cmdline[c] = threads[sched_cur()].cmdline[c];
+        }
+        threads[i].cmdline_len = threads[sched_cur()].cmdline_len;
+    }
     threads[i].pid = threads[sched_cur()].pid;
     threads[i].tid = child_tid;
     threads[i].ppid = threads[sched_cur()].ppid;
@@ -3120,6 +3140,95 @@ void sched_cwd_set(const char *kpath) {
 u32 sched_current_ppid(void) {
     return threads[sched_cur()].ppid;
 }
+
+/* Write cmdline into one TCB slot (and siblings sharing its pid). */
+static void cmdline_store(u32 self, const char *data, u64 n) {
+    u32 pid;
+    u64 i;
+    u32 t;
+    if (self >= MAX_THREADS) {
+        return;
+    }
+    if (n > 127) {
+        n = 127;
+    }
+    for (i = 0; i < n; i++) {
+        threads[self].cmdline[i] = data[i];
+    }
+    threads[self].cmdline[n] = 0;
+    threads[self].cmdline_len = (u32)n;
+    pid = threads[self].pid;
+    for (t = 0; t < MAX_THREADS; t++) {
+        if (t == self) {
+            continue;
+        }
+        if (threads[t].state != TCB_FREE && threads[t].pid == pid
+            && threads[t].is_user) {
+            for (i = 0; i <= n; i++) {
+                threads[t].cmdline[i] = threads[self].cmdline[i];
+            }
+            threads[t].cmdline_len = (u32)n;
+        }
+    }
+}
+
+/* Replace /proc/self/cmdline for the current user process (execve). */
+void sched_set_cmdline(const char *data, u64 n) {
+    cmdline_store(sched_cur(), data, n);
+}
+
+/* Same for a known TCB id (pid 1 bring-up before that thread runs). */
+void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n) {
+    cmdline_store(tid, data, n);
+}
+
+/* Build cmdline from the flat exec argbuf (EXEC_ARG_SLOT = 128). */
+void sched_set_cmdline_argv(u32 argc, const char *argbuf) {
+    char tmp[128];
+    u64 at = 0;
+    u32 i;
+    for (i = 0; i < argc && at < 127; i++) {
+        const char *s = argbuf + (u64)i * 128;
+        u64 k = 0;
+        while (s[k] != 0 && at < 127) {
+            tmp[at++] = s[k++];
+        }
+        if (i + 1 < argc && at < 127) {
+            tmp[at++] = 0;           /* argv separator between args */
+        }
+    }
+    sched_set_cmdline(tmp, at);
+}
+
+u64 sched_cmdline_copy(char *buf, u64 cap) {
+    u32 self = sched_cur();
+    u64 n = threads[self].cmdline_len;
+    u64 i;
+    if (buf == 0 || cap == 0) {
+        return 0;
+    }
+    if (n > cap) {
+        n = cap;
+    }
+    for (i = 0; i < n; i++) {
+        buf[i] = threads[self].cmdline[i];
+    }
+    return n;
+}
+
+u32 sched_current_threads(void) {
+    u32 pid = threads[sched_cur()].pid;
+    u32 n = 0;
+    u32 i;
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].state != TCB_FREE && threads[i].pid == pid
+            && threads[i].is_user) {
+            n++;
+        }
+    }
+    return n == 0 ? 1 : n;
+}
+
 
 /* True when a live (neither exited nor freed) child TCB of ppid exists. The
  * exit record alone is enough for wait once the child is DEAD. */

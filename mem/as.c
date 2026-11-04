@@ -1480,3 +1480,115 @@ u64 as_pml4_of(u64 handle) {
     struct address_space *as = as_of(handle);
     return as ? as->pml4 : vmm_kernel_root();
 }
+
+/* Format /proc/self/maps-style lines for every VMA. Returns bytes written
+ * (not including a trailing NUL). Truncates cleanly if the buffer fills. */
+static u32 maps_put_hex(char *dst, u64 cap, u64 at, u64 val, u32 width) {
+    u32 i;
+    if (at + width > cap) {
+        return 0;
+    }
+    for (i = 0; i < width; i++) {
+        u32 shift = (width - 1 - i) * 4;
+        u32 nibble = (u32)((val >> shift) & 0xF);
+        dst[at + i] = (char)(nibble < 10 ? ('0' + nibble) : ('a' + nibble - 10));
+    }
+    return width;
+}
+
+static u32 maps_put_str(char *dst, u64 cap, u64 at, const char *s) {
+    u64 i = 0;
+    while (s[i] != 0) {
+        if (at + i >= cap) {
+            return 0;
+        }
+        dst[at + i] = s[i];
+        i++;
+    }
+    return (u32)i;
+}
+
+u64 as_format_maps_h(u64 handle, char *buf, u64 cap) {
+    struct address_space *as = as_of(handle);
+    u64 at = 0;
+    u32 i;
+    if (as == 0 || buf == 0 || cap == 0) {
+        return 0;
+    }
+    for (i = 0; i < as->nvma; i++) {
+        struct vma *v = &as->vmas[i];
+        u32 n;
+        char perms[5];
+        if (v->kind == VMA_FREE) {
+            continue;
+        }
+        n = maps_put_hex(buf, cap, at, v->start, 16);
+        if (n == 0) {
+            break;
+        }
+        at += n;
+        if (at >= cap) {
+            break;
+        }
+        buf[at++] = '-';
+        n = maps_put_hex(buf, cap, at, v->end, 16);
+        if (n == 0) {
+            break;
+        }
+        at += n;
+        if (at >= cap) {
+            break;
+        }
+        buf[at++] = ' ';
+        perms[0] = (v->prot & PROT_READ) ? 'r' : '-';
+        perms[1] = (v->prot & PROT_WRITE) ? 'w' : '-';
+        perms[2] = (v->prot & PROT_EXEC) ? 'x' : '-';
+        perms[3] = v->shared ? 's' : 'p';
+        perms[4] = 0;
+        n = maps_put_str(buf, cap, at, perms);
+        if (n == 0) {
+            break;
+        }
+        at += n;
+        n = maps_put_str(buf, cap, at, " 00000000 00:00 0");
+        if (n == 0) {
+            break;
+        }
+        at += n;
+        /* Tag the demand stack and brk heap the way Linux does. */
+        if (v->start == 0x7f000000ULL) {
+            n = maps_put_str(buf, cap, at, " [stack]");
+            if (n == 0) {
+                break;
+            }
+            at += n;
+        } else if (v->start == HEAP_BASE) {
+            n = maps_put_str(buf, cap, at, " [heap]");
+            if (n == 0) {
+                break;
+            }
+            at += n;
+        }
+        if (at >= cap) {
+            break;
+        }
+        buf[at++] = '\n';
+    }
+    return at;
+}
+
+/* Sum of VMA spans in KiB (for /proc/self/status VmSize). */
+u64 as_vma_kb_h(u64 handle) {
+    struct address_space *as = as_of(handle);
+    u64 bytes = 0;
+    u32 i;
+    if (as == 0) {
+        return 0;
+    }
+    for (i = 0; i < as->nvma; i++) {
+        if (as->vmas[i].kind != VMA_FREE && as->vmas[i].end > as->vmas[i].start) {
+            bytes += as->vmas[i].end - as->vmas[i].start;
+        }
+    }
+    return bytes / 1024;
+}

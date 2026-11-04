@@ -21,6 +21,8 @@ extern u32 sched_alloc_pid(void);
 extern void sched_yield(void);
 extern void kthread_exit(void);
 extern u64 sched_tick_count(void);
+extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
+extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
 extern u64 sched_user_tick_count(void);
 extern u64 sched_current_as_h(void);
 extern void sched_replace_as(u64 new_as_h);
@@ -342,6 +344,7 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
     if (!proc_build_image(kva, size, argc, argbuf, &entry, &sp, &new_as)) {
         return (u64)(-1);
     }
+    sched_set_cmdline_argv(argc, argbuf);
 
     /* Commit: switch TCB + CR3 to the new space, then drop the old one. Kernel
      * stacks and this frame live in the shared higher half and survive. */
@@ -446,11 +449,15 @@ void uproc_selftest(void) {
     }
 
     pid = sched_alloc_pid();
-    if (kthread_create_user(entry, user_rsp, as_h, pid) == 0xFFFFFFFF) {
-        kprintf("      [FAIL] could not create pid 1\n");
-        mem.as_destroy_h(as_h);
-        uproc_done = 1;
-        return;
+    {
+        u32 slot = kthread_create_user(entry, user_rsp, as_h, pid);
+        if (slot == 0xFFFFFFFF) {
+            kprintf("      [FAIL] could not create pid 1\n");
+            mem.as_destroy_h(as_h);
+            uproc_done = 1;
+            return;
+        }
+        sched_set_cmdline_tcb(slot, init_argbuf, 9);
     }
     kprintf("      Started pid %u from /bin/init (entry %p, stack top %p)\n",
             (u64)pid, entry, (u64)UPROC_STACK_TOP);

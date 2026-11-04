@@ -12,6 +12,11 @@ typedef types.uint64_t u64;
  * mirroring how mem/as.c already calls kprintf. */
 extern void kprintf(const char *fmt, ...);
 
+/* Filled by kernel for synthetic /proc/self nodes (see procfs_gen_*). */
+extern u64 procfs_gen_status(char *buf, u64 cap);
+extern u64 procfs_gen_maps(char *buf, u64 cap);
+extern u64 procfs_gen_cmdline(char *buf, u64 cap);
+
 /* ---------------------------------------------------------------------------
  * Minimal in-memory VFS + Ramfs
  *
@@ -35,8 +40,14 @@ enum {
     INO_CONSOLE = 3,
     INO_NULL    = 4,               /* /dev/null: reads EOF, writes discard */
     INO_ZERO    = 5,               /* /dev/zero: reads zeros, writes discard */
+    INO_PROC_STATUS  = 6,          /* /proc/self/status (snapshot on open) */
+    INO_PROC_MAPS    = 7,          /* /proc/self/maps */
+    INO_PROC_CMDLINE = 8,          /* /proc/self/cmdline */
 
     ROOT_INO    = 1,
+    PROC_STATUS_INO  = 58,
+    PROC_MAPS_INO    = 59,
+    PROC_CMDLINE_INO = 60,
     ZERO_INO    = 61,              /* fixed /dev/zero inode */
     NULL_INO    = 62,              /* fixed /dev/null inode */
     CONSOLE_INO = 63,
@@ -98,10 +109,17 @@ struct open_file {
     u32 writable;
     u32 append;                    /* O_APPEND: reposition to EOF on write */
     u32 permanent;                 /* never freed (console) */
+    char *snap;                    /* /proc/self snapshot (kmalloc); shared via refs */
+    u64 snap_len;
 };
 
 static struct inode inodes[MAX_INODES];
 static struct open_file opens[MAX_OPEN_FILES];
+
+static u32 inode_is_proc(u32 type) {
+    return type == INO_PROC_STATUS || type == INO_PROC_MAPS
+        || type == INO_PROC_CMDLINE;
+}
 
 /* ---------------------------------------------------------------------------
  * Tiny string helpers (NUL-terminated kernel strings)
@@ -353,6 +371,14 @@ void fs_init(void) {
     inodes[ZERO_INO].type = INO_ZERO;
     inodes[ZERO_INO].parent = ZERO_INO;
 
+    /* Fixed /proc/self/{status,maps,cmdline}; linked in fs_publish_procfs. */
+    inodes[PROC_STATUS_INO].type = INO_PROC_STATUS;
+    inodes[PROC_STATUS_INO].parent = PROC_STATUS_INO;
+    inodes[PROC_MAPS_INO].type = INO_PROC_MAPS;
+    inodes[PROC_MAPS_INO].parent = PROC_MAPS_INO;
+    inodes[PROC_CMDLINE_INO].type = INO_PROC_CMDLINE;
+    inodes[PROC_CMDLINE_INO].parent = PROC_CMDLINE_INO;
+
     opens[CONSOLE_FH].used = 1;
     opens[CONSOLE_FH].ino = CONSOLE_INO;
     opens[CONSOLE_FH].permanent = 1;
@@ -378,6 +404,28 @@ u32 fs_publish_chrdevs(void) {
         return 0;
     }
     if (!dir_add(dev, "tty", 3, CONSOLE_INO)) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Link synthetic /proc/self/{status,maps,cmdline}. /proc/self must already
+ * exist (environ publish creates it). Returns 1 on success. */
+u32 fs_publish_procfs(void) {
+    u32 self = walk_lookup("/proc/self");
+    if (self == 0 || inodes[self].type != INO_DIR) {
+        return 0;
+    }
+    inodes[PROC_STATUS_INO].parent = self;
+    inodes[PROC_MAPS_INO].parent = self;
+    inodes[PROC_CMDLINE_INO].parent = self;
+    if (!dir_add(self, "status", 6, PROC_STATUS_INO)) {
+        return 0;
+    }
+    if (!dir_add(self, "maps", 4, PROC_MAPS_INO)) {
+        return 0;
+    }
+    if (!dir_add(self, "cmdline", 7, PROC_CMDLINE_INO)) {
         return 0;
     }
     return 1;
@@ -540,9 +588,12 @@ u32 fs_unlink(const char *path) {
     }
     /* Never unlink fixed character devices. */
     if (target == CONSOLE_INO || target == NULL_INO || target == ZERO_INO
+        || target == PROC_STATUS_INO || target == PROC_MAPS_INO
+        || target == PROC_CMDLINE_INO
         || inodes[target].type == INO_CONSOLE
         || inodes[target].type == INO_NULL
-        || inodes[target].type == INO_ZERO) {
+        || inodes[target].type == INO_ZERO
+        || inode_is_proc(inodes[target].type)) {
         return 0;
     }
     for (slot = 0; slot < d->ndent; slot++) {
@@ -607,7 +658,8 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
     if (old_ino == ROOT_INO || old_ino == CONSOLE_INO
         || old_ino == NULL_INO || old_ino == ZERO_INO) return 0;
     if (inodes[old_ino].type == INO_NULL || inodes[old_ino].type == INO_ZERO
-        || inodes[old_ino].type == INO_CONSOLE) return 0;
+        || inodes[old_ino].type == INO_CONSOLE
+        || inode_is_proc(inodes[old_ino].type)) return 0;
 
     if (inodes[old_ino].type == INO_DIR) {
         u32 cur = nparent;
@@ -694,6 +746,8 @@ static u32 alloc_open(u32 ino, u32 readable, u32 writable, u32 append, u64 off) 
             opens[i].writable = writable;
             opens[i].append = append;
             opens[i].permanent = 0;
+            opens[i].snap = 0;
+            opens[i].snap_len = 0;
             return i;
         }
     }
@@ -768,7 +822,11 @@ u32 fs_file_open(const char *path, u32 flags) {
     }
     if (inodes[ino].type != INO_FILE && inodes[ino].type != INO_DIR
         && inodes[ino].type != INO_CONSOLE && inodes[ino].type != INO_NULL
-        && inodes[ino].type != INO_ZERO) {
+        && inodes[ino].type != INO_ZERO && !inode_is_proc(inodes[ino].type)) {
+        return FH_BAD;
+    }
+    /* /proc/self/* are read-only snapshots. */
+    if (inode_is_proc(inodes[ino].type) && mode != O_RDONLY) {
         return FH_BAD;
     }
     readable = (mode != O_WRONLY);
@@ -782,7 +840,32 @@ u32 fs_file_open(const char *path, u32 flags) {
     if ((flags & O_APPEND) && inodes[ino].type == INO_FILE) {
         off = inodes[ino].size;
     }
-    return alloc_open(ino, readable, writable, (flags & O_APPEND) != 0, off);
+    {
+        u32 fh = alloc_open(ino, readable, writable, (flags & O_APPEND) != 0, off);
+        if (fh == FH_BAD) {
+            return FH_BAD;
+        }
+        if (inode_is_proc(inodes[ino].type)) {
+            enum { PROC_SNAP_CAP = 4096 };
+            char *buf = (char *)mem.kmalloc(PROC_SNAP_CAP);
+            u64 n = 0;
+            if (buf == 0) {
+                opens[fh].used = 0;
+                opens[fh].refs = 0;
+                return FH_BAD;
+            }
+            if (inodes[ino].type == INO_PROC_STATUS) {
+                n = procfs_gen_status(buf, PROC_SNAP_CAP);
+            } else if (inodes[ino].type == INO_PROC_MAPS) {
+                n = procfs_gen_maps(buf, PROC_SNAP_CAP);
+            } else {
+                n = procfs_gen_cmdline(buf, PROC_SNAP_CAP);
+            }
+            opens[fh].snap = buf;
+            opens[fh].snap_len = n;
+        }
+        return fh;
+    }
 }
 
 u32 fs_close(u32 fh) {
@@ -795,6 +878,11 @@ u32 fs_close(u32 fh) {
     if (opens[fh].refs > 1) {
         opens[fh].refs--;
         return 1;
+    }
+    if (opens[fh].snap != 0) {
+        mem.kfree(opens[fh].snap);
+        opens[fh].snap = 0;
+        opens[fh].snap_len = 0;
     }
     opens[fh].used = 0;
     opens[fh].refs = 0;
@@ -861,6 +949,22 @@ u64 fs_read_h(u32 fh, char *kbuf, u64 len) {
             kbuf[i] = 0;
         }
         return len;
+    }
+    /* /proc/self snapshot taken at open. */
+    if (opens[fh].snap != 0) {
+        if (opens[fh].off >= opens[fh].snap_len) {
+            return 0;
+        }
+        n = opens[fh].snap_len - opens[fh].off;
+        if (n > len) {
+            n = len;
+        }
+        src = opens[fh].snap;
+        for (i = 0; i < n; i++) {
+            kbuf[i] = src[opens[fh].off + i];
+        }
+        opens[fh].off += n;
+        return n;
     }
     if (ip->type != INO_FILE) {
         return (u64)(-1);             /* console uses tty path; dirs use getdents */
@@ -946,6 +1050,19 @@ u64 fs_lseek_h(u32 fh, u64 off, u32 whence) {
         opens[fh].off = no;
         return no;
     }
+    if (opens[fh].snap != 0) {
+        if (whence == SEEK_SET) {
+            no = off;
+        } else if (whence == SEEK_CUR) {
+            no = opens[fh].off + off;
+        } else if (whence == SEEK_END) {
+            no = opens[fh].snap_len + off;
+        } else {
+            return (u64)(-1);
+        }
+        opens[fh].off = no;
+        return no;
+    }
     if (whence == SEEK_SET) {
         no = off;
     } else if (whence == SEEK_CUR) {
@@ -1004,7 +1121,8 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
         if (inodes[de->ino].type == INO_DIR) {
             r[18] = (char)DT_DIR;
-        } else if (inodes[de->ino].type == INO_FILE) {
+        } else if (inodes[de->ino].type == INO_FILE
+                   || inode_is_proc(inodes[de->ino].type)) {
             r[18] = (char)DT_REG;
         } else {
             r[18] = (char)DT_CHR;     /* console/null/zero */
@@ -1160,6 +1278,9 @@ u32 fs_stat_ino(u32 ino, u32 *mode_out, u64 *size_out, u32 *rdev_out,
         mode = 0x21B6;
         rdev = (1 << 8) | 5;         /* /dev/zero */
         size = 0;
+    } else if (inode_is_proc(t)) {
+        mode = 0x81A4;               /* S_IFREG | 0644 */
+        size = 0;                    /* live size known after open snapshot */
     } else {
         return 0;
     }
