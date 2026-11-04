@@ -1,8 +1,10 @@
 /* fakeos userland - seq: print integer sequences (thin POSIX subset).
  * Forms: seq LAST | seq FIRST LAST | seq FIRST INCREMENT LAST
  * Options: -s SEPARATOR (default newline); -w equal-width zero pad
- * (width = max decimal width of endpoints, including '-'). Always ends
- * with a newline. Compact argv for EXEC_MAX_ARGC=8.
+ * (width = max decimal width of endpoints, including '-'); -f FORMAT
+ * printf-ish (%% and %d/%i/%u/%g/%G/%f/%e/%E → decimal integer; thin, no
+ * float). With -f, -w is ignored. Always ends with a newline. Compact argv
+ * for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -35,7 +37,7 @@ static int parse_long(const char *s, long *out) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: seq [-w] [-s SEP] LAST | FIRST LAST | FIRST INCREMENT LAST\n", 68);
+    u_write(2, "usage: seq [-w] [-s SEP] [-f FMT] LAST | FIRST LAST | FIRST INCREMENT LAST\n", 75);
 }
 
 static void write_sep(const char *sep) {
@@ -102,8 +104,52 @@ static void emit_num(long v, int width) {
     }
 }
 
+/* Thin FORMAT: literals, %%, and %[diugGfFeE] as decimal integer. */
+static void emit_fmt(long v, const char *fmt) {
+    int i = 0;
+    while (fmt[i]) {
+        if (fmt[i] != '%') {
+            u_write(1, &fmt[i], 1);
+            i++;
+            continue;
+        }
+        i++;
+        if (fmt[i] == '%') {
+            u_write(1, "%", 1);
+            i++;
+            continue;
+        }
+        /* Skip thin flags/width/precision: 0-9 and '.' digits. */
+        while (fmt[i] == '0' || (fmt[i] >= '1' && fmt[i] <= '9') ||
+               fmt[i] == '-' || fmt[i] == '+' || fmt[i] == ' ') {
+            i++;
+        }
+        if (fmt[i] == '.') {
+            i++;
+            while (fmt[i] >= '0' && fmt[i] <= '9') i++;
+        }
+        if (fmt[i] == 'd' || fmt[i] == 'i' || fmt[i] == 'u' ||
+            fmt[i] == 'g' || fmt[i] == 'G' || fmt[i] == 'f' ||
+            fmt[i] == 'e' || fmt[i] == 'E') {
+            int save = opt_w;
+            opt_w = 0;
+            emit_num(v, 0);
+            opt_w = save;
+            i++;
+        } else if (fmt[i] == 0) {
+            u_write(1, "%", 1);
+            break;
+        } else {
+            u_write(1, "%", 1);
+            u_write(1, &fmt[i], 1);
+            i++;
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     const char *sep = "\n";
+    const char *fmt = 0;
     int i = 1;
     long first = 1;
     long step = 1;
@@ -112,6 +158,8 @@ int main(int argc, char **argv) {
     long cur;
     int first_out = 1;
     int width = 0;
+
+    opt_w = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         /* Negative numbers are operands, not options. */
@@ -129,12 +177,26 @@ int main(int argc, char **argv) {
             i += 2;
             continue;
         }
+        if (strcmp(argv[i], "-f") == 0) {
+            if (i + 1 >= argc) {
+                usage();
+                return 1;
+            }
+            fmt = argv[i + 1];
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'f' && argv[i][2] != 0) {
+            fmt = argv[i] + 2;
+            i++;
+            continue;
+        }
         if (strcmp(argv[i], "-w") == 0) {
             opt_w = 1;
             i++;
             continue;
         }
-        /* Glued shorts: -w, -wsSEP, -sw with following SEP, etc. */
+        /* Glued shorts: -w, -wsSEP, -sw with following SEP, -fFMT, etc. */
         {
             const char *o = argv[i] + 1;
             int j = 0;
@@ -153,6 +215,19 @@ int main(int argc, char **argv) {
                         return 1;
                     }
                     sep = argv[i + 1];
+                    i += 2;
+                    goto opts_done;
+                } else if (o[j] == 'f') {
+                    if (o[j + 1] != 0) {
+                        fmt = o + j + 1;
+                        i++;
+                        goto opts_done;
+                    }
+                    if (i + 1 >= argc) {
+                        usage();
+                        return 1;
+                    }
+                    fmt = argv[i + 1];
                     i += 2;
                     goto opts_done;
                 } else {
@@ -198,7 +273,7 @@ opts_done:
         return 0;
     }
 
-    if (opt_w) {
+    if (opt_w && !fmt) {
         int w1 = num_width(first);
         int w2 = num_width(last);
         width = w1 > w2 ? w1 : w2;
@@ -208,7 +283,8 @@ opts_done:
     for (;;) {
         if (!first_out) write_sep(sep);
         first_out = 0;
-        emit_num(cur, width);
+        if (fmt) emit_fmt(cur, fmt);
+        else emit_num(cur, width);
         if (step > 0) {
             if (cur > last - step) break;
             cur = cur + step;
