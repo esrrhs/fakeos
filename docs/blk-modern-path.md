@@ -163,8 +163,19 @@ Syscalls: `getuid`/`geteuid`/`getgid`/`getegid` (nr 102/107/104/108) and
 Init smoke: `[U][PASS] getuid/chown/mtime`. Focused virtio login smoke covers
 id/chown/`ls -l` on Ramfs+Ext2 plus login/`uname`/`udptest`/`env` (smp 1/2).
 
+## TTY Tab completion — landed
+
+Canonical TTY line edit handles Tab: complete the token under the cursor
+against cwd (relative) or the absolute directory prefix; command-position
+tokens (start of line, no `/`) also search `/bin` and a builtin name table
+kept in sync with shell help. Unique directory matches append `/`. No match
+or no common-prefix progress rings BEL. Skipped when ECHO is off. Focused
+virtio login smoke covers Tab (`ec`→`echo`, `/tm`→`/tmp/`, `/bin/l`→`/bin/ls`
+or shared `l` prefix) plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
-1. Optional shell polish: tab completion (nice if small).
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Deep jbd — avoid unless needed.
+1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+2. Deep jbd — avoid unless needed.
+3. More interactive polish: double-Tab match listing, setuid/groups, history
+   persistence, head/wc if still missing, networking user tools.

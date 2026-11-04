@@ -17,7 +17,10 @@ typedef types.uint64_t u64;
  * so unlock+sleep is atomic under the run lock (same pattern as pipes).
  * Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
- * provide basic readline-style editing. ISIG: Ctrl-C/Ctrl-Z are intercepted
+ * provide basic readline-style editing. Tab completes the word at the cursor
+ * against cwd / absolute paths, /bin (command position), and a small builtin
+ * name table; unique directory matches get a trailing '/'. ISIG: Ctrl-C/Ctrl-Z
+ * are intercepted
  * on input (UART IRQ + PS/2) even while the shell is blocked in wait4 when
  * termios c_lflag has ISIG. TCGETS/TCSETS expose ICANON/ECHO/ISIG/ICRNL +
  * c_cc; clearing ICANON switches console read to raw byte mode.
@@ -521,6 +524,333 @@ static void tty_hist_apply(int view) {
     tty_hist_view = view;
 }
 
+/* ---- Tab completion (path + /bin + shell builtin names) -----------------
+ * On Tab, complete the token under the cursor. Relative words use cwd;
+ * absolute words use the directory prefix. Command-position tokens (no
+ * slash, at column 0 of the line) also search /bin and a builtin table.
+ * Unique directory hits append '/'. No match / no progress -> BEL.
+ * Skipped when ECHO is off (hidden password-style input).
+ * ---------------------------------------------------------------------- */
+enum {
+    TAB_MATCH_MAX = 24,
+    TAB_NAME_MAX = 28,
+    TAB_PATH_MAX = 128,
+    TAB_DENT_RECLEN = 48,
+    TAB_DENT_BUF = 1920,
+    TAB_DT_DIR = 4
+};
+
+extern const char *sched_cwd(void);
+extern u32 fs_file_open(const char *path, u32 flags);
+extern u32 fs_close(u32 fh);
+extern u64 fs_getdents_h(u32 fh, char *kbuf, u64 len);
+extern u32 fs_file_is_dir(u32 fh);
+extern u32 ext2_is_mnt_path(const char *path);
+extern u32 ext2_mounted(void);
+extern u32 ext2_open(const char *path, u32 flags);
+extern u32 ext2_close(u32 fh);
+extern u64 ext2_getdents(u32 fh, char *kbuf, u64 len);
+extern u32 ext2_file_is_dir(u32 fh);
+extern u32 ext2_fh_is(u32 fh);
+
+static char tab_matches[TAB_MATCH_MAX][TAB_NAME_MAX];
+static u8 tab_isdir[TAB_MATCH_MAX];
+static u32 tab_nmatch;
+
+static void tty_beep(void) {
+    drivers.uart_putc((char)0x07);
+}
+
+static u32 tab_strlen(const char *s) {
+    u32 n = 0;
+    if (s == 0) return 0;
+    while (s[n] != 0) n++;
+    return n;
+}
+
+static u32 tab_startswith(const char *name, const char *pfx, u32 pfx_n) {
+    u32 i;
+    for (i = 0; i < pfx_n; i++) {
+        if (name[i] == 0 || name[i] != pfx[i]) return 0;
+    }
+    return 1;
+}
+
+static u32 tab_name_eq(const char *a, const char *b) {
+    u32 i = 0;
+    for (;;) {
+        if (a[i] != b[i]) return 0;
+        if (a[i] == 0) return 1;
+        i++;
+        if (i >= TAB_NAME_MAX) return 1;
+    }
+}
+
+static void tab_add_match(const char *name, u32 is_dir) {
+    u32 n;
+    u32 i;
+    if (tab_nmatch >= TAB_MATCH_MAX) return;
+    n = tab_strlen(name);
+    if (n == 0 || n >= TAB_NAME_MAX) return;
+    for (i = 0; i < tab_nmatch; i++) {
+        if (tab_name_eq(tab_matches[i], name)) return;
+    }
+    for (i = 0; i < n; i++) tab_matches[tab_nmatch][i] = name[i];
+    tab_matches[tab_nmatch][n] = 0;
+    tab_isdir[tab_nmatch] = (u8)(is_dir ? 1 : 0);
+    tab_nmatch++;
+}
+
+static u32 tab_open_dir(const char *path) {
+    u32 fh;
+    if (path == 0 || path[0] == 0) return 0;
+    if (ext2_is_mnt_path(path)) {
+        if (!ext2_mounted()) return 0;
+        fh = ext2_open(path, 0);
+        if (fh == 0) return 0;
+        if (!ext2_file_is_dir(fh)) {
+            ext2_close(fh);
+            return 0;
+        }
+        return fh;
+    }
+    fh = fs_file_open(path, 0);
+    if (fh == 0) return 0;
+    if (!fs_file_is_dir(fh)) {
+        fs_close(fh);
+        return 0;
+    }
+    return fh;
+}
+
+static void tab_close_fh(u32 fh) {
+    if (fh == 0) return;
+    if (ext2_fh_is(fh)) ext2_close(fh);
+    else fs_close(fh);
+}
+
+static u64 tab_getdents(u32 fh, char *buf, u64 len) {
+    if (ext2_fh_is(fh)) return ext2_getdents(fh, buf, len);
+    return fs_getdents_h(fh, buf, len);
+}
+
+static char tab_dent_buf[TAB_DENT_BUF];
+
+static void tab_scan_dir(const char *dirpath, const char *pfx, u32 pfx_n) {
+    u32 fh;
+    u64 n;
+    u64 off;
+    fh = tab_open_dir(dirpath);
+    if (fh == 0) return;
+    for (;;) {
+        n = tab_getdents(fh, tab_dent_buf, TAB_DENT_BUF);
+        if (n == 0 || n == (u64)(-1)) break;
+        off = 0;
+        while (off + TAB_DENT_RECLEN <= n) {
+            char *name = tab_dent_buf + off + 19;
+            u8 dtype = (u8)tab_dent_buf[off + 18];
+            if (name[0] == '.' && (name[1] == 0
+                || (name[1] == '.' && name[2] == 0))) {
+                if (!(pfx_n > 0 && pfx[0] == '.')) {
+                    off += TAB_DENT_RECLEN;
+                    continue;
+                }
+            }
+            if (tab_startswith(name, pfx, pfx_n)) {
+                tab_add_match(name, dtype == TAB_DT_DIR);
+            }
+            off += TAB_DENT_RECLEN;
+        }
+    }
+    tab_close_fh(fh);
+}
+
+static void tab_scan_builtins(const char *pfx, u32 pfx_n) {
+    static const char *builtins[32] = {
+        "echo", "cd", "mkdir", "rmdir", "pwd", "pid", "ppid", "uname",
+        "sleep", "ln", "readlink", "realpath", "env", "export", "unset",
+        "which", "chmod", "umask", "chown", "id", "sync", "clear",
+        "history", "jobs", "fg", "bg", "kill", "exit", "help", 0
+    };
+    u32 i;
+    for (i = 0; builtins[i] != 0; i++) {
+        if (tab_startswith(builtins[i], pfx, pfx_n)) {
+            tab_add_match(builtins[i], 0);
+        }
+    }
+}
+
+static u32 tab_common_len(void) {
+    u32 len = 0;
+    u32 i;
+    char c;
+    if (tab_nmatch == 0) return 0;
+    for (;;) {
+        c = tab_matches[0][len];
+        if (c == 0) return len;
+        for (i = 1; i < tab_nmatch; i++) {
+            if (tab_matches[i][len] != c) return len;
+        }
+        len++;
+        if (len >= TAB_NAME_MAX) return len;
+    }
+}
+
+static void tty_insert_char(char ch) {
+    u32 i;
+    if (tty_editing >= LINE_MAX - 1) return;
+    for (i = tty_editing; i > tty_cursor; i--) {
+        tty_buf[i] = tty_buf[i - 1];
+    }
+    tty_buf[tty_cursor] = ch;
+    tty_editing++;
+    tty_echo_ch(ch);
+    tty_cursor++;
+    if (tty_cursor < tty_editing) tty_redraw_tail();
+}
+
+static void tty_insert_range(const char *s, u32 from, u32 to) {
+    u32 k;
+    for (k = from; k < to; k++) {
+        if (s[k] == 0) break;
+        tty_insert_char(s[k]);
+    }
+}
+
+static u32 tab_copy_cwd(char *out, u32 cap) {
+    const char *cwd = sched_cwd();
+    u32 i = 0;
+    if (cwd == 0) cwd = "/";
+    while (cwd[i] != 0 && i + 1 < cap) {
+        out[i] = cwd[i];
+        i++;
+    }
+    out[i] = 0;
+    return 1;
+}
+
+/* dir_end = index after directory prefix in word (0 => use cwd only).
+ * Examples: word "/tm" dir_end=1 => "/"; word "/tmp/x" dir_end=5 => "/tmp";
+ * word "a/b" dir_end=2 => cwd+"/a". */
+static u32 tab_build_dir(char *dirpath, u32 cap, const char *word, u32 dir_end) {
+    u32 i;
+    u32 j;
+    char cwd[TAB_PATH_MAX];
+    if (dir_end == 0) {
+        return tab_copy_cwd(dirpath, cap);
+    }
+    if (word[0] == '/') {
+        if (dir_end == 1) {
+            if (cap < 2) return 0;
+            dirpath[0] = '/';
+            dirpath[1] = 0;
+            return 1;
+        }
+        if (dir_end >= cap) return 0;
+        for (i = 0; i < dir_end; i++) dirpath[i] = word[i];
+        dirpath[dir_end] = 0;
+        if (dir_end > 1 && dirpath[dir_end - 1] == '/') {
+            dirpath[dir_end - 1] = 0;
+        }
+        return 1;
+    }
+    if (!tab_copy_cwd(cwd, TAB_PATH_MAX)) return 0;
+    i = 0;
+    while (cwd[i] != 0 && i + 1 < cap) {
+        dirpath[i] = cwd[i];
+        i++;
+    }
+    if (i == 0 || dirpath[i - 1] != '/') {
+        if (i + 1 >= cap) return 0;
+        dirpath[i++] = '/';
+    }
+    j = 0;
+    while (j < dir_end && word[j] != 0 && i + 1 < cap) {
+        dirpath[i++] = word[j++];
+    }
+    dirpath[i] = 0;
+    if (i > 1 && dirpath[i - 1] == '/') dirpath[i - 1] = 0;
+    return 1;
+}
+
+static void tty_tab_complete(void) {
+    u32 ws;
+    u32 we;
+    u32 i;
+    u32 dir_end;
+    u32 pfx_n;
+    u32 common;
+    u32 is_cmd;
+    u32 have_slash;
+    char word[TAB_PATH_MAX];
+    char dirpath[TAB_PATH_MAX];
+    char prefix[TAB_NAME_MAX];
+
+    if ((tty_lflag & TTY_ECHO) == 0) return;
+
+    ws = tty_cursor;
+    while (ws > 0 && tty_buf[ws - 1] != ' ' && tty_buf[ws - 1] != '\t') {
+        ws--;
+    }
+    we = tty_cursor;
+    if (we < ws || (we - ws) >= TAB_PATH_MAX) {
+        tty_beep();
+        return;
+    }
+    for (i = 0; i < we - ws; i++) word[i] = tty_buf[ws + i];
+    word[we - ws] = 0;
+
+    have_slash = 0;
+    dir_end = 0;
+    for (i = 0; word[i] != 0; i++) {
+        if (word[i] == '/') {
+            dir_end = i + 1;
+            have_slash = 1;
+        }
+    }
+    if (!have_slash) dir_end = 0;
+
+    i = 0;
+    while (word[dir_end + i] != 0 && i + 1 < TAB_NAME_MAX) {
+        prefix[i] = word[dir_end + i];
+        i++;
+    }
+    prefix[i] = 0;
+    pfx_n = i;
+
+    if (!tab_build_dir(dirpath, TAB_PATH_MAX, word, dir_end)) {
+        tty_beep();
+        return;
+    }
+
+    tab_nmatch = 0;
+    is_cmd = (ws == 0 && !have_slash);
+    if (is_cmd) {
+        tab_scan_builtins(prefix, pfx_n);
+        tab_scan_dir("/bin", prefix, pfx_n);
+    }
+    tab_scan_dir(dirpath, prefix, pfx_n);
+
+    if (tab_nmatch == 0) {
+        tty_beep();
+        return;
+    }
+    common = tab_common_len();
+    if (common <= pfx_n && tab_nmatch > 1) {
+        tty_beep();
+        return;
+    }
+    if (common > pfx_n) {
+        tty_insert_range(tab_matches[0], pfx_n, common);
+    }
+    if (tab_nmatch == 1 && tab_isdir[0] != 0) {
+        if (tty_cursor == 0 || tty_buf[tty_cursor - 1] != '/') {
+            tty_insert_char('/');
+        }
+    }
+    tty_hist_view = -1;
+}
+
 static void tty_recv_line(void) {
     u32 esc_state = 0; /* 0=normal 1=saw ESC 2=saw ESC [ 3=CSI digits */
     u32 csi_num = 0;
@@ -658,17 +988,13 @@ static void tty_recv_line(void) {
             }
             continue;
         }
+        if (c == '\t') {
+            tty_tab_complete();
+            continue;
+        }
         if (c >= 0x20 && c < 0x7F) {
             if (tty_editing < LINE_MAX - 1) {
-                u32 i;
-                for (i = tty_editing; i > tty_cursor; i--) {
-                    tty_buf[i] = tty_buf[i - 1];
-                }
-                tty_buf[tty_cursor] = (char)c;
-                tty_editing++;
-                tty_echo_ch((char)c);
-                tty_cursor++;
-                if (tty_cursor < tty_editing) tty_redraw_tail();
+                tty_insert_char((char)c);
                 tty_hist_view = -1;
             } else {
                 tty_move_cursor_to(tty_editing);
