@@ -634,6 +634,19 @@ Ramfs rename tree, cross-FS Ramfs→Ext2 copy+rm, into-dir, cycle refuse, prior
 interactive greens (smp 1/2). Ramfs `/bin` dents 98/128.
 
 
+
+## /bin/cp -n + /bin/mv -n noclobber — landed
+
+Thin POSIX polish. `/bin/cp` gains `-n` (noclobber; sticky with `-r`/`-R` as
+`-rn`/`-nr`): skip existing destinations quietly (exit 0). `/bin/mv` gains
+`-n` the same way before `rename(2)` or cross-FS copy+rm. Recursive `cp -rn`
+still creates missing dirs/files and only skips paths that already exist.
+No new `/bin` publish (dent count unchanged). Shell has no builtin cp/mv —
+external only. Focused virtio login smoke covers Ramfs + Ext2 noclobber for
+cp/mv (file, into-dir, sticky `-rn`), prior interactive greens (smp 1/2).
+Ramfs `/bin` dents ~106/128.
+
+
 ## /bin/find + /bin/du — landed
 
 Thin tree-walk pair for daily-driver scripting (no kernel work). `find

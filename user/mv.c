@@ -1,11 +1,12 @@
 /* fakeos userland - mv: rename(2); falls back to copy-tree+rm across FS.
  * Forms:
- *   mv SRC DST
- *   mv SRC... DIRECTORY
+ *   mv [-n] SRC DST
+ *   mv [-n] SRC... DIRECTORY
  * If DST/DIRECTORY exists as a directory, place each SRC under it as
  * DIRECTORY/basename(SRC). Directories move via rename when possible;
  * otherwise copy-tree then recursive remove. Refuse cycles (DST under
- * SRC). Compact argv for EXEC_MAX_ARGC=8.
+ * SRC). -n noclobber: skip existing destinations (quiet, exit 0). Compact
+ * argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -282,10 +283,13 @@ static int copy_unlink(const char *src, const char *dst) {
     return 0;
 }
 
-static int move_one(const char *src, const char *dst) {
+static int move_one(const char *src, const char *dst, int noclobber) {
     if (is_under(src, dst)) {
         printf("mv: %s: cannot move a directory into itself\n", src);
         return 1;
+    }
+    if (noclobber && path_exists(dst)) {
+        return 0;
     }
     if (u_rename(src, dst) == 0) {
         return 0;
@@ -299,23 +303,42 @@ static int move_one(const char *src, const char *dst) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: mv SRC DST|DIR...\n", 24);
+    u_write(2, "usage: mv [-n] SRC DST|DIR...\n", 30);
 }
 
 int main(int argc, char **argv) {
     int nops;
     int i;
+    int ai = 1;
+    int noclobber = 0;
     int rc = 0;
 
-    if (argc < 3) {
+    while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
+        const char *o = argv[ai] + 1;
+        int j;
+        if (o[0] == '-' && o[1] == 0) {
+            break;
+        }
+        for (j = 0; o[j] != 0; j++) {
+            if (o[j] == 'n') {
+                noclobber = 1;
+            } else {
+                usage();
+                return 1;
+            }
+        }
+        ai++;
+    }
+
+    nops = argc - ai;
+    if (nops < 2) {
         usage();
         return 1;
     }
-    nops = argc - 1;
 
     if (nops == 2) {
-        const char *src = argv[1];
-        const char *dst = argv[2];
+        const char *src = argv[ai];
+        const char *dst = argv[ai + 1];
         char joined[PATH_CAP];
         if (is_dir(dst)) {
             if (join_dir_base(joined, PATH_CAP, dst, basename_of(src)) < 0) {
@@ -324,7 +347,7 @@ int main(int argc, char **argv) {
             }
             dst = joined;
         }
-        return move_one(src, dst);
+        return move_one(src, dst, noclobber);
     }
 
     /* Multiple sources into directory. */
@@ -334,14 +357,14 @@ int main(int argc, char **argv) {
             printf("mv: %s: not a directory\n", dir);
             return 1;
         }
-        for (i = 1; i < argc - 1; i++) {
+        for (i = ai; i < argc - 1; i++) {
             char joined[PATH_CAP];
             if (join_dir_base(joined, PATH_CAP, dir, basename_of(argv[i])) < 0) {
                 u_write(2, "mv: path too long\n", 18);
                 rc = 1;
                 continue;
             }
-            if (move_one(argv[i], joined) != 0) rc = 1;
+            if (move_one(argv[i], joined, noclobber) != 0) rc = 1;
         }
     }
     return rc;

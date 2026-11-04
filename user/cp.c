@@ -1,10 +1,11 @@
-/* fakeos userland - cp: copy files; -r/-R copies directory trees.
+/* fakeos userland - cp: copy files; -r/-R trees; -n noclobber.
  * Forms:
- *   cp [-r|-R] SRC DST
- *   cp [-r|-R] SRC... DIRECTORY
+ *   cp [-r|-R] [-n] SRC DST
+ *   cp [-r|-R] [-n] SRC... DIRECTORY
  * If DST/DIRECTORY exists as a directory, place each SRC under it as
  * DIRECTORY/basename(SRC). Refuse directory SRC without -r. Refuse cycles
- * (DST under SRC). Compact argv for EXEC_MAX_ARGC=8.
+ * (DST under SRC). -n skips existing destinations (quiet, exit 0). Sticky
+ * clusters (-rn/-nr). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -101,12 +102,15 @@ static int is_under(const char *ancestor, const char *child) {
     return child[al] == '/';
 }
 
-static int copy_file(const char *src, const char *dst) {
+static int copy_file(const char *src, const char *dst, int noclobber) {
     char buf[1024];
     long in;
     long out;
     long n;
 
+    if (noclobber && path_exists(dst)) {
+        return 0;
+    }
     in = u_open(src, O_RDONLY, 0);
     if (in < 0) {
         printf("cp: %s: cannot open\n", src);
@@ -131,9 +135,9 @@ static int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
-static int copy_path(const char *src, const char *dst, int recursive);
+static int copy_path(const char *src, const char *dst, int recursive, int noclobber);
 
-static int copy_dir_rec(const char *src, const char *dst) {
+static int copy_dir_rec(const char *src, const char *dst, int noclobber) {
     char dent[DENT_BUF];
     char child_src[PATH_CAP];
     char child_dst[PATH_CAP];
@@ -197,30 +201,31 @@ static int copy_dir_rec(const char *src, const char *dst) {
             rc = 1;
             continue;
         }
-        if (copy_path(child_src, child_dst, 1) != 0) rc = 1;
+        if (copy_path(child_src, child_dst, 1, noclobber) != 0) rc = 1;
     }
     return rc;
 }
 
-static int copy_path(const char *src, const char *dst, int recursive) {
+static int copy_path(const char *src, const char *dst, int recursive, int noclobber) {
     if (is_dir(src)) {
         if (!recursive) {
             printf("cp: %s: is a directory (not copied)\n", src);
             return 1;
         }
-        return copy_dir_rec(src, dst);
+        return copy_dir_rec(src, dst, noclobber);
     }
-    return copy_file(src, dst);
+    return copy_file(src, dst, noclobber);
 }
 
 static void usage(void) {
-    u_write(2, "usage: cp [-r|-R] SRC DST|DIR...\n", 33);
+    u_write(2, "usage: cp [-rnR] SRC DST|DIR...\n", 32);
 }
 
 int main(int argc, char **argv) {
     int i;
     int ai = 1;
     int recursive = 0;
+    int noclobber = 0;
     int rc = 0;
     int nops;
 
@@ -234,6 +239,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'r' || o[j] == 'R') {
                 recursive = 1;
+            } else if (o[j] == 'n') {
+                noclobber = 1;
             } else {
                 usage();
                 return 1;
@@ -259,7 +266,7 @@ int main(int argc, char **argv) {
             }
             dst = joined;
         }
-        return copy_path(src, dst, recursive);
+        return copy_path(src, dst, recursive, noclobber);
     }
 
     /* Multiple sources into directory. */
@@ -276,7 +283,7 @@ int main(int argc, char **argv) {
                 rc = 1;
                 continue;
             }
-            if (copy_path(argv[i], joined, recursive) != 0) rc = 1;
+            if (copy_path(argv[i], joined, recursive, noclobber) != 0) rc = 1;
         }
     }
     return rc;
