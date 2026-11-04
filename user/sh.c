@@ -2642,7 +2642,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "command", "command [-vV] NAME [ARGS...]" },
     { "builtin", "builtin NAME [ARGS...]" },
     { "hash", "hash [-r] [NAME...]" },
-    { "read", "read [-r] [NAME...]" },
+    { "read", "read [-r] [-p PROMPT] [NAME...]" },
     { "eval", "eval [ARGS...]" },
     { "source", "source FILE  (also . FILE)" },
     { ".", ". FILE" },
@@ -3260,7 +3260,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         if (tokens[1] == 0) {
             puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -4137,8 +4137,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "read")) {
-        /* Thin: read [-r] [NAME...] — one line from stdin; IFS whitespace split;
-         * no NAME -> REPLY; -r accepted (always raw). Exit 1 on EOF. */
+        /* Thin: read [-r] [-p PROMPT] [NAME...]
+         * one line from stdin; IFS whitespace split; no NAME -> REPLY;
+         * -r accepted (always raw); -p writes PROMPT to stderr. Exit 1 on EOF. */
         int ai = 1;
         int nvars = 0;
         int i;
@@ -4148,15 +4149,33 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int rn;
         int bad = 0;
         char *p;
+        const char *prompt = 0;
         while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
             const char *o = tokens[ai] + 1;
             int j;
             if (o[0] == '-' && o[1] == 0) break;
-            for (j = 0; o[j] != 0; j++) {
+            for (j = 0; o[j] != 0; ) {
                 if (o[j] == 'r') {
                     /* raw: backslash never special (only mode we implement) */
+                    j++;
+                } else if (o[j] == 'p') {
+                    /* -p PROMPT or glued -pPROMPT */
+                    if (o[j + 1] != 0) {
+                        prompt = o + j + 1;
+                        j = 0;
+                        while (o[j] != 0) j++; /* consume rest of this argv */
+                    } else {
+                        if (tokens[ai + 1] == 0) {
+                            puts("usage: read [-r] [-p PROMPT] [NAME...]");
+                            bad = 1;
+                            break;
+                        }
+                        ai++;
+                        prompt = tokens[ai];
+                        j++;
+                    }
                 } else {
-                    puts("usage: read [-r] [NAME...]");
+                    puts("usage: read [-r] [-p PROMPT] [NAME...]");
                     bad = 1;
                     break;
                 }
@@ -4192,6 +4211,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     reply_name[5] = 0;
                     names[0] = reply_name;
                     nvars = 1;
+                }
+                if (prompt != 0) {
+                    unsigned long plen = strlen(prompt);
+                    if (plen > 0) u_write(2, prompt, plen);
                 }
                 rn = sh_read_line(line, (int)sizeof(line));
                 if (rn < 0) {
