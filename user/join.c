@@ -1,12 +1,14 @@
 /* fakeos userland - join: relational join on sorted text files (thin POSIX).
- * Forms: join [-a N|-aN] [-v N|-vN] [-e STR|-eSTR] [-t CHAR|-tCHAR]
- *        [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
+ * Forms: join [-a N|-aN] [-v N|-vN] [-e STR|-eSTR] [-o LIST|-oLIST]
+ *        [-t CHAR|-tCHAR] [-1 N|-1N] [-2 N|-2N] FILE1 FILE2
  * Default join field 1 on both; default field sep is blank runs; with -t the
  * delimiter is a single char (empty fields allowed). -e STR replaces empty
- * output fields with STR. Output sep is space, or the -t char when set.
- * -a N also prints unpairable lines from file N (1 or 2). -v N like -a N but
- * suppress pairable (joined) lines. "-" is stdin (at most one). Files must be
- * sorted on the join field. Compact argv for EXEC_MAX_ARGC=8.
+ * output fields with STR. -o LIST selects output fields (comma or blank
+ * separated specs: 0 = join key, 1.N / 2.N = field N from file 1/2). Output
+ * sep is space, or the -t char when set. -a N also prints unpairable lines
+ * from file N (1 or 2). -v N like -a N but suppress pairable (joined) lines.
+ * "-" is stdin (at most one). Files must be sorted on the join field.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -18,7 +20,12 @@ extern int strcmp(const char *a, const char *b);
 extern unsigned long strlen(const char *s);
 extern long strtol_dec(const char *s);
 
-enum { LINE_MAX = 512, MAX_FIELDS = 32 };
+enum { LINE_MAX = 512, MAX_FIELDS = 32, MAX_OUT = 32 };
+
+struct outspec {
+    int file;  /* 0 = join key; 1 or 2 = file */
+    int field; /* 1-based; unused when file==0 */
+};
 
 static int field1 = 1;
 static int field2 = 1;
@@ -29,9 +36,11 @@ static int opt_a2;
 static int opt_v1;
 static int opt_v2;
 static const char *empty_repl; /* -e: replace empty fields */
+static struct outspec outs[MAX_OUT];
+static int nouts; /* 0 = default output order */
 
 static void usage(void) {
-    u_write(2, "usage: join [-a N] [-v N] [-e STR] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 68);
+    u_write(2, "usage: join [-a N] [-v N] [-e STR] [-o LIST] [-t C] [-1 N] [-2 N] FILE1 FILE2\n", 78);
 }
 
 static int is_digits(const char *s) {
@@ -114,9 +123,78 @@ static void emit_sep(void) {
     else u_write(1, " ", 1);
 }
 
+/* Parse -o LIST: specs 0 | 1.N | 2.N separated by comma or blanks. */
+static int parse_o_list(const char *list) {
+    const char *p = list;
+    nouts = 0;
+    if (list == 0) return -1;
+    while (*p) {
+        int fileno;
+        int field;
+        long v;
+        char numbuf[16];
+        int ni;
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (*p == 0) break;
+        if (nouts >= MAX_OUT) return -1;
+        if (*p == '0' && (p[1] == 0 || p[1] == ',' || p[1] == ' ' || p[1] == '\t')) {
+            outs[nouts].file = 0;
+            outs[nouts].field = 0;
+            nouts++;
+            p++;
+            continue;
+        }
+        if (*p != '1' && *p != '2') return -1;
+        fileno = *p - '0';
+        p++;
+        if (*p != '.') return -1;
+        p++;
+        if (*p < '0' || *p > '9') return -1;
+        ni = 0;
+        while (*p >= '0' && *p <= '9' && ni < 15) {
+            numbuf[ni++] = *p;
+            p++;
+        }
+        numbuf[ni] = 0;
+        if (!is_digits(numbuf)) return -1;
+        v = strtol_dec(numbuf);
+        if (v < 1) return -1;
+        field = (int)v;
+        outs[nouts].file = fileno;
+        outs[nouts].field = field;
+        nouts++;
+    }
+    return nouts > 0 ? 0 : -1;
+}
+
+static void emit_o(char **fa, int na, int ja, char **fb, int nb, int jb) {
+    int i;
+    int first = 1;
+    for (i = 0; i < nouts; i++) {
+        const char *s;
+        if (outs[i].file == 0) {
+            if (na > 0) s = get_field(fa, na, ja);
+            else s = get_field(fb, nb, jb);
+        } else if (outs[i].file == 1) {
+            s = get_field(fa, na, outs[i].field);
+        } else {
+            s = get_field(fb, nb, outs[i].field);
+        }
+        if (!first) emit_sep();
+        emit_str(s);
+        first = 0;
+    }
+    u_write(1, "\n", 1);
+}
+
 static void emit_join(char **fa, int na, int ja, char **fb, int nb, int jb) {
     int i;
     int first = 1;
+
+    if (nouts > 0) {
+        emit_o(fa, na, ja, fb, nb, jb);
+        return;
+    }
 
     /* join field */
     emit_str(get_field(fa, na, ja));
@@ -139,11 +217,16 @@ static void emit_join(char **fa, int na, int ja, char **fb, int nb, int jb) {
     u_write(1, "\n", 1);
 }
 
-/* Unpairable line: join field + remaining fields from that file only. */
-static void emit_unpaired(char **f, int n, int j) {
+/* Unpairable line. fileno is 1 or 2 so -o file specs stay correct. */
+static void emit_unpaired(char **f, int n, int j, int fileno) {
     char *empty[1];
     empty[0] = "";
-    emit_join(f, n, j, empty, 0, 1);
+    if (nouts > 0) {
+        if (fileno == 1) emit_o(f, n, j, empty, 0, 1);
+        else emit_o(empty, 0, 1, f, n, j);
+    } else {
+        emit_join(f, n, j, empty, 0, 1);
+    }
 }
 
 static int open_in(const char *path, long *fd_out) {
@@ -197,6 +280,7 @@ int main(int argc, char **argv) {
     int stdin_used = 0;
 
     empty_repl = 0;
+    nouts = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         const char *a = argv[i];
         if (strcmp(a, "--") == 0) {
@@ -218,6 +302,13 @@ int main(int argc, char **argv) {
             i += 2;
         } else if (a[1] == 'e' && a[2] != 0) {
             empty_repl = a + 2;
+            i++;
+        } else if (strcmp(a, "-o") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            if (parse_o_list(argv[i + 1]) != 0) { usage(); return 1; }
+            i += 2;
+        } else if (a[1] == 'o' && a[2] != 0) {
+            if (parse_o_list(a + 2) != 0) { usage(); return 1; }
             i++;
         } else if (strcmp(a, "-a") == 0) {
             int which;
@@ -293,10 +384,10 @@ int main(int argc, char **argv) {
         const char *k2 = get_field(f2, n2, field2);
         int cmp = strcmp(k1, k2);
         if (cmp < 0) {
-            if (opt_a1) emit_unpaired(f1, n1, field1);
+            if (opt_a1) emit_unpaired(f1, n1, field1, 1);
             if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
         } else if (cmp > 0) {
-            if (opt_a2) emit_unpaired(f2, n2, field2);
+            if (opt_a2) emit_unpaired(f2, n2, field2, 2);
             if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
         } else {
             /* Match: for thin subset emit one pair then advance both.
@@ -311,11 +402,11 @@ int main(int argc, char **argv) {
 
     /* Drain unpairable leftovers. */
     while (have1) {
-        if (opt_a1) emit_unpaired(f1, n1, field1);
+        if (opt_a1) emit_unpaired(f1, n1, field1, 1);
         if (load_line(fd1, buf1, f1, &n1, &have1) < 0) return 1;
     }
     while (have2) {
-        if (opt_a2) emit_unpaired(f2, n2, field2);
+        if (opt_a2) emit_unpaired(f2, n2, field2, 2);
         if (load_line(fd2, buf2, f2, &n2, &have2) < 0) return 1;
     }
 
