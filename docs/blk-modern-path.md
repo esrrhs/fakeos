@@ -1893,6 +1893,14 @@ Glued `-pP`/`-Pp` ok. No new `/bin` dent. Focused virtio login smoke
 covers `pathchk -P` + prior greens including basename -z (smp 1/2). Ramfs
 `/bin` dents ~114/128.
 
+## expr \( \) capture — landed
+
+`/bin/expr STRING : RE` with one `\( \)` group returns the captured
+substring (empty on no match). Optional `*` after the group; no nesting.
+Without a group, still returns match length. Reuses the thin BRE engine.
+No new `/bin` dent. Focused virtio login smoke covers capture + prior
+greens including pathchk -P (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1900,6 +1908,6 @@ covers `pathchk -P` + prior greens including basename -z (smp 1/2). Ramfs
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: expr `\( \)` capture / other util flags on
-   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (`cp -p`
+   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

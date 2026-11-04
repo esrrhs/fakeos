@@ -2,14 +2,15 @@
  * Forms:
  *   expr INTEGER1 +|-|*|/|% INTEGER2
  *   expr INTEGER1 =|!=|<|>|<=|>= INTEGER2
- *   expr STRING : RE          (anchored thin BRE; match length; 0 if none)
+ *   expr STRING : RE          (anchored thin BRE; length or one \( \) capture)
  *   expr length STRING
  *   expr index STRING CHARS   (1-based; 0 if none)
  *   expr substr STRING POS LEN  (1-based POS; empty if POS/LEN invalid)
  *   expr ARG   (print ARG; exit 0 if non-empty/non-zero)
  * : RE is a thin BRE (implicit ^): literals, '.', '*', '\' escapes, optional
- * trailing '$'. No groups/brackets — length only (no \( \) capture). Exit: 0
- * if result non-zero/non-empty, 1 if zero/empty, 2 on error.
+ * trailing '$', one \( \) group (optional '*' after group; no nesting). With a
+ * group, result is the captured substring (empty if no match); else match
+ * length. Exit: 0 if result non-zero/non-empty, 1 if zero/empty, 2 on error.
  * Quote '*' in the shell: expr 3 '*' 4
  */
 package user;
@@ -73,18 +74,24 @@ static int finish_str(const char *s) {
     return 0;
 }
 
+static const char *cap_s;
+static const char *cap_e;
+static int want_cap; /* pattern contains \( */
+
 static int atom_eq(char atom, int esc, char c) {
     if (!esc && atom == '.') return 1;
     return atom == c;
 }
 
-/* Parse one atom from *re; advance *re. Returns 0 on failure. */
+/* Parse one atom from *re; advance *re. Returns 0 on failure.
+ * Does not consume \( or \) (handled in match_here). */
 static int take_atom(const char **re, char *atom, int *esc) {
     const char *p = *re;
     if (p[0] == 0) return 0;
     if (p[0] == '*') return 0;
     if (p[0] == '\\') {
         if (p[1] == 0) return 0;
+        if (p[1] == '(' || p[1] == ')') return 0;
         *atom = p[1];
         *esc = 1;
         *re = p + 2;
@@ -94,6 +101,15 @@ static int take_atom(const char **re, char *atom, int *esc) {
     *esc = 0;
     *re = p + 1;
     return 1;
+}
+
+static int pattern_has_group(const char *re) {
+    int i;
+    for (i = 0; re[i]; i++) {
+        if (re[i] == '\\' && re[i + 1] == '(') return 1;
+        if (re[i] == '\\' && re[i + 1] != 0) i++;
+    }
+    return 0;
 }
 
 static const char *match_here(const char *re, const char *text);
@@ -110,6 +126,55 @@ static const char *match_star(char atom, int esc, const char *re, const char *te
     }
 }
 
+enum { GBUF = 128, GPOS = 64 };
+
+/* Zero-or-more of body, then rest. Capture is last body match (empty if none). */
+static const char *match_group_star(const char *body, const char *rest,
+                                    const char *text) {
+    const char *pos[GPOS];
+    const char *cs[GPOS];
+    const char *ce[GPOS];
+    int npos = 0;
+    const char *t = text;
+    const char *r;
+
+    pos[0] = text;
+    cs[0] = 0;
+    ce[0] = 0;
+    npos = 1;
+    while (npos < GPOS) {
+        const char *saved_s = cap_s;
+        const char *saved_e = cap_e;
+        r = match_here(body, t);
+        cap_s = saved_s;
+        cap_e = saved_e;
+        if (!r || r == t) break;
+        /* Re-run to set capture for this iteration (body match). */
+        {
+            const char *r2 = match_here(body, t);
+            if (!r2) break;
+            pos[npos] = r2;
+            cs[npos] = t;
+            ce[npos] = r2;
+            t = r2;
+            npos++;
+        }
+    }
+    while (npos > 0) {
+        npos--;
+        if (cs[npos]) {
+            cap_s = cs[npos];
+            cap_e = ce[npos];
+        } else {
+            cap_s = text;
+            cap_e = text; /* empty capture */
+        }
+        r = match_here(rest, pos[npos]);
+        if (r) return r;
+    }
+    return 0;
+}
+
 /* Thin BRE from re against text; returns end pointer or 0. */
 static const char *match_here(const char *re, const char *text) {
     char atom;
@@ -117,6 +182,43 @@ static const char *match_here(const char *re, const char *text) {
     if (re[0] == '^') re++; /* expr is already anchored; allow leading ^ */
     if (re[0] == 0) return text;
     if (re[0] == '$' && re[1] == 0) return (*text == 0) ? text : 0;
+
+    /* One \( body \) group; optional '*' after. No nesting. */
+    if (re[0] == '\\' && re[1] == '(') {
+        const char *body = re + 2;
+        const char *p = body;
+        char gbuf[GBUF];
+        unsigned long glen = 0;
+        const char *rest;
+        const char *gend;
+        while (*p) {
+            if (p[0] == '\\' && p[1] == '(') return 0; /* no nest */
+            if (p[0] == '\\' && p[1] == ')') break;
+            if (p[0] == '\\' && p[1] != 0) {
+                if (glen + 2 >= GBUF) return 0;
+                gbuf[glen++] = p[0];
+                gbuf[glen++] = p[1];
+                p += 2;
+            } else {
+                if (glen + 1 >= GBUF) return 0;
+                gbuf[glen++] = *p;
+                p++;
+            }
+        }
+        if (*p == 0) return 0; /* unmatched \( */
+        gbuf[glen] = 0;
+        rest = p + 2;
+        if (rest[0] == '*') {
+            return match_group_star(gbuf, rest + 1, text);
+        }
+        gend = match_here(gbuf, text);
+        if (!gend) return 0;
+        cap_s = text;
+        cap_e = gend;
+        return match_here(rest, gend);
+    }
+    if (re[0] == '\\' && re[1] == ')') return 0; /* unmatched \) */
+
     if (!take_atom(&re, &atom, &esc)) return 0;
     if (re[0] == '*') {
         return match_star(atom, esc, re + 1, text);
@@ -126,13 +228,38 @@ static const char *match_here(const char *re, const char *text) {
     return match_here(re, text + 1);
 }
 
-/* Anchored match length, or -1 if no match. */
-static long match_colon(const char *text, const char *re) {
+/*
+ * Anchored : match. If pattern has \( \), on success copies capture into
+ * capbuf (may be empty) and returns 1; on failure returns -1.
+ * Without a group, returns matched length (>=0) or -1; capbuf unused.
+ * Return codes via *kind: 0 = length in *len_out, 1 = string in capbuf.
+ */
+static int match_colon(const char *text, const char *re, long *len_out,
+                       char *capbuf, unsigned long capmax, int *kind) {
     const char *end;
+    unsigned long n;
+    unsigned long i;
     if (text == 0 || re == 0) return -1;
+    want_cap = pattern_has_group(re);
+    cap_s = 0;
+    cap_e = 0;
     end = match_here(re, text);
     if (end == 0) return -1;
-    return (long)(end - text);
+    if (want_cap) {
+        if (cap_s == 0 || cap_e == 0 || cap_e < cap_s) {
+            capbuf[0] = 0;
+        } else {
+            n = (unsigned long)(cap_e - cap_s);
+            if (n >= capmax) n = capmax - 1;
+            for (i = 0; i < n; i++) capbuf[i] = cap_s[i];
+            capbuf[n] = 0;
+        }
+        *kind = 1;
+        return 0;
+    }
+    *len_out = (long)(end - text);
+    *kind = 0;
+    return 0;
 }
 
 static int do_arith(long a, const char *op, long b, long *out) {
@@ -240,10 +367,17 @@ int main(int argc, char **argv) {
         return finish_str(argv[1]);
     }
 
-    /* expr STRING : RE  (thin BRE match length) */
+    /* expr STRING : RE  (thin BRE; length or one \( \) capture) */
     if (argc == 4 && strcmp(argv[2], ":") == 0) {
-        r = match_colon(argv[1], argv[3]);
-        if (r < 0) r = 0;
+        char capbuf[256];
+        int kind = 0;
+        int m;
+        m = match_colon(argv[1], argv[3], &r, capbuf, sizeof(capbuf), &kind);
+        if (m < 0) {
+            if (pattern_has_group(argv[3])) return finish_str("");
+            return finish_num(0);
+        }
+        if (kind == 1) return finish_str(capbuf);
         return finish_num(r);
     }
 
