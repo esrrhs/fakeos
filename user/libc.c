@@ -705,15 +705,33 @@ int resolve_host(const char *name, unsigned int *out) {
     return 0;
 }
 
-/* Quote-aware tokenizer: supports "..." and '...' (no escapes). */
+/* Quote-aware tokenizer: supports "..." and '...' (no escapes).
+ * ';' is a separate token (for for/while/if and command sequences). */
+static int strtok_sh_pending_semi;
+
+void strtok_sh_reset(void) {
+    strtok_sh_pending_semi = 0;
+}
+
 char *strtok_sh(char **save) {
     char *s = *save;
     char *out;
     char quote;
+    static char semi[2];
+    semi[0] = ';';
+    semi[1] = 0;
+    if (strtok_sh_pending_semi) {
+        strtok_sh_pending_semi = 0;
+        return semi;
+    }
     while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
     if (*s == 0) {
         *save = s;
         return 0;
+    }
+    if (*s == ';') {
+        *save = s + 1;
+        return semi;
     }
     if (*s == '"' || *s == '\'') {
         quote = *s;
@@ -728,8 +746,14 @@ char *strtok_sh(char **save) {
         return out;
     }
     out = s;
-    while (*s != 0 && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n') s++;
+    while (*s != 0 && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n'
+           && *s != ';') {
+        s++;
+    }
     if (*s != 0) {
+        if (*s == ';') {
+            strtok_sh_pending_semi = 1;
+        }
         *s = 0;
         s++;
     }

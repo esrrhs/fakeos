@@ -1001,15 +1001,33 @@ Inside arith, `$NAME` or bare `NAME` loads the shell env (unset → `0`;
 `$VAR` / bare name / `$?` / inline mix / div0 / Ext2 prior greens (smp 1/2).
 Ramfs `/bin` dents ~107/128.
 
+## shell for/while/if + ; — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred — Ramfs has no block accounting, so
+statfs+df not clearly bite-sized) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+Jobs/`fg`/`bg` already present — left alone. `stty`/`reset`/`tput`/`watch`
+deferred (no `TIOCGWINSZ`).
+
+`strtok_sh` now emits `;` as its own token (glued `c;do` works). Top-level
+and compound bodies run via `run_seq` (`;`-separated `&&`/`||` lists).
+Forms: `for NAME in WORDS; do LIST; done`, `while LIST; do LIST; done`,
+`if LIST; then LIST; [else LIST;] fi`. Word list of `for` expands once;
+loop/then/else bodies re-expand `$NAME` / `$?` / `$(( ))` each iteration.
+`set -e` is suppressed for while/if conditions (POSIX). while iteration
+cap 256. No nesting / elif / until. Focused virtio login smoke covers
+for / while+test+arith / if/else / `;` seq / Ext2 prior greens (smp 1/2).
+Ramfs `/bin` dents ~107/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`$(( ))` + `/bin/sed` + `grep -E`/`[]`
-   + …): prefer small coherent chunks. Prefer thin shell `for`/`while`/`if`
-   next (needs per-iteration `$` re-expand + `;` or keyword forms). Keep
-   `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free` deferred; `stty`/`reset`/
-   `tput`/`watch` only if bite-sized without winsize or add thin
-   `TIOCGWINSZ`. Job polish only if clear gap. Leave Ext2 duplex / multi-nc /
-   CFS / jbd alone.
+3. More daily-driver gaps after inventory (`for`/`while`/`if` + `$(( ))` +
+   `/bin/sed` + …): prefer small coherent chunks. `stty`/`reset`/`tput`/
+   `watch` only if bite-sized without winsize or add thin `TIOCGWINSZ`.
+   Job polish only if clear gap. Keep `df`/`touch -r|-d`/`mkfifo`/`ps`/
+   `uptime`/`free` deferred. Leave Ext2 duplex / multi-nc / CFS / jbd alone.

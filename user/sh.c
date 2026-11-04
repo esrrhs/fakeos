@@ -3,8 +3,9 @@
  * readlink, realpath, env/export/unset/which, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
- * pipelines, &&/||, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
- * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith). */
+ * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
+ * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
+ * Thin for/while/if (per-iteration $ re-expand; ; or keyword separators). */
 package user;
 
 typedef unsigned long u64;
@@ -65,6 +66,7 @@ extern char *strncpy(char *dst, const char *src, unsigned long n);
 extern long strtol_dec(const char *s);
 extern char *strtok_ws(char **save);
 extern char *strtok_sh(char **save);
+extern void strtok_sh_reset(void);
 extern void printf(const char *fmt, ...);
 extern void puts(const char *s);
 
@@ -1549,7 +1551,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     if (eq(tokens[0], "help")) {
         puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/if; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2573,6 +2575,380 @@ static long run_pipeline(char **tokens, long rc_in) {
     return rc;
 }
 
+/* Copy orig tokens, expand $, run ; / && / || sequence. */
+static long run_seq(char **tokens, long rc_in);
+static long run_list(char **tokens, long rc_in);
+
+static int is_compound_kw(const char *s) {
+    return eq(s, "for") || eq(s, "while") || eq(s, "if");
+}
+
+/* Expand a fresh copy of orig (left intact) then run_seq. */
+static long expand_and_run(char **orig, long rc_in) {
+    char *copy[MAX_TOK];
+    int i;
+    for (i = 0; orig[i] != 0 && i < MAX_TOK - 1; i++) {
+        copy[i] = orig[i];
+    }
+    copy[i] = 0;
+    if (i == 0) {
+        return rc_in;
+    }
+    expand_err = 0;
+    expand_argv(copy, rc_in);
+    if (expand_err) {
+        return 1;
+    }
+    return run_seq(copy, rc_in);
+}
+
+/* Skip a lone ";" token; return new index. */
+static int skip_semi(char **tokens, int i) {
+    if (tokens[i] != 0 && eq(tokens[i], ";")) {
+        return i + 1;
+    }
+    return i;
+}
+
+/* Find keyword kw at top level (no nesting). Returns index or -1. */
+static int find_kw(char **tokens, int start, const char *kw) {
+    int i = start;
+    while (tokens[i] != 0) {
+        if (eq(tokens[i], kw)) {
+            return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+static long run_for(char **tokens, long rc_in) {
+    char *name;
+    int i;
+    int word0;
+    int wordn;
+    int do_i;
+    int done_i;
+    int bi;
+    int wi;
+    long rc = rc_in;
+    char *body[MAX_TOK];
+    static char word_bufs[MAX_TOK][128];
+    int nwords = 0;
+
+    /* for NAME in WORD... ; do BODY ; done */
+    if (tokens[1] == 0 || !env_name_ok(tokens[1])) {
+        puts("sh: for: bad variable name");
+        return 1;
+    }
+    name = tokens[1];
+    if (tokens[2] == 0 || !eq(tokens[2], "in")) {
+        puts("sh: for: expected in");
+        return 1;
+    }
+    i = 3;
+    word0 = i;
+    while (tokens[i] != 0 && !eq(tokens[i], ";") && !eq(tokens[i], "do")) {
+        i++;
+    }
+    wordn = i;
+    i = skip_semi(tokens, i);
+    if (tokens[i] == 0 || !eq(tokens[i], "do")) {
+        puts("sh: for: expected do");
+        return 1;
+    }
+    do_i = i;
+    i++;
+    done_i = find_kw(tokens, i, "done");
+    if (done_i < 0) {
+        puts("sh: for: expected done");
+        return 1;
+    }
+    /* optional trailing junk after done */
+    if (tokens[done_i + 1] != 0 && !(eq(tokens[done_i + 1], ";") && tokens[done_i + 2] == 0)) {
+        /* allow lone trailing ; */
+        if (!eq(tokens[done_i + 1], ";") || tokens[done_i + 2] != 0) {
+            puts("sh: for: trailing tokens after done");
+            return 1;
+        }
+    }
+    /* body may end with optional ; before done */
+    bi = 0;
+    {
+        int b = do_i + 1;
+        int bend = done_i;
+        if (bend > b && eq(tokens[bend - 1], ";")) {
+            bend--;
+        }
+        while (b < bend && bi < MAX_TOK - 1) {
+            body[bi++] = tokens[b++];
+        }
+        body[bi] = 0;
+    }
+    /* Expand word list once (POSIX). */
+    for (wi = word0; wi < wordn && nwords < MAX_TOK; wi++) {
+        expand_err = 0;
+        expand_token(tokens[wi], word_bufs[nwords], 128, rc);
+        if (expand_err) {
+            return 1;
+        }
+        nwords++;
+    }
+    for (wi = 0; wi < nwords; wi++) {
+        if (sh_setenv(name, word_bufs[wi]) != 0) {
+            puts("sh: for: cannot set variable");
+            return 1;
+        }
+        if (body[0] != 0) {
+            rc = expand_and_run(body, rc);
+        }
+    }
+    (void)word0;
+    return rc;
+}
+
+static long run_while(char **tokens, long rc_in) {
+    int i;
+    int do_i;
+    int done_i;
+    int ci;
+    int bi;
+    char *cond[MAX_TOK];
+    char *body[MAX_TOK];
+    long rc = rc_in;
+    int guard = 0;
+
+    /* while COND ; do BODY ; done */
+    i = 1;
+    /* find do (with optional ; before it) */
+    do_i = -1;
+    while (tokens[i] != 0) {
+        if (eq(tokens[i], "do")) {
+            do_i = i;
+            break;
+        }
+        if (eq(tokens[i], ";") && tokens[i + 1] != 0 && eq(tokens[i + 1], "do")) {
+            do_i = i + 1;
+            break;
+        }
+        i++;
+    }
+    if (do_i < 0) {
+        puts("sh: while: expected do");
+        return 1;
+    }
+    done_i = find_kw(tokens, do_i + 1, "done");
+    if (done_i < 0) {
+        puts("sh: while: expected done");
+        return 1;
+    }
+    if (tokens[done_i + 1] != 0 && !(eq(tokens[done_i + 1], ";") && tokens[done_i + 2] == 0)) {
+        if (!eq(tokens[done_i + 1], ";") || tokens[done_i + 2] != 0) {
+            puts("sh: while: trailing tokens after done");
+            return 1;
+        }
+    }
+    ci = 0;
+    {
+        int c = 1;
+        int cend = do_i;
+        if (cend > c && eq(tokens[cend - 1], ";")) {
+            cend--;
+        }
+        while (c < cend && ci < MAX_TOK - 1) {
+            cond[ci++] = tokens[c++];
+        }
+        cond[ci] = 0;
+    }
+    if (ci == 0) {
+        puts("sh: while: empty condition");
+        return 1;
+    }
+    bi = 0;
+    {
+        int b = do_i + 1;
+        int bend = done_i;
+        if (bend > b && eq(tokens[bend - 1], ";")) {
+            bend--;
+        }
+        while (b < bend && bi < MAX_TOK - 1) {
+            body[bi++] = tokens[b++];
+        }
+        body[bi] = 0;
+    }
+    for (;;) {
+        long crc;
+        int saved_e;
+        if (guard++ > 256) {
+            puts("sh: while: iteration limit");
+            return 1;
+        }
+        /* POSIX: -e does not apply to while/if conditions. */
+        saved_e = shell_opt_e;
+        shell_opt_e = 0;
+        crc = expand_and_run(cond, rc);
+        shell_opt_e = saved_e;
+        if (crc != 0) {
+            /* condition false: loop ends with status of last body (or 0) */
+            return rc;
+        }
+        if (body[0] != 0) {
+            rc = expand_and_run(body, rc);
+        } else {
+            rc = 0;
+        }
+    }
+}
+
+static long run_if(char **tokens, long rc_in) {
+    int i;
+    int then_i;
+    int else_i;
+    int fi_i;
+    int ci;
+    int ti;
+    int ei;
+    char *cond[MAX_TOK];
+    char *then_body[MAX_TOK];
+    char *else_body[MAX_TOK];
+    long crc;
+
+    /* if COND ; then BODY ; fi
+     * if COND ; then BODY ; else BODY2 ; fi */
+    i = 1;
+    then_i = -1;
+    while (tokens[i] != 0) {
+        if (eq(tokens[i], "then")) {
+            then_i = i;
+            break;
+        }
+        if (eq(tokens[i], ";") && tokens[i + 1] != 0 && eq(tokens[i + 1], "then")) {
+            then_i = i + 1;
+            break;
+        }
+        i++;
+    }
+    if (then_i < 0) {
+        puts("sh: if: expected then");
+        return 1;
+    }
+    fi_i = find_kw(tokens, then_i + 1, "fi");
+    if (fi_i < 0) {
+        puts("sh: if: expected fi");
+        return 1;
+    }
+    if (tokens[fi_i + 1] != 0 && !(eq(tokens[fi_i + 1], ";") && tokens[fi_i + 2] == 0)) {
+        if (!eq(tokens[fi_i + 1], ";") || tokens[fi_i + 2] != 0) {
+            puts("sh: if: trailing tokens after fi");
+            return 1;
+        }
+    }
+    else_i = find_kw(tokens, then_i + 1, "else");
+    if (else_i >= 0 && else_i > fi_i) {
+        else_i = -1;
+    }
+    ci = 0;
+    {
+        int c = 1;
+        int cend = then_i;
+        if (cend > c && eq(tokens[cend - 1], ";")) {
+            cend--;
+        }
+        while (c < cend && ci < MAX_TOK - 1) {
+            cond[ci++] = tokens[c++];
+        }
+        cond[ci] = 0;
+    }
+    if (ci == 0) {
+        puts("sh: if: empty condition");
+        return 1;
+    }
+    ti = 0;
+    {
+        int b = then_i + 1;
+        int bend = (else_i >= 0) ? else_i : fi_i;
+        if (bend > b && eq(tokens[bend - 1], ";")) {
+            bend--;
+        }
+        while (b < bend && ti < MAX_TOK - 1) {
+            then_body[ti++] = tokens[b++];
+        }
+        then_body[ti] = 0;
+    }
+    ei = 0;
+    else_body[0] = 0;
+    if (else_i >= 0) {
+        int b = else_i + 1;
+        int bend = fi_i;
+        if (bend > b && eq(tokens[bend - 1], ";")) {
+            bend--;
+        }
+        while (b < bend && ei < MAX_TOK - 1) {
+            else_body[ei++] = tokens[b++];
+        }
+        else_body[ei] = 0;
+    }
+    {
+        int saved_e = shell_opt_e;
+        shell_opt_e = 0;
+        crc = expand_and_run(cond, rc_in);
+        shell_opt_e = saved_e;
+    }
+    if (crc == 0) {
+        if (then_body[0] != 0) {
+            return expand_and_run(then_body, rc_in);
+        }
+        return 0;
+    }
+    if (else_body[0] != 0) {
+        return expand_and_run(else_body, rc_in);
+    }
+    return 0;
+}
+
+static long run_compound(char **tokens, long rc_in) {
+    if (eq(tokens[0], "for")) {
+        return run_for(tokens, rc_in);
+    }
+    if (eq(tokens[0], "while")) {
+        return run_while(tokens, rc_in);
+    }
+    if (eq(tokens[0], "if")) {
+        return run_if(tokens, rc_in);
+    }
+    return 1;
+}
+
+/* Split on ";" and run each &&/|| list. */
+static long run_seq(char **tokens, long rc_in) {
+    int i = 0;
+    long rc = rc_in;
+    while (tokens[i] != 0) {
+        char *stage[MAX_TOK];
+        int ns = 0;
+        while (tokens[i] != 0 && !eq(tokens[i], ";")) {
+            if (ns < MAX_TOK - 1) {
+                stage[ns++] = tokens[i];
+            }
+            i++;
+        }
+        stage[ns] = 0;
+        if (tokens[i] != 0 && eq(tokens[i], ";")) {
+            i++;
+        }
+        if (ns == 0) {
+            continue;
+        }
+        /* Nested compound only at start of a ;-segment. */
+        if (is_compound_kw(stage[0])) {
+            rc = run_compound(stage, rc);
+        } else {
+            rc = run_list(stage, rc);
+        }
+    }
+    return rc;
+}
+
 /* Run tokens as && / || list of pipelines; optional trailing &. */
 static long run_list(char **tokens, long rc_in) {
     int i = 0;
@@ -2705,7 +3081,7 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/if, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -2749,12 +3125,20 @@ int main(int argc, char **argv) {
 
         hist_add(line);
 
+        strtok_sh_reset();
         save = line;
         while (nt < MAX_TOK - 1 && (t = strtok_sh(&save)) != 0) {
             tokens[nt++] = t;
         }
         tokens[nt] = 0;
         if (nt == 0) {
+            continue;
+        }
+
+        /* Compound commands keep raw tokens for per-iteration re-expand. */
+        if (is_compound_kw(tokens[0])) {
+            expand_err = 0;
+            rc = run_compound(tokens, rc);
             continue;
         }
 
@@ -2766,6 +3150,6 @@ int main(int argc, char **argv) {
             rc = 1;
             continue;
         }
-        rc = run_list(tokens, rc);
+        rc = run_seq(tokens, rc);
     }
 }
