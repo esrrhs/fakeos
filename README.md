@@ -403,6 +403,7 @@ flowchart TD
 - [x] **uniq -w**：最多比较 key 的 N 个字符（`-w N`/`-wN`；在 `-f`/`-s` 之后；`-w0` 全等）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **find -type l**：匹配符号链接（lstat；与 `f`/`d` 并列）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **xargs -t**：执行前将命令行打印到 stderr（可与 `-0`/`-r`/`-n`/`-I` 组合；`-0rt` 粘合）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **cat -v**：显示非打印字符（`^`/`M-`；TAB/NL 原样；可与 `-nbs` 粘合）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

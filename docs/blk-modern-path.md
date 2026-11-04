@@ -2107,6 +2107,12 @@ it (GNU trace). Works for COMMAND batches and the no-COMMAND default printer.
 Glued `-0rt` accepted with existing `-0`/`-r`. Keeps `-n`/`-I`. No new `/bin`
 dent. Focused virtio login smoke covers `-t` + prior greens (smp 1/2).
 
+## cat -v — landed
+
+`/bin/cat -v` shows nonprinting bytes with GNU-ish `^`/`M-` notation (TAB and
+NL unchanged). Combines with `-n`/`-b`/`-s`; glued `-nbsv`. No new `/bin`
+dent. Focused virtio login smoke covers `-v` + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2114,6 +2120,6 @@ dent. Focused virtio login smoke covers `-t` + prior greens (smp 1/2).
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `cat -v`; `cp -p` waits on utimensat; `set --` deferred; skip large
+   deferred. Next thin polish: other util flags on existing `/bin` (inspect
+   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
    shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
