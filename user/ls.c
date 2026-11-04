@@ -1,13 +1,15 @@
 /* fakeos userland - ls: list directory entries or file operands.
- * Forms: ls [-a|-A] [-d] [-l] [-1] [-F] [PATH...]
+ * Forms: ls [-a|-A] [-d] [-l] [-1] [-F] [-R] [PATH...]
  * Default: hide names starting with '.' (POSIX); one name per line. -a shows
  * all including . and ..; -A almost all (hidden but not ./..). -d lists a
  * directory itself. -l uses fstatat for mode/nlink/uid/gid/size/mtime;
  * symlinks show `name -> target` via readlink. -1 forces one-per-line (default
- * already; ignored with -l). -F classifies short names (slash, star, at, pipe, equals).
- * Glued flags (-laF, -ald, ...) accepted. Multi-PATH: dirs get a `path:`
- * header when more than one PATH is given. Compact argv for EXEC_MAX_ARGC=8.
- * Ownership and mtime come from live inode fields (chown + write stamps). */
+ * already; ignored with -l). -F classifies short names (slash, star, at, pipe,
+ * equals). -R recurses into subdirectories (ignored with -d); subdirs get a
+ * `path:` header and a blank line before each block. Glued flags (-laFR, ...)
+ * accepted. Multi-PATH: dirs get a `path:` header when more than one PATH is
+ * given. Compact argv for EXEC_MAX_ARGC=8. Ownership and mtime come from live
+ * inode fields (chown + write stamps). */
 package user;
 
 typedef unsigned long u64;
@@ -44,7 +46,10 @@ enum {
     S_IXOTH = 0x1,
     AT_SYMLINK_NOFOLLOW = 0x100,
     AT_EMPTY_PATH = 0x1000,
-    MAX_PATHS = 8
+    MAX_PATHS = 8,
+    MAX_SUBDIRS = 32,
+    MAX_RDEPTH = 8,
+    PATH_CAP = 96
 };
 
 static unsigned int load_u32(const char *p) {
@@ -229,12 +234,17 @@ static void print_name_short(const char *name, char suffix) {
 }
 
 static int list_one(const char *path, int longfmt, int dir_as_file,
-                    int show_all, int almost_all, int classify, int print_header) {
+                    int show_all, int almost_all, int classify, int recurse,
+                    int print_header, int depth) {
     char buf[1920];
     char stbuf[ST_SIZE_BYTES];
+    char subnames[MAX_SUBDIRS][32];
+    int nsub = 0;
     long fd;
     long n;
     unsigned int mode;
+    int rc = 0;
+    int si;
 
     fd = u_open(path, 0, 0);
     if (fd < 0) {
@@ -273,7 +283,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                 if (u_newfstatat(fd, dots[di], stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
                     printf("?????????? 0 0 0 0 0 %s\n", dots[di]);
                 } else {
-                    char full[96];
+                    char full[PATH_CAP];
                     join_dir_name(full, sizeof(full), path, dots[di]);
                     print_name_long(full, dots[di], stbuf);
                 }
@@ -291,8 +301,9 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
         }
         for (off = 0; off + 48 <= n; off += 48) {
             char name[32];
-            char full[96];
+            char full[PATH_CAP];
             unsigned long k = 0;
+            int is_dir = 0;
             while (k < 29 && buf[off + 19 + k] != 0) {
                 name[k] = buf[off + 19 + k];
                 k++;
@@ -305,33 +316,62 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
             if (!show_name(name, show_all, almost_all)) {
                 continue;
             }
-            if (longfmt) {
-                if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
-                    printf("?????????? 0 0 0 0 0 %s\n", name);
-                    continue;
-                }
-                join_dir_name(full, sizeof(full), path, name);
-                print_name_long(full, name, stbuf);
-            } else if (classify) {
-                char suf = 0;
+            if (longfmt || classify || recurse) {
                 if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) == 0) {
-                    suf = classify_char(load_u32(stbuf + ST_MODE));
-                } else if (buf[off + 18] == 4) {
-                    suf = '/';
+                    unsigned int em = load_u32(stbuf + ST_MODE);
+                    is_dir = ((em & S_IFMT) == S_IFDIR);
+                    if (longfmt) {
+                        join_dir_name(full, sizeof(full), path, name);
+                        print_name_long(full, name, stbuf);
+                    } else if (classify) {
+                        print_name_short(name, classify_char(em));
+                    } else {
+                        print_name_short(name, 0);
+                    }
+                } else {
+                    if (longfmt) {
+                        printf("?????????? 0 0 0 0 0 %s\n", name);
+                    } else if (classify) {
+                        print_name_short(name, buf[off + 18] == 4 ? '/' : 0);
+                    } else {
+                        print_name_short(name, 0);
+                    }
+                    if (buf[off + 18] == 4) is_dir = 1;
                 }
-                print_name_short(name, suf);
             } else {
                 print_name_short(name, 0);
+                if (buf[off + 18] == 4) is_dir = 1;
+            }
+            if (recurse && is_dir && nsub < MAX_SUBDIRS) {
+                unsigned long j = 0;
+                while (name[j] != 0 && j + 1 < 32) {
+                    subnames[nsub][j] = name[j];
+                    j++;
+                }
+                subnames[nsub][j] = 0;
+                nsub++;
             }
         }
     }
     u_close(fd);
-    return 0;
+
+    if (recurse && depth < MAX_RDEPTH) {
+        for (si = 0; si < nsub; si++) {
+            char child[PATH_CAP];
+            join_dir_name(child, sizeof(child), path, subnames[si]);
+            if (child[0] == 0) continue;
+            u_write(1, "\n", 1);
+            if (list_one(child, longfmt, 0, show_all, almost_all, classify,
+                         recurse, 1, depth + 1) != 0) {
+                rc = 1;
+            }
+        }
+    }
+    return rc;
 }
 
 static void usage(void) {
-    u_write(2, "usage: ls [-a|-A] [-d] [-l] [-1F] [PATH...]
-", 44);
+    u_write(2, "usage: ls [-a|-A] [-d] [-l] [-1FR] [PATH...]\n", 46);
 }
 
 int main(int argc, char **argv) {
@@ -340,6 +380,7 @@ int main(int argc, char **argv) {
     int show_all = 0;
     int almost_all = 0;
     int classify = 0;
+    int recurse = 0;
     const char *paths[MAX_PATHS];
     int npaths = 0;
     int ai;
@@ -372,6 +413,8 @@ int main(int argc, char **argv) {
                     /* one-per-line (already default; ignored under -l) */
                 } else if (a[j] == 'F') {
                     classify = 1;
+                } else if (a[j] == 'R') {
+                    recurse = 1;
                 } else {
                     usage();
                     return 1;
@@ -398,13 +441,18 @@ int main(int argc, char **argv) {
         npaths = 1;
     }
 
+    /* -d wins over -R. Top header: multi-PATH, or -R unless sole default ".". */
+    if (dir_as_file) recurse = 0;
     headers = (npaths > 1) && !dir_as_file;
-    for (i = 0; i < npaths; i++) {
-        if (i > 0 && headers) {
-            u_write(1, "\n", 1);
+    if (recurse && !dir_as_file) {
+        if (!(npaths == 1 && paths[0][0] == '.' && paths[0][1] == 0)) {
+            headers = 1;
         }
+    }
+    for (i = 0; i < npaths; i++) {
+        if (i > 0) u_write(1, "\n", 1);
         if (list_one(paths[i], longfmt, dir_as_file, show_all, almost_all,
-                     classify, headers)) {
+                     classify, recurse, headers, 0)) {
             rc = 1;
         }
     }
