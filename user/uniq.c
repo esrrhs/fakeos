@@ -1,6 +1,7 @@
 /* fakeos userland - uniq: collapse consecutive duplicate lines (thin POSIX).
- * Forms: uniq [-c] [-d] [-u] [FILE...]
- * -c count prefix; -d only duplicated; -u only unique. stdin if no FILE.
+ * Forms: uniq [-c] [-d] [-u] [-i] [FILE...]
+ * -c count prefix; -d only duplicated; -u only unique; -i fold case when
+ * comparing. stdin if no FILE. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -18,9 +19,27 @@ enum { LINE_MAX = 512 };
 static int opt_c;
 static int opt_d;
 static int opt_u;
+static int opt_i;
 
 static void usage(void) {
-    u_write(2, "usage: uniq [-c] [-d] [-u] [FILE...]\n", 35);
+    u_write(2, "usage: uniq [-cdui] [FILE...]\n", 31);
+}
+
+static char fold_ch(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+/* Case-sensitive or -i fold compare. */
+static int line_eq(const char *a, const char *b) {
+    int i;
+    if (!opt_i) return strcmp(a, b) == 0;
+    for (i = 0; ; i++) {
+        char ca = fold_ch(a[i]);
+        char cb = fold_ch(b[i]);
+        if (ca != cb) return 0;
+        if (a[i] == 0) return 1;
+    }
 }
 
 static void emit_count(int count) {
@@ -75,7 +94,7 @@ static int uniq_fd(long fd) {
                     strcpy(prev, cur);
                     have_prev = 1;
                     count = 1;
-                } else if (strcmp(prev, cur) == 0) {
+                } else if (line_eq(prev, cur)) {
                     count++;
                 } else {
                     emit(prev, count);
@@ -94,7 +113,7 @@ static int uniq_fd(long fd) {
             strcpy(prev, cur);
             have_prev = 1;
             count = 1;
-        } else if (strcmp(prev, cur) == 0) {
+        } else if (line_eq(prev, cur)) {
             count++;
         } else {
             emit(prev, count);
@@ -121,6 +140,7 @@ int main(int argc, char **argv) {
             if (o == 'c') opt_c = 1;
             else if (o == 'd') opt_d = 1;
             else if (o == 'u') opt_u = 1;
+            else if (o == 'i') opt_i = 1;
             else {
                 usage();
                 return 1;

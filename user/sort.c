@@ -1,8 +1,9 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-r] [-n] [-u] [-k N|-kN] [FILE...]
+ * Forms: sort [-r] [-n] [-u] [-f] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
- * (suppress consecutive equal keys after sort); -k N sort by
- * blank-separated field N (1-based; missing field sorts as empty / 0).
+ * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
+ * string compares / tie-breaks; -k N sort by blank-separated field N
+ * (1-based; missing field sorts as empty / 0).
  * Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
@@ -27,12 +28,13 @@ enum {
 static int opt_r;
 static int opt_n;
 static int opt_u;
+static int opt_f;
 static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnu] [-k N] [FILE...]\n", 36);
+    u_write(2, "usage: sort [-rnuf] [-k N] [FILE...]\n", 37);
 }
 
 static int is_digits(const char *s) {
@@ -96,13 +98,31 @@ static long parse_num(const char *s) {
     return parse_num_n(s, -1);
 }
 
+static char fold_ch(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
 static int cmp_key_str(const char *a, int al, const char *b, int bl) {
     int i;
     int n = al < bl ? al : bl;
     for (i = 0; i < n; i++) {
-        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
+        unsigned char ca = (unsigned char)(opt_f ? fold_ch(a[i]) : a[i]);
+        unsigned char cb = (unsigned char)(opt_f ? fold_ch(b[i]) : b[i]);
+        if (ca != cb) return (int)ca - (int)cb;
     }
     return al - bl;
+}
+
+static int cmp_str(const char *a, const char *b) {
+    int i;
+    if (!opt_f) return strcmp(a, b);
+    for (i = 0; ; i++) {
+        unsigned char ca = (unsigned char)fold_ch(a[i]);
+        unsigned char cb = (unsigned char)fold_ch(b[i]);
+        if (ca != cb) return (int)ca - (int)cb;
+        if (a[i] == 0) return 0;
+    }
 }
 
 static int cmp_lines(const char *a, const char *b) {
@@ -120,15 +140,15 @@ static int cmp_lines(const char *a, const char *b) {
         } else {
             c = cmp_key_str(fa, al, fb, bl);
         }
-        if (c == 0) c = strcmp(a, b);
+        if (c == 0) c = cmp_str(a, b);
     } else if (opt_n) {
         long na = parse_num(a);
         long nb = parse_num(b);
         if (na < nb) c = -1;
         else if (na > nb) c = 1;
-        else c = strcmp(a, b);
+        else c = cmp_str(a, b);
     } else {
-        c = strcmp(a, b);
+        c = cmp_str(a, b);
     }
     if (opt_r) return -c;
     return c;
@@ -156,7 +176,7 @@ static int key_cmp(const char *a, const char *b) {
         if (na > nb) return 1;
         return 0;
     }
-    return strcmp(a, b);
+    return cmp_str(a, b);
 }
 
 static void sort_lines(void) {
@@ -263,6 +283,7 @@ int main(int argc, char **argv) {
             if (o == 'r') opt_r = 1;
             else if (o == 'n') opt_n = 1;
             else if (o == 'u') opt_u = 1;
+            else if (o == 'f') opt_f = 1;
             else {
                 usage();
                 return 1;

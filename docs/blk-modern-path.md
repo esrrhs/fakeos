@@ -1548,6 +1548,15 @@ existing `-ivncqlLFE`. No new `/bin` dent. Focused virtio login smoke
 covers `grep -w`/`-x`/`-iw` + prior greens including join -a (smp 1/2).
 Ramfs `/bin` dents ~114/128.
 
+## sort -f + uniq -i — landed
+
+`/bin/sort -f` folds A–Z→a–z for string compares, field keys (`-k`), and
+`-u` key equality (numeric `-n` still primary). `/bin/uniq -i` compares
+consecutive lines case-insensitively (emits the first spelling). Both
+glue with existing `-rnu` / `-cdu`. No new `/bin` dent. Focused virtio
+login smoke covers `sort -f`/`-fu` and `uniq -i` + prior greens including
+grep -w/-x (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1555,8 +1564,8 @@ Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `sort -f` / `uniq -i`, other util flags /
-   thin `/bin` with dent room (`set --` still deferred; skip large
+   deferred. Next thin polish: other util flags / thin `/bin` with dent
+   room (`ls -1/-F`, `md5sum -c`, …; `set --` still deferred; skip large
    `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
    `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
    duplex / multi-nc / CFS / jbd alone.
