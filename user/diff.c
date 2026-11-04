@@ -1,7 +1,8 @@
 /* fakeos userland - diff: line-oriented file compare (thin POSIX).
- * Forms: diff [-uq] FILE1 FILE2
+ * Forms: diff [-uqbw] FILE1 FILE2
  * Default: classic a/c/d hunks with "< "/"> " lines.
  * -u: unified hunks (3 lines context). -q: brief "Files X and Y differ".
+ * -b: ignore changes in amount of whitespace. -w: ignore all whitespace.
  * Exit 0 identical, 1 differ, 2 error. "-" is stdin (at most one).
  * cmp already covers byte compare; this is the line-oriented companion.
  * Compact argv for EXEC_MAX_ARGC=8. Loads lines into RAM (MAX_LINES).
@@ -31,11 +32,14 @@ static int na;
 static int nb;
 static int opt_u;
 static int opt_q;
+static int opt_b; /* ignore amount of whitespace */
+static int opt_w; /* ignore all whitespace */
 static const char *name1;
 static const char *name2;
 
 static void usage(void) {
-    u_write(2, "usage: diff [-uq] FILE1 FILE2\n", 30);
+    u_write(2, "usage: diff [-uqbw] FILE1 FILE2
+", 32);
 }
 
 static void free_lines(char **lines, int n) {
@@ -122,6 +126,47 @@ static void emit_dec(unsigned long v) {
     u_write(1, tmp + i, (unsigned long)(24 - i));
 }
 
+static int is_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
+}
+
+/* Line equality under -b/-w (or plain strcmp). */
+static int lines_eq(const char *a, const char *b) {
+    int i = 0;
+    int j = 0;
+    if (!opt_b && !opt_w) return strcmp(a, b) == 0;
+    if (opt_w) {
+        while (1) {
+            while (a[i] && is_ws(a[i])) i++;
+            while (b[j] && is_ws(b[j])) j++;
+            if (a[i] == 0 || b[j] == 0) return a[i] == 0 && b[j] == 0;
+            if (a[i] != b[j]) return 0;
+            i++;
+            j++;
+        }
+    }
+    /* -b: whitespace runs match each other; trailing ws-only OK. */
+    while (1) {
+        if (a[i] && is_ws(a[i]) && b[j] && is_ws(b[j])) {
+            while (a[i] && is_ws(a[i])) i++;
+            while (b[j] && is_ws(b[j])) j++;
+            continue;
+        }
+        if (a[i] == 0) {
+            while (b[j] && is_ws(b[j])) j++;
+            return b[j] == 0;
+        }
+        if (b[j] == 0) {
+            while (a[i] && is_ws(a[i])) i++;
+            return a[i] == 0;
+        }
+        if (is_ws(a[i]) || is_ws(b[j])) return 0;
+        if (a[i] != b[j]) return 0;
+        i++;
+        j++;
+    }
+}
+
 /* LCS length matrix: (na+1)*(nb+1) unsigned shorts, row-major. */
 static unsigned short *lcs_build(void) {
     unsigned long cells = (unsigned long)(na + 1) * (unsigned long)(nb + 1);
@@ -137,7 +182,7 @@ static unsigned short *lcs_build(void) {
                               + (unsigned long)j;
             if (i == 0 || j == 0) {
                 dp[idx] = 0;
-            } else if (strcmp(a_lines[i - 1], b_lines[j - 1]) == 0) {
+            } else if (lines_eq(a_lines[i - 1], b_lines[j - 1])) {
                 unsigned long prev = (unsigned long)(i - 1)
                                    * (unsigned long)(nb + 1)
                                    + (unsigned long)(j - 1);
@@ -231,7 +276,7 @@ static void emit_classic(unsigned short *dp) {
                          + (unsigned long)j;
         unsigned long left = (unsigned long)i * (unsigned long)(nb + 1)
                            + (unsigned long)(j - 1);
-        if (strcmp(a_lines[i - 1], b_lines[j - 1]) == 0) {
+        if (lines_eq(a_lines[i - 1], b_lines[j - 1])) {
             ma[nm] = i - 1;
             mb[nm] = j - 1;
             nm++;
@@ -297,7 +342,7 @@ static void emit_unified(unsigned short *dp) {
                          + (unsigned long)j;
         unsigned long left = (unsigned long)i * (unsigned long)(nb + 1)
                            + (unsigned long)(j - 1);
-        if (strcmp(a_lines[i - 1], b_lines[j - 1]) == 0) {
+        if (lines_eq(a_lines[i - 1], b_lines[j - 1])) {
             tag_a[i - 1] = 0;
             tag_b[j - 1] = 0;
             i--;
@@ -485,6 +530,8 @@ int main(int argc, char **argv) {
 
     opt_u = 0;
     opt_q = 0;
+    opt_b = 0;
+    opt_w = 0;
     na = 0;
     nb = 0;
 
@@ -500,6 +547,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'u') opt_u = 1;
             else if (o[j] == 'q') opt_q = 1;
+            else if (o[j] == 'b') opt_b = 1;
+            else if (o[j] == 'w') opt_w = 1;
             else {
                 usage();
                 return 2;
@@ -548,7 +597,7 @@ int main(int argc, char **argv) {
         identical = 0;
     } else {
         for (i = 0; i < na; i++) {
-            if (strcmp(a_lines[i], b_lines[i]) != 0) {
+            if (!lines_eq(a_lines[i], b_lines[i])) {
                 identical = 0;
                 break;
             }

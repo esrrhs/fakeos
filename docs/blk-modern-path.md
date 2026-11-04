@@ -1597,6 +1597,14 @@ suppress pairable (joined) lines. Implies `-a N`. Keeps `-a`/`-t`/`-1`/`-2`.
 No new `/bin` dent. Focused virtio login smoke covers `join -v1`/`-v2` +
 prior greens including find -iname (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## diff -b/-w — landed
+
+`/bin/diff -b` ignores changes in whitespace amount (runs match; trailing
+ws-only OK). `-w` ignores all whitespace. Glues with existing `-uq`. Output
+still shows original lines. No new `/bin` dent. Focused virtio login smoke
+covers `diff -b`/`-w`/`-qb` + prior greens including join -v (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1604,8 +1612,8 @@ prior greens including find -iname (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `diff -b`/`uniq -f|-s`/cksum polish / other
-   util flags / thin `/bin` with dent room (`set --` still deferred; skip
-   large `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   deferred. Next thin polish: `uniq -f|-s` / cksum polish / other util
+   flags / thin `/bin` with dent room (`set --` still deferred; skip large
+   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
    `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
    duplex / multi-nc / CFS / jbd alone.
