@@ -1,7 +1,9 @@
 /* fakeos userland - split: split a file into pieces (thin POSIX subset).
- * Forms: split [-l LINES|-lLINES] [-a N|-aN] [FILE [PREFIX]]
+ * Forms: split [-l LINES|-lLINES] [-b SIZE|-bSIZE] [-a N|-aN] [FILE [PREFIX]]
  * Default: 1000 lines, PREFIX "x", suffix length 2 (xaa, xab, ...).
- * FILE "-" or omitted reads stdin. Glued -lN/-aN keep argv under EXEC_MAX_ARGC=8.
+ * -b SIZE splits by bytes (decimal; optional k/K=1024, m/M=1MiB, b/B=512).
+ * -l and -b: last one wins. FILE "-" or omitted reads stdin.
+ * Glued -lN/-bN/-aN keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -24,11 +26,13 @@ enum {
 };
 
 static int lines_per = 1000;
+static unsigned long bytes_per = 0; /* 0 = line mode */
+static int byte_mode = 0;
 static int suff_len = 2;
 static const char *prefix = "x";
 
 static void usage(void) {
-    u_write(2, "usage: split [-l LINES] [-a N] [FILE [PREFIX]]\n", 48);
+    u_write(2, "usage: split [-l LINES] [-b SIZE] [-a N] [FILE [PREFIX]]\n", 58);
 }
 
 static int is_digits(const char *s) {
@@ -37,6 +41,36 @@ static int is_digits(const char *s) {
     for (i = 0; s[i]; i++) {
         if (s[i] < '0' || s[i] > '9') return 0;
     }
+    return 1;
+}
+
+/* Parse SIZE: decimal digits with optional trailing k/K/m/M/b/B. */
+static int parse_size(const char *s, unsigned long *out) {
+    unsigned long v = 0;
+    int i = 0;
+    char c;
+    if (s == 0 || s[0] == 0) return 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        v = v * 10UL + (unsigned long)(s[i] - '0');
+        i++;
+    }
+    if (i == 0) return 0;
+    c = s[i];
+    if (c == 0) {
+        *out = v;
+        return 1;
+    }
+    if (s[i + 1] != 0) return 0;
+    if (c == 'k' || c == 'K') {
+        v = v * 1024UL;
+    } else if (c == 'm' || c == 'M') {
+        v = v * 1024UL * 1024UL;
+    } else if (c == 'b' || c == 'B') {
+        v = v * 512UL;
+    } else {
+        return 0;
+    }
+    *out = v;
     return 1;
 }
 
@@ -82,7 +116,7 @@ static long open_piece(int idx) {
     return fd;
 }
 
-static int do_split(long in_fd) {
+static int do_split_lines(long in_fd) {
     char buf[OUT_MAX];
     long n;
     int i;
@@ -125,6 +159,53 @@ static int do_split(long in_fd) {
     return n < 0 ? 1 : 0;
 }
 
+static int do_split_bytes(long in_fd) {
+    char buf[OUT_MAX];
+    long n;
+    int i;
+    unsigned long count = 0;
+    int piece = 0;
+    long out = -1;
+    int need_new = 1;
+
+    if (bytes_per < 1) bytes_per = 1;
+
+    while ((n = u_read(in_fd, buf, sizeof(buf))) > 0) {
+        for (i = 0; i < (int)n; i++) {
+            if (need_new) {
+                out = open_piece(piece);
+                if (out < 0) return 1;
+                need_new = 0;
+                count = 0;
+            }
+            if (u_write(out, &buf[i], 1) != 1) {
+                u_write(2, "split: write failed\n", 20);
+                u_close(out);
+                return 1;
+            }
+            count++;
+            if (count >= bytes_per) {
+                u_close(out);
+                out = -1;
+                piece++;
+                need_new = 1;
+            }
+        }
+    }
+    if (out >= 0) u_close(out);
+    if (n == 0 && piece == 0 && need_new) {
+        out = open_piece(0);
+        if (out < 0) return 1;
+        u_close(out);
+    }
+    return n < 0 ? 1 : 0;
+}
+
+static int do_split(long in_fd) {
+    if (byte_mode) return do_split_bytes(in_fd);
+    return do_split_lines(in_fd);
+}
+
 int main(int argc, char **argv) {
     int i = 1;
     const char *file = 0;
@@ -141,10 +222,25 @@ int main(int argc, char **argv) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
             lines_per = (int)strtol_dec(argv[i + 1]);
             if (lines_per < 1) lines_per = 1;
+            byte_mode = 0;
             i += 2;
         } else if (a[1] == 'l' && a[2] != 0 && is_digits(a + 2)) {
             lines_per = (int)strtol_dec(a + 2);
             if (lines_per < 1) lines_per = 1;
+            byte_mode = 0;
+            i++;
+        } else if (strcmp(a, "-b") == 0) {
+            if (i + 1 >= argc || !parse_size(argv[i + 1], &bytes_per)) {
+                usage();
+                return 1;
+            }
+            if (bytes_per < 1) bytes_per = 1;
+            byte_mode = 1;
+            i += 2;
+        } else if (a[1] == 'b' && a[2] != 0) {
+            if (!parse_size(a + 2, &bytes_per)) { usage(); return 1; }
+            if (bytes_per < 1) bytes_per = 1;
+            byte_mode = 1;
             i++;
         } else if (strcmp(a, "-a") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }

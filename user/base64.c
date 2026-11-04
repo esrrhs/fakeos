@@ -1,8 +1,10 @@
 /* fakeos userland - base64: encode/decode (thin POSIX/GNU subset).
- * Forms: base64 [FILE...]
+ * Forms: base64 [-w COLS|-wCOLS] [FILE...]
  *        base64 -d [FILE...]
- * Encode wraps at 76 columns with a trailing newline (empty input → empty).
+ * Encode wraps at COLS columns (default 76) with a trailing newline when the
+ * last line is open; -w 0 disables wrapping entirely (no trailing newline).
  * Decode ignores whitespace; rejects other non-alphabet. stdin if no FILE.
+ * Glued -wCOLS keeps argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -11,18 +13,29 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern int strcmp(const char *a, const char *b);
+extern long strtol_dec(const char *s);
 
-enum { WRAP = 76, INBUF = 512, OUTBUF = 1024 };
+enum { WRAP_DEFAULT = 76, INBUF = 512, OUTBUF = 1024 };
 
 static const char b64tab[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static int decode_mode;
+static int wrap_cols = WRAP_DEFAULT; /* 0 = no wrap */
 static signed char decmap[128];
 static int map_ready;
 
 static void usage(void) {
-    u_write(2, "usage: base64 [-d] [FILE...]\n", 29);
+    u_write(2, "usage: base64 [-d] [-w COLS] [FILE...]\n", 37);
+}
+
+static int is_digits(const char *s) {
+    int i;
+    if (s == 0 || s[0] == 0) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
 }
 
 static void init_map(void) {
@@ -64,7 +77,7 @@ static int encode_fd(long fd) {
             out[oi++] = b64tab[v & 63];
             any = 1;
             col += 4;
-            if (col >= WRAP) {
+            if (wrap_cols > 0 && col >= wrap_cols) {
                 out[oi++] = '\n';
                 col = 0;
             }
@@ -102,9 +115,9 @@ static int encode_fd(long fd) {
         any = 1;
         col += 4;
     }
-    /* Trailing newline only if the last line is open (col!=0). Exact
-     * WRAP already emitted a newline during streaming. */
-    if (any && col != 0) {
+    /* Trailing newline only when wrapping is on and the last line is open.
+     * Exact WRAP already emitted a newline during streaming; -w0 never wraps. */
+    if (wrap_cols > 0 && any && col != 0) {
         out[oi++] = '\n';
     }
     if (oi > 0) {
@@ -181,15 +194,32 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
-        if (strcmp(argv[i], "--") == 0) {
+        const char *a = argv[i];
+        if (strcmp(a, "--") == 0) {
             i++;
             break;
         }
-        if (strcmp(argv[i], "-") == 0) {
+        if (strcmp(a, "-") == 0) {
             break;
         }
-        if (strcmp(argv[i], "-d") == 0) {
+        if (strcmp(a, "-d") == 0) {
             decode_mode = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(a, "-w") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            wrap_cols = (int)strtol_dec(argv[i + 1]);
+            if (wrap_cols < 0) wrap_cols = 0;
+            i += 2;
+            continue;
+        }
+        if (a[1] == 'w' && a[2] != 0 && is_digits(a + 2)) {
+            wrap_cols = (int)strtol_dec(a + 2);
+            if (wrap_cols < 0) wrap_cols = 0;
             i++;
             continue;
         }

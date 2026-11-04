@@ -837,14 +837,25 @@ default remains SIGKILL=9; fallback SIGKILL if chosen signal does not reap).
 Focused virtio login smoke covers `xargs -I`, `sort -k`/`-n -k`, `timeout -s`/
 `--signal`, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents 106/128.
 
+## base64 -w + split -b — landed
+
+Thin POSIX/GNU polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/base64` gains `-w COLS`
+/ glued `-wCOLS` (default 76; `0` disables wrapping entirely, including the
+trailing newline). `/bin/split` gains `-b SIZE` / glued `-bSIZE` (byte mode;
+decimal with optional `k`/`K`=1024, `m`/`M`=1MiB, `b`/`B`=512); `-l`/`-b` last
+wins. Focused virtio login smoke covers wrap/decode, byte-split pieces, Ext2,
+prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`xargs -I` + `sort -k` +
-   `timeout --signal` + `seq -w` + …): prefer small coherent chunks; thin
-   `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
-   Candidates: skip `yes --version` fluff; `/bin/mkfifo` only if `mknod`
-   exists; more filter/polish pairs as inventory bites. Avoid deep jbd /
-   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`base64 -w` + `split -b` + …):
+   prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
+   `touch -r`/`-d` if utimens arrive. Candidates: `chmod -R` thin (careful);
+   `cal -y`; `uname -s/-n/-r/-m`; `ps`/`uptime`/`free` only if `/proc` grows;
+   skip `mkfifo` until `mknod`; leave Ext2-redirect duplex / multi-nc SMP races
+   and CFS/jbd alone unless a clear bite-sized fix.
