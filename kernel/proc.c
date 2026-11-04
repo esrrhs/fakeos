@@ -301,8 +301,9 @@ u64 sys_getsid(u64 pid) {
 }
 
 
-/* ioctl(2) TTY: TIOCGPGRP / TIOCSPGRP / TCGETS / TCSETS.
- * TCGETS/TCSETS read/write real termios (ICANON/ECHO/ISIG/c_cc). */
+/* ioctl(2) TTY: TIOCGPGRP / TIOCSPGRP / TCGETS / TCSETS / TIOCGWINSZ.
+ * TCGETS/TCSETS read/write real termios (ICANON/ECHO/ISIG/c_cc).
+ * TIOCGWINSZ returns fixed VGA 80x25 (no SIGWINCH). */
 u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     u64 as = sched_current_as_h();
     enum {
@@ -310,6 +311,7 @@ u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
         TCSETS_R = 0x5402,
         TIOCGPGRP_R = 0x540F,
         TIOCSPGRP_R = 0x5410,
+        TIOCGWINSZ_R = 0x5413,
         ENOTTY_NEG = (u64)-25
     };
     (void)fd;
@@ -361,6 +363,22 @@ u64 sys_ioctl(u64 fd, u64 req, u64 arg) {
             tmp[i] = ((volatile u8 *)arg)[i];
         }
         tty_termios_set(tmp, 64);
+        return 0;
+    }
+    /* Fixed VGA text size (80x25). No dynamic resize / SIGWINCH yet. */
+    if (req == TIOCGWINSZ_R) {
+        volatile u8 *p;
+        u32 i;
+        if (as == 0 || !mem.as_user_range_ok(as, arg, 8)) {
+            return (u64)(-1);
+        }
+        p = (volatile u8 *)arg;
+        for (i = 0; i < 8; i++) {
+            p[i] = 0;
+        }
+        /* little-endian ws_row=25, ws_col=80 */
+        p[0] = 25;
+        p[2] = 80;
         return 0;
     }
     return ENOTTY_NEG;
