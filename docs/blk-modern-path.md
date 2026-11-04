@@ -507,13 +507,24 @@ compact `-d` argv. Focused virtio login smoke covers encode/decode round-trip
 (`hello`/`abc`/pad cases), file operand, plus prior interactive greens
 (smp 1/2). Ramfs `/bin` dents 79/128.
 
+## /bin/factor + /bin/clear + /bin/tty + /bin/whoami — landed
+
+Thin daily-driver set. `factor [NUMBER...]` prints ascending prime factors
+(with multiplicity; stdin ints if no operands). `/bin/clear` writes ANSI
+`ESC[2J ESC[H` (shell-mirror of builtin). `tty [-s]` uses ioctl TCGETS on
+stdin and prints `/dev/tty` or `not a tty`. `whoami` maps geteuid() via
+`/etc/passwd` (numeric fallback). Focused virtio login smoke covers factor
+12/17/1/100, tty, whoami=root, clear escape, prior interactive greens
+(smp 1/2). Ramfs `/bin` dents 83/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
-   (e.g. `factor`; `base64` + checksum trio already present) — prefer small
-   coherent chunks. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
-   unless a clear bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (e.g.
+   external `id`/`groups`/`cal`/`install -d`; factor/clear/tty/whoami +
+   base64 + checksum trio already present) — prefer small coherent chunks.
+   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
+   bite-sized fix.
