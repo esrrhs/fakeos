@@ -362,6 +362,7 @@ flowchart TD
 - [x] **strings -t**：打印串前字节偏移（`-t o|d|x`/`-to`/`-td`/`-tx`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **seq -f**：printf 风格格式（`-f FMT`/`-fFMT`；`%%` 与 `%d/%i/%u/%g/...` 输出整数；与 `-w` 同用时忽略 `-w`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **fmt -s**：仅折行不重填（`-s` split-only；不跨换行合并；可与 `-w`/`-swN` 组合）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **fmt -u**：均匀间距（`-u`；词间一空格，句末 `.?!` 后两空格；可与 `-s`/`-w` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
