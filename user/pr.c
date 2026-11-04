@@ -1,9 +1,10 @@
 /* fakeos userland - pr: paginate with headers (thin POSIX subset).
- * Forms: pr [-n] [-t] [-s SEP|-sSEP] [-w WIDTH|-wWIDTH] [-l LENGTH|-lLENGTH]
- *           [-h HEADER|-hHEADER] [FILE...]
+ * Forms: pr [-n] [-t] [-d] [-s SEP|-sSEP] [-w WIDTH|-wWIDTH]
+ *           [-l LENGTH|-lLENGTH] [-h HEADER|-hHEADER] [FILE...]
  * Default WIDTH 72, LENGTH 66. Without -t, a 5-line header (blanks + title +
  * "Page N") precedes each page of (LENGTH-5) body lines (min 1), then a form
- * feed. -t omits headers and form feeds. -n prefixes body lines with a
+ * feed. -t omits headers and form feeds. -d double-spaces (extra blank after
+ * each body line; counts two page lines). -n prefixes body lines with a
  * 5-digit number and a separator (default TAB; -s SEP replaces it; empty
  * SEP allowed; glued -sSEP ok). Glued -wN/-lN/-hTEXT/-sSEP keep
  * argv under EXEC_MAX_ARGC=8. stdin if no FILE.
@@ -22,6 +23,7 @@ enum { LINE_MAX = 512, WIDTH_DEFAULT = 72, LENGTH_DEFAULT = 66 };
 
 static int number_lines;
 static int omit_header; /* -t */
+static int double_space; /* -d */
 static int width = WIDTH_DEFAULT;
 static int length = LENGTH_DEFAULT;
 static const char *header = 0; /* -h; else file name / empty */
@@ -29,7 +31,7 @@ static const char *num_sep = "\t"; /* -s: after -n number; default TAB */
 static long page_no = 1;
 
 static void usage(void) {
-    u_write(2, "usage: pr [-n] [-t] [-s SEP] [-w N] [-l N] [-h HDR] [FILE...]\n", 62);
+    u_write(2, "usage: pr [-n] [-t] [-d] [-s SEP] [-w N] [-l N] [-h HDR] [FILE...]\n", 67);
 }
 
 static int is_digits(const char *s) {
@@ -134,8 +136,9 @@ static int pr_fd(long fd, const char *title) {
                 if (number_lines) emit_num5(line_no);
                 if (li > 0) u_write(1, line, (unsigned long)li);
                 u_write(1, "\n", 1);
+                if (double_space) u_write(1, "\n", 1);
                 line_no++;
-                lines_on_page++;
+                lines_on_page += double_space ? 2 : 1;
                 li = 0;
             } else {
                 if (li < LINE_MAX - 1) line[li++] = c;
@@ -156,6 +159,7 @@ static int pr_fd(long fd, const char *title) {
         if (number_lines) emit_num5(line_no);
         u_write(1, line, (unsigned long)li);
         u_write(1, "\n", 1);
+        if (double_space) u_write(1, "\n", 1);
     }
     if (started && !omit_header) {
         /* traditional trailing form feed after last page */
@@ -181,6 +185,11 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "-t") == 0) {
             omit_header = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-d") == 0) {
+            double_space = 1;
             i++;
             continue;
         }
