@@ -251,6 +251,17 @@ duplicate lines (`-c` count prefix, `-d` duplicates only, `-u` unique only).
 reverse, `-n` leading-integer numeric). Focused virtio login smoke covers
 `sort | uniq`, `-c`/`-n`/`-r` bites plus prior interactive greens (smp 1/2).
 
+
+## shell mkdir -p + /bin/rm -r — landed
+
+FS polish for daily-driver trees. Shell builtin `mkdir [-p] DIR...` creates
+multiple operands; `-p` walks path components and treats an existing directory
+as success (re-stat after mkdir; no errno). `/bin/rm [-r|-R] FILE...` removes
+files with unlink and directories recursively via getdents name collection then
+unlink/rmdir (skips `.`/`..`; refuses directories without `-r`). Focused virtio
+login smoke covers nested `mkdir -p` / `rm -r` plus prior interactive greens
+(smp 1/2).
+
 ## hard link(2) + shell ln — landed
 
 Linux nr `link(86)`. Ramfs tracks `inode.nlink` (files/symlinks); Ext2 bumps

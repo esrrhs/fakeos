@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo ($?/$VAR), cd, pwd, mkdir, rmdir, ln[-s], readlink,
+ * Builtins: echo ($?/$VAR), cd, pwd, mkdir[-p], rmdir, ln[-s], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -32,6 +32,7 @@ extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
+extern long u_stat(const char *path, void *statbuf);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_link(const char *oldpath, const char *newpath);
@@ -215,6 +216,74 @@ static void hist_print(void) {
 static int eq(const char *a, const char *b) {
     return strcmp(a, b) == 0;
 }
+
+enum {
+    SH_ST_MODE = 24,
+    SH_ST_BYTES = 144,
+    SH_S_IFMT = 0xF000,
+    SH_S_IFDIR = 0x4000,
+    SH_PATH_CAP = 128
+};
+
+static unsigned int sh_load_u32(const char *p) {
+    return (unsigned int)(unsigned char)p[0]
+         | ((unsigned int)(unsigned char)p[1] << 8)
+         | ((unsigned int)(unsigned char)p[2] << 16)
+         | ((unsigned int)(unsigned char)p[3] << 24);
+}
+
+static int sh_is_dir(const char *path) {
+    char st[SH_ST_BYTES];
+    unsigned int mode;
+    if (u_stat(path, st) != 0) return 0;
+    mode = sh_load_u32(st + SH_ST_MODE);
+    return (mode & SH_S_IFMT) == SH_S_IFDIR;
+}
+
+/* Create one directory; with parents, create each missing component.
+ * Existing directories are OK under -p (no errno; re-stat after mkdir). */
+static int sh_mkdir_one(const char *path, int parents) {
+    char buf[SH_PATH_CAP];
+    unsigned long n;
+    unsigned long i;
+    if (path == 0 || path[0] == 0) return -1;
+    if (!parents) {
+        return u_mkdir(path) < 0 ? -1 : 0;
+    }
+    n = strlen(path);
+    if (n >= SH_PATH_CAP) return -1;
+    strcpy(buf, path);
+    i = 0;
+    if (buf[0] == '/') i = 1;
+    while (i <= n) {
+        char saved;
+        if (i < n && buf[i] != '/' && buf[i] != 0) {
+            i++;
+            continue;
+        }
+        saved = buf[i];
+        buf[i] = 0;
+        if (buf[0] != 0 && !(buf[0] == '/' && buf[1] == 0)) {
+            if (!sh_is_dir(buf)) {
+                if (u_mkdir(buf) < 0) {
+                    if (!sh_is_dir(buf)) {
+                        buf[i] = saved;
+                        return -1;
+                    }
+                }
+            }
+        }
+        buf[i] = saved;
+        if (i >= n) break;
+        while (i < n && buf[i] == '/') i++;
+        if (i >= n) {
+            /* trailing slash: final component already handled */
+            break;
+        }
+    }
+    return 0;
+}
+
 
 static int job_alloc(void) {
     int i;
@@ -924,15 +993,41 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "mkdir")) {
-        if (tokens[1] == 0) {
+        int parents = 0;
+        int ai = 1;
+        int rc = 0;
+        int saw = 0;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'p') {
+                    parents = 1;
+                } else {
+                    puts("usage: mkdir [-p] DIR...");
+                    return 1;
+                }
+            }
+            ai++;
+        }
+        if (tokens[ai] == 0) {
             puts("sh: mkdir: missing operand");
             return 1;
         }
-        if (u_mkdir(tokens[1]) < 0) {
-            printf("sh: mkdir: %s: cannot create directory\n", tokens[1]);
+        while (tokens[ai] != 0) {
+            saw = 1;
+            if (sh_mkdir_one(tokens[ai], parents) < 0) {
+                printf("sh: mkdir: %s: cannot create directory\n", tokens[ai]);
+                rc = 1;
+            }
+            ai++;
+        }
+        if (!saw) {
+            puts("sh: mkdir: missing operand");
             return 1;
         }
-        return 0;
+        return rc;
     }
     if (eq(tokens[0], "rmdir")) {
         if (tokens[1] == 0) {
@@ -955,7 +1050,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir[-p], rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort (default PATH=/bin:/usr/bin:.)");
