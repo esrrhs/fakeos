@@ -1627,6 +1627,13 @@ field). Glues with existing `-rnuf`/`-k`. Output still emits original lines.
 No new `/bin` dent. Focused virtio login smoke covers `sort -b` + prior
 greens including cksum -c (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## find -path — landed
+
+`/bin/find -path GLOB` matches the full path with the same thin `*`/`?`
+glob as `-name` (no casefold). ANDs with `-name`/`-iname`/`-type`/depth.
+No new `/bin` dent. Focused virtio login smoke covers `find -path` + prior
+greens including sort -b (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1634,7 +1641,8 @@ greens including cksum -c (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags / thin `/bin` with dent room
-   (`set --` still deferred; skip large `getopts` / here-doc / trap / `fc` /
-   `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need kernel
-   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `find -prune` / `ls -R` / `cp -p` / other util
+   flags / thin `/bin` with dent room (`set --` still deferred; skip large
+   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex
+   / multi-nc / CFS / jbd alone.

@@ -2,9 +2,10 @@
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
- * folds A-Z), -type f|d, -print, -maxdepth N, -mindepth N (start points
- * are depth 0; GNU-ish). Uses lstat(2). No -o/parens/actions beyond print.
- * Depth-first. Compact argv for EXEC_MAX_ARGC=8.
+ * folds A-Z), -path GLOB (full path *,? only), -type f|d, -print,
+ * -maxdepth N, -mindepth N (start points are depth 0; GNU-ish). Uses
+ * lstat(2). No -o/parens/actions beyond print. Depth-first. Compact argv
+ * for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -39,6 +40,8 @@ enum {
 static int want_name;
 static int name_fold; /* 1 = -iname */
 static char name_pat[GLOB_CAP];
+static int want_path;
+static char path_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
 static int do_print = 1;
 static int max_depth = DEPTH_UNLIM;
@@ -112,6 +115,7 @@ static int match_preds(const char *path, unsigned int mode) {
     if (want_type == 1 && !is_reg_mode(mode)) return 0;
     if (want_type == 2 && !is_dir_mode(mode)) return 0;
     if (want_name && !glob_match(name_pat, base_of(path), name_fold)) return 0;
+    if (want_path && !glob_match(path_pat, path, 0)) return 0;
     return 1;
 }
 
@@ -146,6 +150,7 @@ static void join_path(char *out, unsigned long cap, const char *dir,
 static int is_primary(const char *a) {
     if (strcmp(a, "-name") == 0) return 1;
     if (strcmp(a, "-iname") == 0) return 1;
+    if (strcmp(a, "-path") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
     if (strcmp(a, "-maxdepth") == 0) return 1;
@@ -268,6 +273,20 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
+        if (strcmp(argv[ai], "-path") == 0) {
+            if (ai + 1 >= argc) {
+                u_write(2, "find: -path needs GLOB\n", 23);
+                return 1;
+            }
+            want_path = 1;
+            if (strlen(argv[ai + 1]) >= GLOB_CAP) {
+                u_write(2, "find: -path GLOB too long\n", 26);
+                return 1;
+            }
+            strcpy(path_pat, argv[ai + 1]);
+            ai += 2;
+            continue;
+        }
         if (strcmp(argv[ai], "-type") == 0) {
             if (ai + 1 >= argc || (argv[ai + 1][0] != 'f' && argv[ai + 1][0] != 'd')
                 || argv[ai + 1][1] != 0) {
@@ -299,8 +318,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]
-", 91);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-maxdepth N] [-mindepth N] [-print]\n", 98);
         return 1;
     }
 
