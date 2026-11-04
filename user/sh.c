@@ -2268,6 +2268,7 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "return") || eq(cmd, "local") || eq(cmd, "shift")
         || eq(cmd, ":") || eq(cmd, "true") || eq(cmd, "false")
         || eq(cmd, "eval") || eq(cmd, "source") || eq(cmd, ".")
+        || eq(cmd, "let")
         || eq(cmd, "[[") || eq(cmd, "printf");
 }
 
@@ -2627,6 +2628,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { ":", ": [ARGS...]  (true; ignore args)" },
     { "true", "true  (exit 0)" },
     { "false", "false  (exit 1)" },
+    { "let", "let NAME=EXPR...  (arith assign; status by last)" },
     { "cd", "cd [-L|-P] [DIR|-]" },
     { "pwd", "pwd [-L|-P]" },
     { "pushd", "pushd [DIR]" },
@@ -3258,9 +3260,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash, read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break, continue, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash CMD / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local / shift; :/true/false; eval; let; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -3726,6 +3728,70 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "[[")) {
         rc = eval_dbracket(tokens);
+        pop_redirects(saved_in, saved_out);
+        return rc;
+    }
+    if (eq(tokens[0], "let")) {
+        /* let NAME=EXPR [NAME=EXPR...] — thin arith assign (reuse arith_eval).
+         * Exit 0 if last result nonzero, 1 if zero; 2 on syntax/set error. */
+        int ai;
+        long last = 0;
+        int any = 0;
+        int bad = 0;
+        if (tokens[1] == 0) {
+            puts("usage: let NAME=EXPR...");
+            rc = 1;
+        } else {
+            for (ai = 1; tokens[ai] != 0; ai++) {
+                char name[ENV_NAME];
+                char num[24];
+                const char *eqp = 0;
+                const char *expr;
+                long v = 0;
+                int n = 0;
+                int k;
+                for (k = 0; tokens[ai][k] != 0; k++) {
+                    if (tokens[ai][k] == '=') {
+                        eqp = tokens[ai] + k;
+                        break;
+                    }
+                }
+                if (eqp == 0 || eqp == tokens[ai]) {
+                    puts("sh: let: syntax error");
+                    bad = 1;
+                    break;
+                }
+                n = (int)(eqp - tokens[ai]);
+                if (n <= 0 || n >= ENV_NAME) {
+                    puts("sh: let: bad name");
+                    bad = 1;
+                    break;
+                }
+                for (k = 0; k < n; k++) name[k] = tokens[ai][k];
+                name[n] = 0;
+                if (!env_name_ok(name)) {
+                    puts("sh: let: bad name");
+                    bad = 1;
+                    break;
+                }
+                expr = eqp + 1;
+                if (arith_eval(expr, rc_in, &v) != 0) {
+                    bad = 1;
+                    break;
+                }
+                (void)fmt_long_dec(num, 24, v);
+                if (sh_setenv(name, num) != 0) {
+                    printf("sh: let: %s: failed\n", name);
+                    bad = 1;
+                    break;
+                }
+                last = v;
+                any = 1;
+            }
+            if (bad) rc = 2;
+            else if (!any) rc = 1;
+            else rc = (last != 0) ? 0 : 1;
+        }
         pop_redirects(saved_in, saved_out);
         return rc;
     }
@@ -6279,7 +6345,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, let, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

@@ -1406,6 +1406,15 @@ unchanged (always raw). Focused virtio login smoke uses file redirect
 input so QEMU stays non-interactive (`read -p … < file`) + prior greens
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell let — landed
+
+Thin `let NAME=EXPR…` builtin (no new `/bin` dent). Reuses `arith_eval` /
+`$(( ))` and `fmt_long_dec`/`sh_setenv`. Exit status: 0 if last result
+nonzero, 1 if zero, 2 on error. Inventory: `tee -a` / `xargs -n` already
+present; `declare`/`typeset`/`=~`/`%q` deferred. Focused virtio login
+smoke covers assign/status + prior greens (smp 1/2). Ramfs `/bin` dents
+~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1413,7 +1422,8 @@ input so QEMU stays non-interactive (`read -p … < file`) + prior greens
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `set --` if positional frames grow, or other
-   small `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
-   bite-sized; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `set --` if positional frames grow, thin
+   `declare`/`typeset` if easy, or other small `/bin`/shell bites (skip
+   large `getopts` / here-doc / trap unless bite-sized; `ulimit`/`times`
+   need kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd
+   alone.

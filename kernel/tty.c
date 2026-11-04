@@ -685,14 +685,14 @@ static void tab_scan_dir(const char *dirpath, const char *pfx, u32 pfx_n) {
 }
 
 static void tab_scan_builtins(const char *pfx, u32 pfx_n) {
-    static const char *builtins[54] = {
+    static const char *builtins[55] = {
         "echo", "printf", "cd", "mkdir", "rmdir", "pwd", "pid", "ppid", "uname",
         "sleep", "ln", "readlink", "realpath", "env", "export", "readonly", "unset",
         "which", "chmod", "umask", "chown", "id", "sync", "clear",
         "history", "jobs", "fg", "bg", "wait", "kill", "exit", "help",
         "pushd", "popd", "dirs", "type", "command", "builtin", "hash", "read",
         "set", "break", "continue", "alias", "unalias", "return", "local", "shift",
-        "true", "false", ":", "eval", "source", 0
+        "true", "false", ":", "let", "eval", "source", 0
     };
     u32 i;
     for (i = 0; builtins[i] != 0; i++) {
