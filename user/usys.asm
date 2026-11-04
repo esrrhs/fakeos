@@ -17,6 +17,10 @@ global u_mprotect
 global u_brk
 global u_exit
 global u_getpid
+global u_getppid
+global u_uname
+global u_nanosleep
+global u_clock_gettime
 global u_yield
 global u_fork
 global u_execve
@@ -121,6 +125,19 @@ USYSC1 u_brk, 12
 
 ; long u_getpid(void)
 USYSC1 u_getpid, 39
+
+; long u_getppid(void) -- Linux nr 110
+USYSC1 u_getppid, 110
+
+; long u_uname(void *buf) -- Linux nr 63
+USYSC1 u_uname, 63
+
+; long u_nanosleep(const void *req, void *rem) -- Linux nr 35
+USYSC1 u_nanosleep, 35
+
+; long u_clock_gettime(long clockid, void *tp) -- Linux nr 228
+USYSC1 u_clock_gettime, 228
+
 
 ; long u_yield(void)
 USYSC1 u_yield, 24

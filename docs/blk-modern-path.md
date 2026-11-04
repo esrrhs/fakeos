@@ -88,9 +88,17 @@ Synthetic Ramfs nodes beside existing `environ`. Open snapshots live content:
 `cmdline` (NUL-separated argv from exec/pid1). Init smoke:
 `[U][PASS] /proc/self status/maps/cmdline`.
 
+## getppid / uname / nanosleep / clock_gettime — landed
+
+Linux x86-64 nr `getppid(110)`, `uname(63)`, `nanosleep(35)`, `clock_gettime(228)`.
+`uname` fills 6×65 `utsname` (`fakeos` / `0.1.0` / `x86_64`). Time is 100 Hz
+`sched_ticks` (10 ms); no RTC yet so `CLOCK_REALTIME` tracks boot-relative like
+`CLOCK_MONOTONIC`/`BOOTTIME`. `nanosleep` yields until the tick deadline (poll-style).
+Shell builtins: `ppid`, `uname`[`-a`], `sleep N`. Init smoke:
+`[U][PASS] getppid/uname/nanosleep/clock_gettime`.
+
 ## Suggested next steps
 
-1. PROT_NONE + mmap addr hint (+ optional MAP_FIXED replace) — small follow-on.
-2. nanosleep / clock_gettime / getppid/uname — interactive POSIX basics.
-3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-4. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
+1. PROT_NONE + mmap addr hint (+ optional MAP_FIXED replace) — prefer next.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).

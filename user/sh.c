@@ -20,6 +20,10 @@ extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_getpid(void);
+extern long u_getppid(void);
+extern long u_uname(void *buf);
+extern long u_nanosleep(const void *req, void *rem);
+extern long u_clock_gettime(long clockid, void *tp);
 extern long u_sync(void);
 extern long u_kill(long pid, long sig);
 extern long u_setpgid(long pid, long pgid);
@@ -311,7 +315,8 @@ static void pop_redirects(int saved_in, int saved_out) {
 static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
-           eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "sync") ||
+           eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "ppid") ||
+           eq(cmd, "uname") || eq(cmd, "sleep") || eq(cmd, "sync") ||
            eq(cmd, "clear") || eq(cmd, "history") || eq(cmd, "jobs") ||
            eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill");
 }
@@ -427,7 +432,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
@@ -550,6 +555,41 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     } else if (eq(tokens[0], "pid")) {
         printf("%d\n", (int)u_getpid());
         rc = 0;
+    } else if (eq(tokens[0], "ppid")) {
+        printf("%d\n", (int)u_getppid());
+        rc = 0;
+    } else if (eq(tokens[0], "uname")) {
+        char uts[390];
+        long i;
+        for (i = 0; i < 390; i++) uts[i] = 0;
+        if (u_uname(uts) < 0) {
+            puts("sh: uname failed");
+            rc = 1;
+        } else if (tokens[1] != 0 && eq(tokens[1], "-a")) {
+            printf("%s %s %s %s %s\n", uts, uts + 65, uts + 130, uts + 195, uts + 260);
+            rc = 0;
+        } else {
+            puts(uts);
+            rc = 0;
+        }
+    } else if (eq(tokens[0], "sleep")) {
+        long sec;
+        long ts[2];
+        if (tokens[1] == 0) {
+            puts("sh: sleep: missing operand");
+            rc = 1;
+        } else {
+            sec = strtol_dec(tokens[1]);
+            if (sec < 0) sec = 0;
+            ts[0] = sec;
+            ts[1] = 0;
+            if (u_nanosleep(ts, 0) < 0) {
+                puts("sh: sleep interrupted");
+                rc = 1;
+            } else {
+                rc = 0;
+            }
+        }
     }
     pop_redirects(saved_in, saved_out);
     return rc;

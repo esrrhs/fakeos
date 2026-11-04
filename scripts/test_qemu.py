@@ -210,6 +210,8 @@ def main():
         "hello",            # external exec, exit code 42
         "echo $?",          # prints 42
         "pid",              # builtin getpid -> 1
+        "ppid",             # builtin getppid -> 0 (init parent)
+        "uname",            # builtin utsname sysname
         "echo INPUT123",    # builtin echo
         "cat /etc/motd",    # file read through inherited fd 1
         "mkdir /home",      # builtin mkdir syscall
@@ -340,6 +342,7 @@ def main():
         "[U][PASS] POSIX shm_open/mmap/unlink",
         "[U][PASS] /dev/null /dev/zero /dev/tty",
         "[U][PASS] /proc/self status/maps/cmdline",
+        "[U][PASS] getppid/uname/nanosleep/clock_gettime",
         "[U][PASS] stat/fstat/newfstatat",
         "[U][PASS] futex WAIT/WAKE",
         "[U][PASS] pthread_mutex futex lock/unlock",

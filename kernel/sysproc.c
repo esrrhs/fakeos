@@ -291,6 +291,127 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Interactive POSIX basics: getppid / uname / nanosleep / clock_gettime
+ * ------------------------------------------------------------------------- */
+
+extern u64 sched_tick_count(void);
+extern void sched_yield(void);
+extern void sched_check_signals(void);
+extern u32 sched_current_ppid(void);
+
+enum {
+    CLOCK_REALTIME_ID  = 0,
+    CLOCK_MONOTONIC_ID = 1,
+    CLOCK_BOOTTIME_ID  = 7,
+    UTS_LEN            = 65,
+    UTS_SIZE           = 390,   /* 6 * 65 Linux x86-64 utsname */
+    NS_PER_SEC         = 1000000000,
+    NS_PER_TICK        = 10000000, /* 100 Hz LAPIC timer */
+    TICKS_PER_SEC      = 100
+};
+
+u64 sys_getppid(void) {
+    return (u64)sched_current_ppid();
+}
+
+static void uts_put(char *dst, const char *s) {
+    u32 i = 0;
+    while (s[i] != 0 && i + 1 < UTS_LEN) {
+        dst[i] = s[i];
+        i++;
+    }
+    while (i < UTS_LEN) {
+        dst[i] = 0;
+        i++;
+    }
+}
+
+/* uname(2): Linux x86-64 struct utsname, 6 fields of 65 bytes. */
+u64 sys_uname(u64 ubuf) {
+    u64 as = sched_current_as_h();
+    char *dst;
+    if (as == 0 || ubuf == 0 || !mem.as_user_range_ok(as, ubuf, UTS_SIZE)) {
+        return (u64)(-1);
+    }
+    dst = (char *)ubuf;
+    uts_put(dst + 0 * UTS_LEN, "fakeos");
+    uts_put(dst + 1 * UTS_LEN, "fakeos");
+    uts_put(dst + 2 * UTS_LEN, "0.1.0");
+    uts_put(dst + 3 * UTS_LEN, "daily-driver");
+    uts_put(dst + 4 * UTS_LEN, "x86_64");
+    uts_put(dst + 5 * UTS_LEN, "(none)");
+    return 0;
+}
+
+static void ticks_to_timespec(u64 ticks, volatile u64 *sec_p, volatile u64 *nsec_p) {
+    *sec_p = ticks / TICKS_PER_SEC;
+    *nsec_p = (ticks % TICKS_PER_SEC) * NS_PER_TICK;
+}
+
+/* clock_gettime(2): REALTIME/MONOTONIC/BOOTTIME from 100 Hz sched ticks
+ * (no RTC yet — REALTIME tracks boot-relative time like MONOTONIC). */
+u64 sys_clock_gettime(u64 clockid, u64 utp) {
+    u64 as = sched_current_as_h();
+    u64 ticks;
+    if (as == 0 || utp == 0 || !mem.as_user_range_ok(as, utp, 16)) {
+        return (u64)(-1);
+    }
+    if (clockid != CLOCK_REALTIME_ID && clockid != CLOCK_MONOTONIC_ID
+        && clockid != CLOCK_BOOTTIME_ID) {
+        return EINVAL_NEG;
+    }
+    ticks = sched_tick_count();
+    ticks_to_timespec(ticks, (volatile u64 *)utp, (volatile u64 *)(utp + 8));
+    return 0;
+}
+
+/* nanosleep(2): relative sleep via 100 Hz ticks + sched_yield (like poll).
+ * Writes remaining time to rem on EINTR when rem != NULL. */
+u64 sys_nanosleep(u64 ureq, u64 urem) {
+    u64 as = sched_current_as_h();
+    i64 sec;
+    i64 nsec;
+    u64 ticks;
+    u64 deadline;
+    u64 now;
+    if (as == 0 || ureq == 0 || !mem.as_user_range_ok(as, ureq, 16)) {
+        return (u64)(-1);
+    }
+    if (urem != 0 && !mem.as_user_range_ok(as, urem, 16)) {
+        return (u64)(-1);
+    }
+    sec = (i64)(*(volatile u64 *)ureq);
+    nsec = (i64)(*(volatile u64 *)(ureq + 8));
+    if (sec < 0 || nsec < 0 || nsec >= NS_PER_SEC) {
+        return EINVAL_NEG;
+    }
+    if (sec == 0 && nsec == 0) {
+        return 0;
+    }
+    ticks = (u64)sec * TICKS_PER_SEC + (u64)nsec / NS_PER_TICK;
+    if (ticks == 0) {
+        ticks = 1;
+    }
+    deadline = sched_tick_count() + ticks;
+    for (;;) {
+        now = sched_tick_count();
+        if (now >= deadline) {
+            return 0;
+        }
+        sched_check_signals();
+        if (sched_should_eintr()) {
+            if (urem != 0) {
+                u64 left = deadline - now;
+                ticks_to_timespec(left, (volatile u64 *)urem,
+                                  (volatile u64 *)(urem + 8));
+            }
+            return EINTR_NEG;
+        }
+        sched_yield();
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * /proc/self/{status,maps,cmdline} generators (snapshotted by ramfs on open)
  * ------------------------------------------------------------------------- */
 

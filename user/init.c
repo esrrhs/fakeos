@@ -15,6 +15,10 @@ extern long u_mmap(void *addr, unsigned long len, long prot, long flags,
 extern long u_mprotect(void *addr, unsigned long len, long prot);
 extern long u_munmap(void *addr, unsigned long len);
 extern long u_getpid(void);
+extern long u_getppid(void);
+extern long u_uname(void *buf);
+extern long u_nanosleep(const void *req, void *rem);
+extern long u_clock_gettime(long clockid, void *tp);
 extern long u_yield(void);
 extern long u_fork(void);
 extern long u_execve(const char *path, char **argv, char **envp);
@@ -807,6 +811,111 @@ static int proc_has(const char *buf, long n, const char *needle) {
     return 0;
 }
 
+
+static void posix_basics_test(void) {
+    char uts[390];
+    long ts[2];
+    long t0[2];
+    long t1[2];
+    long i;
+    long pid;
+    long child;
+    long status;
+    long reaped;
+
+    /* getppid: init's parent is 0 (kernel). */
+    if (u_getppid() != 0) {
+        printf("[U][FAIL] getppid init=%d\n", (int)u_getppid());
+        return;
+    }
+
+    pid = u_getpid();
+    child = u_fork();
+    if (child < 0) {
+        puts("[U][FAIL] posix_basics fork");
+        return;
+    }
+    if (child == 0) {
+        if (u_getppid() != pid) {
+            u_exit(11);
+        }
+        u_exit(0);
+    }
+    status = 0;
+    reaped = u_wait4(child, &status, 0, 0);
+    if (reaped != child || (status >> 8) != 0) {
+        printf("[U][FAIL] getppid child status=%d\n", (int)(status >> 8));
+        return;
+    }
+
+    for (i = 0; i < 390; i++) {
+        uts[i] = 0;
+    }
+    if (u_uname(uts) != 0) {
+        puts("[U][FAIL] uname");
+        return;
+    }
+    if (uts[0] != 'f' || uts[1] != 'a' || uts[2] != 'k' || uts[3] != 'e'
+        || uts[4] != 'o' || uts[5] != 's' || uts[6] != 0) {
+        puts("[U][FAIL] uname sysname");
+        return;
+    }
+    if (uts[260] != 'x' || uts[261] != '8' || uts[262] != '6'
+        || uts[263] != '_' || uts[264] != '6' || uts[265] != '4'
+        || uts[266] != 0) {
+        puts("[U][FAIL] uname machine");
+        return;
+    }
+
+    /* Invalid timespec nsec */
+    ts[0] = 0;
+    ts[1] = 1000000000;
+    if (u_nanosleep(ts, 0) != -22) {
+        puts("[U][FAIL] nanosleep EINVAL");
+        return;
+    }
+
+    if (u_clock_gettime(0, t0) != 0 || u_clock_gettime(1, t0) != 0) {
+        puts("[U][FAIL] clock_gettime");
+        return;
+    }
+    /* Sleep ~50ms (5 ticks @ 100 Hz). */
+    ts[0] = 0;
+    ts[1] = 50000000;
+    if (u_nanosleep(ts, 0) != 0) {
+        puts("[U][FAIL] nanosleep 50ms");
+        return;
+    }
+    if (u_clock_gettime(1, t1) != 0) {
+        puts("[U][FAIL] clock_gettime after sleep");
+        return;
+    }
+    /* Monotonic must not go backwards; expect some forward progress. */
+    if (t1[0] < t0[0] || (t1[0] == t0[0] && t1[1] < t0[1])) {
+        puts("[U][FAIL] clock_gettime went backwards");
+        return;
+    }
+    if (t1[0] == t0[0] && t1[1] == t0[1]) {
+        /* Allow equal only if tick did not advance — still require sleep OK. */
+        /* Prefer seeing progress; retry one more short sleep. */
+        ts[0] = 0;
+        ts[1] = 100000000;
+        u_nanosleep(ts, 0);
+        u_clock_gettime(1, t1);
+        if (t1[0] == t0[0] && t1[1] == t0[1]) {
+            puts("[U][FAIL] clock_gettime no progress after sleep");
+            return;
+        }
+    }
+
+    if (u_clock_gettime(99, t0) != -22) {
+        puts("[U][FAIL] clock_gettime bad id");
+        return;
+    }
+
+    puts("[U][PASS] getppid/uname/nanosleep/clock_gettime");
+}
+
 static void proc_self_test(void) {
     long fd;
     long n;
@@ -1467,6 +1576,7 @@ int main(int argc, char **argv) {
     mmap_test();
     shm_test();
     dev_nodes_test();
+    posix_basics_test();
     proc_self_test();
     stat_test();
     dirent_test();

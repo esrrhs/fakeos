@@ -73,6 +73,10 @@ extern u64 sys_chmod(u64 path, u64 mode);
 extern u64 sys_gettid(void);
 extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
 extern u64 sys_set_tid_address(u64 tidptr);
+extern u64 sys_getppid(void);
+extern u64 sys_uname(u64 ubuf);
+extern u64 sys_nanosleep(u64 ureq, u64 urem);
+extern u64 sys_clock_gettime(u64 clockid, u64 utp);
 
 /* proc.c */
 extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
@@ -189,7 +193,11 @@ enum {
     SC_LSTAT = 6,
     SC_NEWFSTATAT = 262,
     SC_ARCH_PRCTL = 158,
-    SC_SET_TID_ADDRESS = 218
+    SC_SET_TID_ADDRESS = 218,
+    SC_GETPPID = 110,
+    SC_UNAME = 63,
+    SC_NANOSLEEP = 35,
+    SC_CLOCK_GETTIME = 228
 };
 
 enum {
@@ -472,6 +480,18 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_GETPID) {
         return (u64)sched_current_pid();
+    }
+    if (f->rax == SC_GETPPID) {
+        return sys_getppid();
+    }
+    if (f->rax == SC_UNAME) {
+        return sys_uname(f->rdi);
+    }
+    if (f->rax == SC_NANOSLEEP) {
+        return sys_nanosleep(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_CLOCK_GETTIME) {
+        return sys_clock_gettime(f->rdi, f->rsi);
     }
     if (f->rax == SC_CLONE) {
         return sys_clone(f->rdi, f->rsi, f->rdx, f->r10);
