@@ -1,5 +1,6 @@
 /* fakeos userland - grep: fixed-string line filter; thin -E ERE subset.
- * Options: -i -v -n -F -c -q -l -L -E. Glued short opts. -F forces fixed (wins over -E).
+ * Options: -i -v -n -F -c -q -l -L -E -w -x. Glued short opts. -F forces fixed
+ * (wins over -E). -w word-boundary match; -x whole-line match.
  * -c suppresses line output; multi-FILE prints name:count per file.
  * -q quiet: no stdout (status only; -c count also suppressed). May stop early.
  * -l list matching file names only; -L list non-matching names (last of -l/-L wins).
@@ -21,7 +22,7 @@ extern void printf(const char *fmt, ...);
 
 enum { LINE_MAX = 512 };
 
-static const char *USAGE = "usage: grep [-ivncqlLFE] PATTERN [FILE...]\n";
+static const char *USAGE = "usage: grep [-ivncqlLFEwx] PATTERN [FILE...]\n";
 
 static char lower(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
@@ -48,6 +49,57 @@ static int contains(const char *hay, const char *needle, int ign) {
             if (a != b) { ok = 0; break; }
         }
         if (ok) return 1;
+    }
+    return 0;
+}
+
+static int is_word_char(char c) {
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    if (c == '_') return 1;
+    return 0;
+}
+
+/* Fixed-string whole-line equality (optional -i). */
+static int line_eq(const char *hay, const char *needle, int ign) {
+    unsigned long i;
+    for (i = 0; ; i++) {
+        char a = hay[i];
+        char b = needle[i];
+        if (ign) {
+            a = lower(a);
+            b = lower(b);
+        }
+        if (a != b) return 0;
+        if (a == 0) return 1;
+    }
+}
+
+/* Fixed-string word match: needle at a word boundary both sides. */
+static int contains_word(const char *hay, const char *needle, int ign) {
+    unsigned long nlen = strlen(needle);
+    unsigned long i;
+    unsigned long hlen;
+    if (nlen == 0) return 1;
+    hlen = strlen(hay);
+    if (hlen < nlen) return 0;
+    for (i = 0; i + nlen <= hlen; i++) {
+        unsigned long j;
+        int ok = 1;
+        for (j = 0; j < nlen; j++) {
+            char a = hay[i + j];
+            char b = needle[j];
+            if (ign) {
+                a = lower(a);
+                b = lower(b);
+            }
+            if (a != b) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        if (i > 0 && is_word_char(hay[i - 1])) continue;
+        if (hay[i + nlen] != 0 && is_word_char(hay[i + nlen])) continue;
+        return 1;
     }
     return 0;
 }
@@ -315,28 +367,45 @@ static int ere_match(const char *pat, int pi, int pe, const char *s, int si,
     return si;
 }
 
-static int ere_search(const char *hay, const char *pat, int ign) {
+static int ere_search(const char *hay, const char *pat, int ign, int word, int whole) {
     int plen = (int)strlen(pat);
     int hlen = (int)strlen(hay);
     int i;
 
-    if (plen == 0) return 1;
+    if (plen == 0) {
+        if (whole) return hlen == 0;
+        return 1;
+    }
+    if (whole) {
+        int end = ere_match(pat, 0, plen, hay, 0, hlen, ign);
+        return end == hlen;
+    }
     /* Always try each start; ^ inside an alt fails when si!=0. Avoids
      * wrongly anchoring patterns like ^a|b (b may match mid-line). */
     for (i = 0; i <= hlen; i++) {
-        if (ere_match(pat, 0, plen, hay, i, hlen, ign) >= 0) return 1;
+        int end = ere_match(pat, 0, plen, hay, i, hlen, ign);
+        if (end < 0) continue;
+        if (word) {
+            if (i > 0 && is_word_char(hay[i - 1])) continue;
+            if (end < hlen && is_word_char(hay[end])) continue;
+        }
+        return 1;
     }
     return 0;
 }
 
-static int line_match(const char *line, const char *pat, int ign, int ere) {
-    if (ere) return ere_search(line, pat, ign);
+static int line_match(const char *line, const char *pat, int ign, int ere,
+                      int word, int whole) {
+    if (ere) return ere_search(line, pat, ign, word, whole);
+    if (whole) return line_eq(line, pat, ign);
+    if (word) return contains_word(line, pat, ign);
     return contains(line, pat, ign);
 }
 
 /* Returns 0 ok / 1 read error. *matched set if any hit. *count_out = hits. */
 static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
-                   int count_mode, int quiet, int ere, int show_name, const char *name,
+                   int count_mode, int quiet, int ere, int word, int whole,
+                   int show_name, const char *name,
                    int *matched, unsigned long *count_out) {
     char buf[512];
     char line[LINE_MAX];
@@ -354,7 +423,7 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
                 int hit;
                 line[li] = 0;
                 lineno++;
-                hit = line_match(line, pat, ign, ere);
+                hit = line_match(line, pat, ign, ere, word, whole);
                 if (invert) hit = !hit;
                 if (hit) {
                     any = 1;
@@ -381,7 +450,7 @@ static int grep_fd(long fd, const char *pat, int ign, int invert, int number,
         int hit;
         line[li] = 0;
         lineno++;
-        hit = line_match(line, pat, ign, ere);
+        hit = line_match(line, pat, ign, ere, word, whole);
         if (invert) hit = !hit;
         if (hit) {
             any = 1;
@@ -419,6 +488,8 @@ int main(int argc, char **argv) {
     int list_no = 0;  /* -L */
     int ere = 0;
     int fixed = 0;
+    int word = 0;
+    int whole = 0;
     int rc = 0;
     int matched = 0;
     int nfiles = 0;
@@ -445,8 +516,10 @@ int main(int argc, char **argv) {
             else if (o == 'L') { list_no = 1; list_yes = 0; }
             else if (o == 'E') { ere = 1; fixed = 0; }
             else if (o == 'F') { fixed = 1; ere = 0; }
+            else if (o == 'w') word = 1;
+            else if (o == 'x') whole = 1;
             else {
-                u_write(2, USAGE, 43);
+                u_write(2, USAGE, 45);
                 return 2;
             }
         }
@@ -457,14 +530,14 @@ int main(int argc, char **argv) {
 
     if (i < argc && strcmp(argv[i], "-e") == 0) {
         if (i + 1 >= argc) {
-            u_write(2, USAGE, 43);
+            u_write(2, USAGE, 45);
             return 2;
         }
         pat = argv[i + 1];
         i += 2;
     } else {
         if (i >= argc) {
-            u_write(2, USAGE, 43);
+            u_write(2, USAGE, 45);
             return 2;
         }
         pat = argv[i];
@@ -484,7 +557,7 @@ int main(int argc, char **argv) {
         if (nfiles <= 0) {
             unsigned long hits = 0;
             int file_matched = 0;
-            if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, 0, 0,
+            if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole, 0, 0,
                         &file_matched, &hits) != 0) return 2;
             if (list_yes) {
                 if (file_matched) {
@@ -510,7 +583,7 @@ int main(int argc, char **argv) {
             const char *name;
             if (strcmp(argv[i], "-") == 0) {
                 name = "(standard input)";
-                if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, show_name,
+                if (grep_fd(0, pat, ign, invert, number, cmode, q, ere, word, whole, show_name,
                             name, &file_matched, &hits) != 0) {
                     rc = 2;
                     continue;
@@ -523,7 +596,7 @@ int main(int argc, char **argv) {
                     rc = 2;
                     continue;
                 }
-                if (grep_fd(fd, pat, ign, invert, number, cmode, q, ere, show_name,
+                if (grep_fd(fd, pat, ign, invert, number, cmode, q, ere, word, whole, show_name,
                             name, &file_matched, &hits) != 0)
                     rc = 2;
                 u_close(fd);

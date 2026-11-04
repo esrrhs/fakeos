@@ -1540,6 +1540,14 @@ Drains leftovers after the merge walk. No new `/bin` dent. Focused virtio
 login smoke covers `join -a1`/`-a2` + prior greens including tr -s
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## grep -w/-x — landed
+
+`/bin/grep` gains `-w` (match only at word boundaries: alnum/_) and `-x`
+(match whole line). Works for fixed and thin `-E` paths; glues with
+existing `-ivncqlLFE`. No new `/bin` dent. Focused virtio login smoke
+covers `grep -w`/`-x`/`-iw` + prior greens including join -a (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1547,8 +1555,8 @@ login smoke covers `join -a1`/`-a2` + prior greens including tr -s
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags / thin `/bin` with dent
-   room (`diff -uq` / `paste -sd` / `find -type` / `sed -n` already;
-   `set --` still deferred; skip large `getopts` / here-doc / trap / `fc` /
-   `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need kernel
-   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `sort -f` / `uniq -i`, other util flags /
+   thin `/bin` with dent room (`set --` still deferred; skip large
+   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.
