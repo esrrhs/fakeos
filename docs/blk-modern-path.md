@@ -1936,8 +1936,15 @@ Without `-t`, `/bin/column` fills whitespace-separated words column-major into
 a grid that fits `-c WIDTH` (glued `-cWIDTH`; default 80). Two spaces between
 columns; last column on a row has no trailing pad. `-t`/`-s`/`-o` unchanged.
 No new `/bin` dent. Focused virtio login smoke covers fill/`-c` + prior greens
-including `column -o` (smp 1/2). Ramfs `/bin` dents ~114/128. Next column
-bite: `-x` fillrows.
+including `column -o` (smp 1/2). Ramfs `/bin` dents ~114/128.
+
+## column -x — landed
+
+`/bin/column -x` (fillrows; also glued `-xcN`/`-cxN`) fills whitespace words
+row-major instead of the default column-major grid. Keeps `-c` width and the
+`-t`/`-s`/`-o` table path. No new `/bin` dent. Focused virtio login smoke
+covers `-x` + prior greens including fill/`-c`/`-o` (smp 1/2). Ramfs `/bin`
+dents ~114/128.
 
 ## Suggested next steps
 
@@ -1946,6 +1953,6 @@ bite: `-x` fillrows.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `column -x` (fillrows) or other util flags on
-   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other util flags on existing `/bin` (`cp -p`
+   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

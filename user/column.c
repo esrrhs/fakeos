@@ -1,14 +1,15 @@
 /* fakeos userland - column: table + fill layout (thin).
  * Forms:
  *   column -t [-s SEP|-sSEP] [-o OSEP|-oOSEP] [FILE...]
- *   column [-c WIDTH|-cWIDTH] [FILE...]
+ *   column [-x] [-c WIDTH|-cWIDTH] [FILE...]
  * -t: size columns from input and pad fields into a table.
  * Default field split is runs of spaces/tabs. -s SEP treats each character
  * in SEP as a separator (empty fields kept). -o OSEP sets the output
  * column separator (default two spaces).
- * Without -t: fill mode — whitespace words arranged column-major into a
- * grid that fits -c WIDTH (default 80); two spaces between columns.
- * Glued -sSEP/-oOSEP/-toOSEP/-cN keep argv under EXEC_MAX_ARGC=8.
+ * Without -t: fill mode — whitespace words into a grid that fits -c WIDTH
+ * (default 80); two spaces between columns. Default fills columns first
+ * (column-major); -x fillrows uses row-major order.
+ * Glued -sSEP/-oOSEP/-toOSEP/-cN/-xcN/-cxN keep argv under EXEC_MAX_ARGC=8.
  * stdin if no FILE. Bounded: MAX_LINES x MAX_COLS / MAX_WORDS.
  */
 package user;
@@ -32,6 +33,7 @@ static int table_mode;
 static const char *sep = 0; /* NULL => whitespace runs */
 static const char *out_sep = "  "; /* between columns on output */
 static int out_width = 80; /* fill-mode output width (-c) */
+static int fillrows; /* -x: row-major fill */
 
 static char lines[MAX_LINES][LINE_MAX];
 static int nlines;
@@ -44,7 +46,7 @@ static char words[MAX_WORDS][FIELD_MAX];
 static int nwords;
 
 static void usage(void) {
-    u_write(2, "usage: column [-t [-s SEP] [-o OSEP] | -c WIDTH] [FILE...]\n", 59);
+    u_write(2, "usage: column [-t [-s SEP] [-o OSEP] | [-x] [-c WIDTH]] [FILE...]\n", 66);
 }
 
 static int is_ws(char c) {
@@ -208,7 +210,7 @@ static void emit_table(void) {
     }
 }
 
-/* Column-major fill: down each column, then next. Two spaces between cols. */
+/* Fill grid. Default column-major; -x fillrows is row-major. */
 static void emit_fill(void) {
     int maxlen = 0;
     int ncols, nrows;
@@ -230,18 +232,23 @@ static void emit_fill(void) {
 
     for (r = 0; r < nrows; r++) {
         for (c = 0; c < ncols; c++) {
-            idx = c * nrows + r;
+            if (fillrows) idx = r * ncols + c;
+            else idx = c * nrows + r;
             if (idx >= nwords) {
-                /* no more words in this / later cols for this row */
                 break;
             }
             w = (int)strlen(words[idx]);
             if (w > 0) u_write(1, words[idx], (unsigned long)w);
-            if (c + 1 < ncols && (c + 1) * nrows + r < nwords) {
-                int pad = maxlen - w;
-                if (pad < 0) pad = 0;
-                for (k = 0; k < pad; k++) u_write(1, " ", 1);
-                u_write(1, "  ", 2);
+            {
+                int more;
+                if (fillrows) more = (c + 1 < ncols) && (idx + 1 < nwords);
+                else more = (c + 1 < ncols) && ((c + 1) * nrows + r < nwords);
+                if (more) {
+                    int pad = maxlen - w;
+                    if (pad < 0) pad = 0;
+                    for (k = 0; k < pad; k++) u_write(1, " ", 1);
+                    u_write(1, "  ", 2);
+                }
             }
         }
         u_write(1, "\n", 1);
@@ -273,6 +280,11 @@ int main(int argc, char **argv) {
             i++;
             continue;
         }
+        if (strcmp(argv[i], "-x") == 0) {
+            fillrows = 1;
+            i++;
+            continue;
+        }
         if (strcmp(argv[i], "-c") == 0) {
             if (i + 1 >= argc) { usage(); return 1; }
             if (parse_pos(argv[i + 1], &out_width) != 0) { usage(); return 1; }
@@ -291,8 +303,40 @@ int main(int argc, char **argv) {
             i += 2;
             continue;
         }
-        if (argv[i][1] == 'c' && argv[i][2] != 0) {
-            if (parse_pos(argv[i] + 2, &out_width) != 0) { usage(); return 1; }
+        /* glued fill flags: -cN / -x / -xcN / -cxN */
+        if (argv[i][1] == 'c' || argv[i][1] == 'x') {
+            int j = 1;
+            int saw = 0;
+            while (argv[i][j]) {
+                if (argv[i][j] == 'x') {
+                    fillrows = 1;
+                    saw = 1;
+                    j++;
+                    continue;
+                }
+                if (argv[i][j] == 'c') {
+                    if (argv[i][j + 1] != 0) {
+                        if (parse_pos(argv[i] + j + 1, &out_width) != 0) {
+                            usage();
+                            return 1;
+                        }
+                        saw = 1;
+                        i++;
+                        goto next_arg;
+                    }
+                    if (i + 1 >= argc) { usage(); return 1; }
+                    if (parse_pos(argv[i + 1], &out_width) != 0) {
+                        usage();
+                        return 1;
+                    }
+                    saw = 1;
+                    i += 2;
+                    goto next_arg;
+                }
+                usage();
+                return 1;
+            }
+            if (!saw) { usage(); return 1; }
             i++;
             continue;
         }

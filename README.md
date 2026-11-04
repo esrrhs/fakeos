@@ -242,7 +242,7 @@ flowchart TD
 - [x] **/bin/fmt + /bin/which**：外部 `fmt [-w WIDTH]` 段落填行、`which CMD...` PATH 查找（shell-mirror；内建仍覆盖 builtin）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/cksum + /bin/sum**：外部 `cksum` POSIX CRC+长度、`sum [-r|-s]` BSD/SysV 校验和；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/strings**：外部 `strings [-a] [-n N]` 提取可打印串（默认长度 4，`-nN` 粘连）；供管道/脚本。virtio login smoke（smp 1/2）。
-- [x] **/bin/pr + /bin/column**：外部 `pr [-n][-t][-w N][-l N][-h HDR]` 分页抬头、`column [-t [-s SEP] [-o OSEP] | -c WIDTH]` 表格式/填充对齐；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/pr + /bin/column**：外部 `pr [-n][-t][-w N][-l N][-h HDR]` 分页抬头、`column [-t [-s SEP] [-o OSEP] | [-x] [-c WIDTH]]` 表格式/填充对齐；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/md5sum + /bin/sha1sum**：外部 `md5sum`/`sha1sum` 真实摘要（RFC 1321 / FIPS 180-1）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/sha256sum**：外部 `sha256sum` 真实 FIPS 180-4 SHA-256 摘要；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/base64**：外部 `base64 [-d] [FILE...]` 编码/解码（76 列换行；`-d` 忽略空白）；供管道/脚本。virtio login smoke（smp 1/2）。
@@ -381,6 +381,7 @@ flowchart TD
 - [x] **realpath/readlink -z**：结果以 NUL 结尾（`-z`；readlink 中优先于 `-n`；可与 find -print0 / xargs -0 配对）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **column -o**：输出列分隔符（`-o OSEP`/`-oOSEP`/`-toOSEP`；默认两空格；可与 `-s` 组合）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **column fill/-c**：无 `-t` 时按空白词列优先填充；`-c WIDTH`/`-cWIDTH` 输出宽度（默认 80）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **column -x**：fillrows 行优先填充（`-x`/`-xcN`/`-cxN`；可与 `-c` 组合）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
