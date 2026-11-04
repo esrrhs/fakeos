@@ -745,15 +745,28 @@ remains print-only — smoke uses `/bin/env`. Focused virtio login smoke covers
 `/bin/env`, `-i`, `-i A=1`, `-i A=1 /bin/env`, `-u USER /bin/env`, Ext2, prior
 greens (smp 1/2). Ramfs `/bin` dents 106/128.
 
+## /bin/ls -l polish — landed
+
+Thin POSIX ls polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred). `/bin/ls` gains `-a` / `-A` / `-d`, glued short options (`-la`,
+`-ald`, …), and multi-PATH operands (directory `path:` headers when more than
+one PATH). Default hides names starting with `.` (POSIX). `-a` synthesizes
+`.` / `..` because Ramfs/Ext2 `getdents` omit them; `-A` shows other hidden
+names without `.`/`..`. Long format adds `nlink` (`mode nlink uid gid size
+mtime name`). Focused virtio login smoke covers default hide, `-a`/`-A`/`-ld`/
+`-la`/nlink/multi-PATH, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents
+106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`env -i/-u` + `cat -n`/`-b` + `tail
-   -q`/`-v` + `nice`/`arch`/`time` + `printf` `%b`/`\c` + `pwd -L`/`-P` + …):
-   prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
-   `touch -r`/`-d` if utimens arrive. Candidates: `/bin/ls -l` polish,
-   `/bin/yes --version` skip, `/bin/mkfifo` only if `mknod` exists.
-   uniq/sort `-c/-d/-u`/`-r/-n` and `ln -s` already present. Avoid deep jbd /
-   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`ls -a/-A/-d` + nlink + `env -i/-u`
+   + `cat -n`/`-b` + `tail -q`/`-v` + …): prefer small coherent chunks; thin
+   `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
+   Candidates: skip `yes --version` fluff; `/bin/mkfifo` only if `mknod`
+   exists. uniq/sort `-c/-d/-u`/`-r/-n` and `ln -s` already present. Avoid deep
+   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized
+   fix.

@@ -1,7 +1,11 @@
-/* fakeos userland - ls: list one directory (default: current directory).
- * Parses the kernel's fixed 48-byte dirent records (name at offset 19).
- * Optional -l uses fstatat for mode/uid/gid/size/mtime; symlinks show
- * `name -> target` via readlink. File operands print one entry.
+/* fakeos userland - ls: list directory entries or file operands.
+ * Forms: ls [-a|-A] [-d] [-l] [PATH...]
+ * Default: hide names starting with '.' (POSIX). -a shows all including
+ * . and ..; -A shows almost all (hidden but not ./..). -d lists a directory
+ * itself rather than its contents. -l uses fstatat for
+ * mode/nlink/uid/gid/size/mtime; symlinks show `name -> target` via readlink.
+ * Glued flags (-la, -ald, ...) accepted. Multi-PATH: dirs get a `path:`
+ * header when more than one PATH is given. Compact argv for EXEC_MAX_ARGC=8.
  * Ownership and mtime come from live inode fields (chown + write stamps). */
 package user;
 
@@ -19,6 +23,7 @@ extern void printf(const char *fmt, ...);
 
 /* Linux x86-64 struct stat field offsets (144 bytes). */
 enum {
+    ST_NLINK = 16,
     ST_MODE = 24,
     ST_UID = 28,
     ST_GID = 32,
@@ -28,11 +33,13 @@ enum {
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
     S_IFCHR = 0x2000,
+    S_IFBLK = 0x6000,
     S_IFIFO = 0x1000,
     S_IFSOCK = 0xC000,
     S_IFLNK = 0xA000,
     AT_SYMLINK_NOFOLLOW = 0x100,
-    AT_EMPTY_PATH = 0x1000
+    AT_EMPTY_PATH = 0x1000,
+    MAX_PATHS = 8
 };
 
 static unsigned int load_u32(const char *p) {
@@ -87,6 +94,9 @@ static char mode_type_char(unsigned int mode) {
     if (t == S_IFCHR) {
         return 'c';
     }
+    if (t == S_IFBLK) {
+        return 'b';
+    }
     if (t == S_IFIFO) {
         return 'p';
     }
@@ -131,79 +141,132 @@ static const char *basename_of(const char *path) {
     return base;
 }
 
-static void print_name_long(const char *dirpath, const char *name,
+static int is_dot_or_dotdot(const char *name) {
+    if (name[0] != '.') {
+        return 0;
+    }
+    if (name[1] == 0) {
+        return 1;
+    }
+    return name[1] == '.' && name[2] == 0;
+}
+
+static int show_name(const char *name, int show_all, int almost_all) {
+    if (show_all) {
+        return 1;
+    }
+    if (almost_all) {
+        return !is_dot_or_dotdot(name);
+    }
+    return name[0] != '.';
+}
+
+/* linkpath: path passed to readlink for symlinks; name: display name. */
+static void print_name_long(const char *linkpath, const char *name,
                             const char *stbuf) {
     char mstr[12];
     unsigned int mode;
+    unsigned int nlink;
     unsigned int uid;
     unsigned int gid;
     unsigned long size;
     unsigned long mtime;
     mode = load_u32(stbuf + ST_MODE);
+    nlink = (unsigned int)load_u64(stbuf + ST_NLINK);
     uid = load_u32(stbuf + ST_UID);
     gid = load_u32(stbuf + ST_GID);
     size = load_u64(stbuf + ST_SIZE);
     mtime = load_u64(stbuf + ST_MTIME);
     mode_string(mode, mstr);
-    /* mode uid gid size mtime name  (mtime = boot-relative seconds) */
+    /* mode nlink uid gid size mtime name  (mtime = boot-relative seconds) */
     if ((mode & S_IFMT) == S_IFLNK) {
-        char full[96];
         char tgt[96];
         long rn;
-        join_dir_name(full, sizeof(full), dirpath, name);
-        rn = u_readlink(full, tgt, sizeof(tgt) - 1);
+        rn = u_readlink(linkpath, tgt, sizeof(tgt) - 1);
         if (rn >= 0) {
             tgt[rn] = 0;
-            printf("%s %u %u %u %u %s -> %s\n", mstr, uid, gid,
+            printf("%s %u %u %u %u %u %s -> %s\n", mstr, nlink, uid, gid,
                    (unsigned int)size, (unsigned int)mtime, name, tgt);
         } else {
-            printf("%s %u %u %u %u %s -> ?\n", mstr, uid, gid,
+            printf("%s %u %u %u %u %u %s -> ?\n", mstr, nlink, uid, gid,
                    (unsigned int)size, (unsigned int)mtime, name);
         }
     } else if ((mode & S_IFMT) == S_IFDIR) {
-        printf("%s %u %u %u %u %s/\n", mstr, uid, gid,
+        printf("%s %u %u %u %u %u %s/\n", mstr, nlink, uid, gid,
                (unsigned int)size, (unsigned int)mtime, name);
     } else {
-        printf("%s %u %u %u %u %s\n", mstr, uid, gid,
+        printf("%s %u %u %u %u %u %s\n", mstr, nlink, uid, gid,
                (unsigned int)size, (unsigned int)mtime, name);
     }
 }
 
-int main(int argc, char **argv) {
-    const char *path = ".";
-    int longfmt = 0;
-    int ai;
+static void print_name_short(const char *name, int is_dir) {
+    unsigned long k = 0;
+    while (name[k] != 0) {
+        k++;
+    }
+    u_write(1, name, k);
+    if (is_dir) {
+        u_write(1, "/", 1);
+    }
+    u_write(1, "\n", 1);
+}
+
+static int list_one(const char *path, int longfmt, int dir_as_file,
+                    int show_all, int almost_all, int print_header) {
     char buf[1920];
     char stbuf[ST_SIZE_BYTES];
     long fd;
     long n;
-
-    for (ai = 1; ai < argc; ai++) {
-        if (argv[ai][0] == '-' && argv[ai][1] == 'l' && argv[ai][2] == 0) {
-            longfmt = 1;
-        } else {
-            path = argv[ai];
-        }
-    }
+    unsigned int mode;
 
     fd = u_open(path, 0, 0);
     if (fd < 0) {
         printf("ls: %s: no such file or directory\n", path);
         return 1;
     }
-    if (u_newfstatat(fd, "", stbuf, AT_EMPTY_PATH) == 0) {
-        unsigned int mode = load_u32(stbuf + ST_MODE);
-        if ((mode & S_IFMT) != S_IFDIR) {
-            const char *base = basename_of(path);
+    if (u_newfstatat(fd, "", stbuf, AT_EMPTY_PATH) != 0) {
+        printf("ls: %s: stat failed\n", path);
+        u_close(fd);
+        return 1;
+    }
+    mode = load_u32(stbuf + ST_MODE);
+    if (dir_as_file || (mode & S_IFMT) != S_IFDIR) {
+        const char *base = basename_of(path);
+        if (longfmt) {
+            print_name_long(path, base, stbuf);
+        } else {
+            print_name_short(base, (mode & S_IFMT) == S_IFDIR);
+        }
+        u_close(fd);
+        return 0;
+    }
+
+    if (print_header) {
+        printf("%s:\n", path);
+    }
+
+    /* Ramfs/Ext2 getdents omit synthetic ./.. ; emit them for -a. */
+    if (show_all) {
+        const char *dots[2];
+        int di;
+        dots[0] = ".";
+        dots[1] = "..";
+        for (di = 0; di < 2; di++) {
             if (longfmt) {
-                print_name_long(".", base, stbuf);
+                if (u_newfstatat(fd, dots[di], stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
+                    printf("?????????? 0 0 0 0 0 %s\n", dots[di]);
+                } else {
+                    char full[96];
+                    join_dir_name(full, sizeof(full), path, dots[di]);
+                    print_name_long(full, dots[di], stbuf);
+                }
             } else {
-                printf("%s\n", base);
+                print_name_short(dots[di], 1);
             }
-            u_close(fd);
-            return 0;
         }
     }
+
     for (;;) {
         long off;
         n = u_getdents(fd, buf, sizeof(buf));
@@ -212,28 +275,108 @@ int main(int argc, char **argv) {
         }
         for (off = 0; off + 48 <= n; off += 48) {
             char name[32];
+            char full[96];
             unsigned long k = 0;
             while (k < 29 && buf[off + 19 + k] != 0) {
                 name[k] = buf[off + 19 + k];
                 k++;
             }
             name[k] = 0;
+            /* Skip kernel-provided ./.. if any; -a already printed them. */
+            if (is_dot_or_dotdot(name)) {
+                continue;
+            }
+            if (!show_name(name, show_all, almost_all)) {
+                continue;
+            }
             if (longfmt) {
                 if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
-                    printf("?????????? 0 %s\n", name);
+                    printf("?????????? 0 0 0 0 0 %s\n", name);
                     continue;
                 }
-                print_name_long(path, name, stbuf);
+                join_dir_name(full, sizeof(full), path, name);
+                print_name_long(full, name, stbuf);
             } else {
-                if (buf[off + 18] == 4) {
-                    name[k++] = '/';
-                    name[k] = 0;
-                }
-                u_write(1, name, k);
-                u_write(1, "\n", 1);
+                print_name_short(name, buf[off + 18] == 4);
             }
         }
     }
     u_close(fd);
     return 0;
+}
+
+static void usage(void) {
+    u_write(2, "usage: ls [-a|-A] [-d] [-l] [PATH...]\n", 39);
+}
+
+int main(int argc, char **argv) {
+    int longfmt = 0;
+    int dir_as_file = 0;
+    int show_all = 0;
+    int almost_all = 0;
+    const char *paths[MAX_PATHS];
+    int npaths = 0;
+    int ai;
+    int i;
+    int rc = 0;
+    int headers;
+
+    for (ai = 1; ai < argc; ai++) {
+        const char *a = argv[ai];
+        if (a[0] == '-' && a[1] != 0) {
+            int j;
+            /* bare "-" is a PATH (cwd); glued flags otherwise */
+            if (a[1] == '-' && a[2] == 0) {
+                ai++;
+                break;
+            }
+            for (j = 1; a[j] != 0; j++) {
+                if (a[j] == 'l') {
+                    longfmt = 1;
+                } else if (a[j] == 'a') {
+                    show_all = 1;
+                    almost_all = 0;
+                } else if (a[j] == 'A') {
+                    if (!show_all) {
+                        almost_all = 1;
+                    }
+                } else if (a[j] == 'd') {
+                    dir_as_file = 1;
+                } else {
+                    usage();
+                    return 1;
+                }
+            }
+        } else {
+            if (npaths >= MAX_PATHS) {
+                u_write(2, "ls: too many paths\n", 19);
+                return 1;
+            }
+            paths[npaths++] = a;
+        }
+    }
+    for (; ai < argc; ai++) {
+        if (npaths >= MAX_PATHS) {
+            u_write(2, "ls: too many paths\n", 19);
+            return 1;
+        }
+        paths[npaths++] = argv[ai];
+    }
+
+    if (npaths == 0) {
+        paths[0] = ".";
+        npaths = 1;
+    }
+
+    headers = (npaths > 1) && !dir_as_file;
+    for (i = 0; i < npaths; i++) {
+        if (i > 0 && headers) {
+            u_write(1, "\n", 1);
+        }
+        if (list_one(paths[i], longfmt, dir_as_file, show_all, almost_all,
+                     headers)) {
+            rc = 1;
+        }
+    }
+    return rc;
 }
