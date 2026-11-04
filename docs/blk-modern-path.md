@@ -1433,6 +1433,15 @@ no existence check). Keeps `hash -r`, bare list (`NAME=PATH`), and
 smoke covers `-p`/list/`-r` + prior greens including declare (smp 1/2).
 Ramfs `/bin` dents ~114/128.
 
+## shell hash -t/-l — landed
+
+Thin `hash -t NAME…` prints remembered path(s) (single name → path only;
+multiple → `NAME\tPATH`; missing → error, no PATH walk). `hash -l [NAME…]`
+lists reusable `hash -p PATH NAME` lines; `-lt` prints tab form for the
+table/filter. No new `/bin` dent. Focused virtio login smoke covers
+`-t`/`-l`/`-lt` + prior greens including `hash -p` (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1440,7 +1449,7 @@ Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `hash -t`/`hash -l` list form, or other
-   small `/bin`/shell bites (`set --` still deferred until positional
-   frames; skip large `getopts` / here-doc / trap; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: other small `/bin`/shell bites (`set --`
+   still deferred until positional frames; skip large `getopts` / here-doc
+   / trap / `fc` / `bind` / `=~`; `ulimit`/`times` need kernel
+   rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
