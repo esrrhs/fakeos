@@ -423,6 +423,7 @@ def main():
         "[FS] published /bin/hostname (",
         "[FS] published /bin/echo (",
         "[FS] published /bin/sleep (",
+        "[FS] published /bin/truncate (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

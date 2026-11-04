@@ -340,13 +340,20 @@ without relying on the builtin. Focused virtio login smoke covers
 `/bin/sleep 0`/`1`, usage/invalid, `xargs /bin/sleep`, plus prior interactive
 greens (smp 1/2).
 
+## /bin/truncate — landed
+
+Thin `truncate -s SIZE FILE...` via `open(2)` + `ftruncate(2)` (Ext2/Ramfs).
+SIZE is a non-negative decimal integer with optional `k`/`K`/`b`/`B`/`M`
+suffixes (same as dd). Missing files are created (0644). Focused virtio login
+smoke covers shrink/grow/zero/create, usage/invalid, plus prior interactive
+greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin `/bin/truncate` (Ext2 ftruncate already exists),
-   other POSIX coreutils / kernel bits after README scan (higher value than
-   deep jbd). Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless
-   a clear bite-sized fix.
+4. More daily-driver gaps: other thin POSIX coreutils / kernel bits after
+   README scan (higher value than deep jbd). Avoid deep jbd / Ext2-redirect
+   duplex races / CFS nesting unless a clear bite-sized fix.

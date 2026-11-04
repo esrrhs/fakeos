@@ -88,6 +88,8 @@ extern char user_echo_start;
 extern char user_echo_end;
 extern char user_sleep_start;
 extern char user_sleep_end;
+extern char user_truncate_start;
+extern char user_truncate_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -182,6 +184,7 @@ void rootfs_publish(void) {
     publish_one("/bin/hostname", (u64)(&user_hostname_start), (u64)(&user_hostname_end));
     publish_one("/bin/echo", (u64)(&user_echo_start), (u64)(&user_echo_end));
     publish_one("/bin/sleep", (u64)(&user_sleep_start), (u64)(&user_sleep_end));
+    publish_one("/bin/truncate", (u64)(&user_truncate_start), (u64)(&user_truncate_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));
     publish_one("/bin/dumpbin", (u64)(&user_dumpbin_start), (u64)(&user_dumpbin_end));
