@@ -1523,6 +1523,15 @@ stays in one place. No new `/bin` dent. Focused virtio login smoke covers
 `kill -l` / `-l 15` / `-l TERM` + prior greens (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## tr -s — landed
+
+`/bin/tr` gains `-s` squeeze: collapse consecutive repeats of chars in the
+last SET (`tr -s SET`, `tr -s SET1 SET2` translate-then-squeeze SET2,
+`tr -ds SET1 SET2` delete then squeeze). Glued `-cs`/`-ds`/`-cds` ok with
+existing `-c`/`-d`. No new `/bin` dent. Focused virtio login smoke covers
+`tr -s` / `-s` translate / `-ds` + prior greens including kill -l
+(smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1531,6 +1540,7 @@ dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags / thin `/bin` with dent
-   room (`set --` still deferred; skip large `getopts` / here-doc / trap /
-   `fc` / `bind` / `=~` / `select` / `coproc`; `ulimit`/`times` need
-   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   room (`uniq -d/-u` already present; `set --` still deferred; skip large
+   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
+   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

@@ -1,7 +1,9 @@
-/* fakeos userland - tr: translate or delete characters (thin POSIX subset).
+/* fakeos userland - tr: translate, delete, or squeeze characters (thin POSIX).
  * Forms: tr SET1 SET2 | tr -d SET1 | tr -c SET1 SET2 | tr -cd SET1
- * -c/-C complement SET1. Glued -cd/-dc/-c accepted.
- * Sets: literals, ranges a-z, and \\ \n \t \r \0 escapes. stdin -> stdout.
+ *        tr -s SET | tr -s SET1 SET2 | tr -ds SET1 SET2 | tr -cs SET1 SET2
+ * -c/-C complement SET1. -s squeeze consecutive repeats (last SET).
+ * Glued -cd/-ds/-cs/-cds accepted. Sets: literals, ranges a-z, \\ \n \t \r \0.
+ * stdin -> stdout. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -12,7 +14,7 @@ extern int strcmp(const char *a, const char *b);
 enum { SET_MAX = 512 };
 
 static void usage(void) {
-    u_write(2, "usage: tr [-c] SET1 SET2 | tr -d[-c] SET1\n", 44);
+    u_write(2, "usage: tr [-cs] SET1 [SET2] | tr -d[-cs] SET1 [SET2]\n", 52);
 }
 
 /* Expand SET into out[]; return count, or -1 on error. */
@@ -84,9 +86,16 @@ static int complement_set(const unsigned char *set1, int n1,
     return n;
 }
 
+static void mark_set(unsigned char *bitmap, const unsigned char *set, int n) {
+    int k;
+    for (k = 0; k < 256; k++) bitmap[k] = 0;
+    for (k = 0; k < n; k++) bitmap[set[k]] = 1;
+}
+
 int main(int argc, char **argv) {
     int delete_mode = 0;
     int complement = 0;
+    int squeeze = 0;
     int i = 1;
     unsigned char set1[SET_MAX];
     unsigned char set1c[256];
@@ -97,9 +106,13 @@ int main(int argc, char **argv) {
     int n2 = 0;
     unsigned char map[256];
     unsigned char del[256];
+    unsigned char sq[256];
     char buf[512];
     long n;
     int k;
+    int have_prev = 0;
+    unsigned char prev = 0;
+    int nset_args;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         int j;
@@ -111,6 +124,7 @@ int main(int argc, char **argv) {
             char o = argv[i][j];
             if (o == 'd') delete_mode = 1;
             else if (o == 'c' || o == 'C') complement = 1;
+            else if (o == 's') squeeze = 1;
             else {
                 usage();
                 return 1;
@@ -120,49 +134,41 @@ int main(int argc, char **argv) {
     }
     if (i < argc && strcmp(argv[i], "--") == 0) i++;
 
+    nset_args = argc - i;
+    /* Arg counts (POSIX-ish):
+     *   tr SET1 SET2
+     *   tr -s SET1
+     *   tr -s SET1 SET2
+     *   tr -d SET1
+     *   tr -ds SET1 SET2
+     *   tr -c SET1 SET2 / tr -cd SET1 / tr -cs SET1 SET2 / tr -cds SET1 SET2
+     */
     if (delete_mode) {
-        if (i + 1 != argc) {
-            usage();
-            return 1;
-        }
-        n1 = expand_set(argv[i], set1, SET_MAX);
-        if (n1 < 0) {
-            usage();
-            return 1;
-        }
-        if (complement) {
-            n1u = complement_set(set1, n1, set1c, 256);
-            if (n1u < 0) {
-                usage();
-                return 1;
-            }
-            use1 = set1c;
-            n1 = n1u;
+        if (squeeze) {
+            if (nset_args != 2) { usage(); return 1; }
         } else {
-            use1 = set1;
+            if (nset_args != 1) { usage(); return 1; }
         }
-        for (k = 0; k < 256; k++) del[k] = 0;
-        for (k = 0; k < n1; k++) del[use1[k]] = 1;
-        while ((n = u_read(0, buf, sizeof(buf))) > 0) {
-            long j;
-            for (j = 0; j < n; j++) {
-                unsigned char c = (unsigned char)buf[j];
-                if (!del[c]) u_write(1, &buf[j], 1);
-            }
-        }
-        return n < 0 ? 1 : 0;
+    } else if (squeeze && nset_args == 1) {
+        /* squeeze-only */
+    } else if (nset_args != 2) {
+        usage();
+        return 1;
     }
 
-    if (i + 2 != argc) {
-        usage();
-        return 1;
-    }
     n1 = expand_set(argv[i], set1, SET_MAX);
-    n2 = expand_set(argv[i + 1], set2, SET_MAX);
-    if (n1 < 0 || n2 <= 0) {
+    if (n1 < 0) {
         usage();
         return 1;
     }
+    if (nset_args == 2) {
+        n2 = expand_set(argv[i + 1], set2, SET_MAX);
+        if (n2 < 0 || (!delete_mode && n2 <= 0)) {
+            usage();
+            return 1;
+        }
+    }
+
     if (complement) {
         n1u = complement_set(set1, n1, set1c, 256);
         if (n1u < 0) {
@@ -174,20 +180,53 @@ int main(int argc, char **argv) {
     } else {
         use1 = set1;
     }
-    /* POSIX: if SET2 shorter, reuse its last char. */
-    for (k = 0; k < 256; k++) map[k] = (unsigned char)k;
-    for (k = 0; k < n1; k++) {
-        unsigned char to;
-        if (k < n2) to = set2[k];
-        else to = set2[n2 - 1];
-        map[use1[k]] = to;
+
+    /* Squeeze bitmap: last SET when two args; SET1 when squeeze-only. */
+    for (k = 0; k < 256; k++) sq[k] = 0;
+    if (squeeze) {
+        if (nset_args == 2) mark_set(sq, set2, n2);
+        else mark_set(sq, use1, n1);
     }
+
+    if (delete_mode) {
+        for (k = 0; k < 256; k++) del[k] = 0;
+        for (k = 0; k < n1; k++) del[use1[k]] = 1;
+        while ((n = u_read(0, buf, sizeof(buf))) > 0) {
+            long j;
+            for (j = 0; j < n; j++) {
+                unsigned char c = (unsigned char)buf[j];
+                if (del[c]) continue;
+                if (squeeze && have_prev && c == prev && sq[c]) continue;
+                u_write(1, &buf[j], 1);
+                prev = c;
+                have_prev = 1;
+            }
+        }
+        return n < 0 ? 1 : 0;
+    }
+
+    /* Identity map, then overlay SET1→SET2 when translating. */
+    for (k = 0; k < 256; k++) map[k] = (unsigned char)k;
+    if (nset_args == 2) {
+        /* POSIX: if SET2 shorter, reuse its last char. */
+        for (k = 0; k < n1; k++) {
+            unsigned char to;
+            if (k < n2) to = set2[k];
+            else to = set2[n2 - 1];
+            map[use1[k]] = to;
+        }
+    }
+
     while ((n = u_read(0, buf, sizeof(buf))) > 0) {
         long j;
         for (j = 0; j < n; j++) {
             unsigned char c = map[(unsigned char)buf[j]];
-            char outc = (char)c;
+            char outc;
+            if (squeeze && have_prev && c == prev && sq[c]) continue;
+            outc = (char)c;
             u_write(1, &outc, 1);
+            prev = c;
+            have_prev = 1;
         }
     }
     return n < 0 ? 1 : 0;
