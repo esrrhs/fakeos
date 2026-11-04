@@ -220,7 +220,7 @@ flowchart TD
 - [x] **/bin/nc select duplex + shutdown**：TCP/UDP 已连接路径用 `select` 在 stdin↔sock 全双工转发；TCP stdin EOF 时 `shutdown(SHUT_WR)` 半关闭并继续读至对端 FIN；UDP listen 对最近 peer 回程，stdin EOF 退出。virtio login smoke（smp 1/2）。
 - [x] **/bin/tail + /bin/grep + /bin/printf**：`tail [-n N]|-N` 默认 10 行（环缓）；`grep [-ivnF]` 定串行过滤（无 BRE）；`printf FORMAT` 支持 `\n/\t/\r` 等转义与 `%s/%d/%u/%x/%c/%%`。virtio login smoke（smp 1/2）。
 - [x] **/bin/tee + /bin/basename + /bin/dirname**：`tee [-a] [FILE...]` 把 stdin 同时写到 stdout 与文件（`-a` 追加）；`basename PATH [SUFFIX]` / `dirname PATH` 路径分量。virtio login smoke（smp 1/2）。
-- [x] **/bin/true + /bin/false + /bin/seq**：`true`/`false` 退出码 0/1；`seq [-s SEP] LAST|FIRST LAST|FIRST INCREMENT LAST` 整数序列。virtio login smoke（smp 1/2）。
+- [x] **/bin/true + /bin/false + /bin/seq**：`true`/`false` 退出码 0/1；`seq [-w][-s SEP] LAST|FIRST LAST|FIRST INCREMENT LAST` 整数序列（`-w` 等宽零填充）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cut + /bin/tr**：`cut -c LIST` / `cut -f LIST [-d DELIM] [-s]` 按字符或字段裁剪；`tr SET1 SET2` / `tr -d SET` 字符转换/删除（支持 `a-z` 与 `\n\t\r`）。virtio login smoke（smp 1/2）。
 - [x] **/bin/test + /bin/[**：薄 POSIX `test`/`[`（退出 0/1/2）；一元 `-e/-f/-d/-h/-L/-s/-r/-w/-x/-z/-n` 与 `-b/-c/-p/-S`；二元 `=`/`!=`/`-eq/-ne/-lt/-le/-gt/-ge`；单层 `!`；`[` 要求收尾 `]`。virtio login smoke（smp 1/2）。
 - [x] **/bin/uniq + /bin/sort**：`uniq [-c][-d][-u]` 折叠连续重复行；`sort [-r][-n]` 字典序/数值排序（内存载入）。virtio login smoke（smp 1/2）。
@@ -255,7 +255,7 @@ flowchart TD
 - [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir [-p] DIR...`（空目录；`-p` 清空父分量；shell-mirror 同步）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
 - [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
-- [x] **/bin/find + /bin/du**：薄树遍历；`find [PATH...] [-name GLOB] [-type f|d] [-print]`（basename `*`/`?` glob；`lstat`；默认 `.`）；`du [-a][-s] [FILE...]` 表观大小（1024B 单位）。virtio login smoke（smp 1/2）。
+- [x] **/bin/find + /bin/du**：薄树遍历；`find [PATH...] [-name GLOB] [-type f|d] [-print]`（basename `*`/`?` glob；`lstat`；默认 `.`）；`du [-a][-s][-h] [FILE...]` 表观大小（默认 1024B 单位；`-h` 人类可读 K/M/G）。virtio login smoke（smp 1/2）。
 - [x] **/bin/shuf + head/tail -c**：`shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]` Fisher-Yates 行乱序（clock+pid 种子）；`head`/`tail` 增加 `-c N`/`-cN` 字节模式（`tail -c` 可 seek 走 lseek+fstat，否则字节环）。virtio login smoke（smp 1/2）。
 - [x] **wc -L + dirname multi-arg**：`wc` 增加 `-L`/`-lwcL` 最长行字节长度（默认仍为行/词/字节）；`dirname PATH...` 支持多操作数逐行输出（GNU 多参）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/diff**：薄行级比较（`diff [-uq] FILE1 FILE2`；默认 classic a/c/d；`-u` unified；`-q` brief；退出 0/1/2；`cmp` 已覆盖字节比较）。virtio login smoke（smp 1/2）。
@@ -267,6 +267,7 @@ flowchart TD
 - [x] **/bin/readlink -n/-f + /bin/which -a**：`readlink` 增加 `-n`（无尾换行）/`-f`（物理路径，与 `/bin/realpath` 同算法；非符号链接也可）；`which -a` 打印 PATH 上全部匹配。粘连短选项；无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **grep -c + tr -c**：`grep` 增加 `-c`（匹配行计数；多文件 `name:count`；抑制行输出；可与 `-ivnF` 粘连）；`tr` 增加 `-c`/`-C`（补集）与粘连 `-cd`/`-dc`（`tr -cd SET` 仅保留 SET）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **date +FORMAT + stat -c**：`date` 支持 `+FORMAT`（启动相对秒当 epoch 填日历字段；`%s/%N/%Y/%m/%d/%H/%M/%S/%y/%%`）；`stat` 增加 `-c FORMAT`/`-cFORMAT`/`-Lc`（`%n%s%i%a%f%F%h%u%g%Y%%`）。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **seq -w + du -h**：`seq` 增加 `-w`（等宽前导零，宽度取端点十进制宽度）；`du` 增加 `-h`（1024 幂整数人类可读：裸字节/`K`/`M`/`G`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/ls -l polish**：`ls` 增加 `-a`/`-A`/`-d`、粘连短选项、多 PATH（多目录打印 `path:` 头）；默认隐藏 `.` 前缀名；`-a` 合成输出 `.`/`..`（getdents 无此项）；`-l` 增加 `nlink`（`mode nlink uid gid size mtime name`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。

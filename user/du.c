@@ -1,9 +1,10 @@
 /* fakeos userland - du: summarize file/directory space (thin).
- *   du [-a] [-s] [FILE...]
- * Apparent size via lstat st_size, reported in 1024-byte units (ceil).
+ *   du [-a] [-s] [-h] [FILE...]
+ * Apparent size via lstat st_size. Default: 1024-byte units (ceil).
+ * -h: human-readable (integer 1024 powers: bare / K / M / G).
  * Default: print each subdirectory total + top-level. -a also prints files.
  * -s: summary only (one line per operand). Default operand: ".".
- * No -h/-d/hardlink dedup. Compact argv for EXEC_MAX_ARGC=8.
+ * No -d/hardlink dedup. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -35,6 +36,7 @@ enum {
 
 static int opt_all;
 static int opt_summarize;
+static int opt_human;
 static int err_rc;
 
 static unsigned int load_u32(const char *p) {
@@ -84,7 +86,32 @@ static void join_path(char *out, unsigned long cap, const char *dir,
     out[i] = 0;
 }
 
+static void emit_human(unsigned long bytes, const char *path) {
+    unsigned long v;
+    char suf;
+    /* Integer 1024 powers; no decimals (thin). */
+    if (bytes < 1024UL) {
+        printf("%u\t%s\n", (unsigned int)bytes, path);
+        return;
+    }
+    if (bytes < 1024UL * 1024UL) {
+        v = (bytes + 1023UL) / 1024UL;
+        suf = 'K';
+    } else if (bytes < 1024UL * 1024UL * 1024UL) {
+        v = (bytes + 1024UL * 1024UL - 1UL) / (1024UL * 1024UL);
+        suf = 'M';
+    } else {
+        v = (bytes + 1024UL * 1024UL * 1024UL - 1UL) / (1024UL * 1024UL * 1024UL);
+        suf = 'G';
+    }
+    printf("%u%c\t%s\n", (unsigned int)v, suf, path);
+}
+
 static void emit(unsigned long bytes, const char *path) {
+    if (opt_human) {
+        emit_human(bytes, path);
+        return;
+    }
     printf("%u\t%s\n", (unsigned int)to_kib(bytes), path);
 }
 
@@ -178,8 +205,10 @@ int main(int argc, char **argv) {
                 opt_all = 1;
             } else if (o[j] == 's') {
                 opt_summarize = 1;
+            } else if (o[j] == 'h') {
+                opt_human = 1;
             } else {
-                u_write(2, "usage: du [-a] [-s] [FILE...]\n", 30);
+                u_write(2, "usage: du [-a] [-s] [-h] [FILE...]\n", 35);
                 return 1;
             }
         }

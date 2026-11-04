@@ -1,13 +1,16 @@
 /* fakeos userland - seq: print integer sequences (thin POSIX subset).
  * Forms: seq LAST | seq FIRST LAST | seq FIRST INCREMENT LAST
- * Option: -s SEPARATOR (default newline). Always ends with a newline.
+ * Options: -s SEPARATOR (default newline); -w equal-width zero pad
+ * (width = max decimal width of endpoints, including '-'). Always ends
+ * with a newline. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
-extern void printf(const char *fmt, ...);
+
+static int opt_w;
 
 static int parse_long(const char *s, long *out) {
     long v = 0;
@@ -32,12 +35,71 @@ static int parse_long(const char *s, long *out) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: seq [-s SEP] LAST | FIRST LAST | FIRST INCREMENT LAST\n", 61);
+    u_write(2, "usage: seq [-w] [-s SEP] LAST | FIRST LAST | FIRST INCREMENT LAST\n", 68);
 }
 
 static void write_sep(const char *sep) {
     unsigned long n = strlen(sep);
     if (n > 0) u_write(1, sep, n);
+}
+
+/* Decimal character width of v, including leading '-' for negatives. */
+static int num_width(long v) {
+    int w = 0;
+    unsigned long u;
+    if (v < 0) {
+        w = 1;
+        u = (unsigned long)(-(v + 1)) + 1UL;
+    } else {
+        u = (unsigned long)v;
+    }
+    if (u == 0) return w + 1;
+    while (u > 0) {
+        w++;
+        u /= 10UL;
+    }
+    return w;
+}
+
+static void emit_num(long v, int width) {
+    char tmp[24];
+    int i = 0;
+    int k;
+    int neg = 0;
+    unsigned long u;
+    int digits;
+    int pad;
+
+    if (v < 0) {
+        neg = 1;
+        u = (unsigned long)(-(v + 1)) + 1UL;
+    } else {
+        u = (unsigned long)v;
+    }
+    if (u == 0) {
+        tmp[i++] = '0';
+    } else {
+        while (u > 0 && i < 24) {
+            tmp[i++] = (char)('0' + (u % 10UL));
+            u /= 10UL;
+        }
+    }
+    digits = i;
+    if (opt_w && width > 0) {
+        pad = width - digits - neg;
+        if (pad < 0) pad = 0;
+        if (neg) u_write(1, "-", 1);
+        while (pad > 0) {
+            u_write(1, "0", 1);
+            pad--;
+        }
+    } else if (neg) {
+        u_write(1, "-", 1);
+    }
+    for (k = digits - 1; k >= 0; k--) {
+        char c = tmp[k];
+        u_write(1, &c, 1);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -49,10 +111,15 @@ int main(int argc, char **argv) {
     long nnums;
     long cur;
     int first_out = 1;
+    int width = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         /* Negative numbers are operands, not options. */
         if (argv[i][1] >= '0' && argv[i][1] <= '9') break;
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
         if (strcmp(argv[i], "-s") == 0) {
             if (i + 1 >= argc) {
                 usage();
@@ -60,14 +127,43 @@ int main(int argc, char **argv) {
             }
             sep = argv[i + 1];
             i += 2;
-        } else if (strcmp(argv[i], "--") == 0) {
+            continue;
+        }
+        if (strcmp(argv[i], "-w") == 0) {
+            opt_w = 1;
             i++;
-            break;
-        } else {
-            usage();
-            return 1;
+            continue;
+        }
+        /* Glued shorts: -w, -wsSEP, -sw with following SEP, etc. */
+        {
+            const char *o = argv[i] + 1;
+            int j = 0;
+            while (o[j] != 0) {
+                if (o[j] == 'w') {
+                    opt_w = 1;
+                    j++;
+                } else if (o[j] == 's') {
+                    if (o[j + 1] != 0) {
+                        sep = o + j + 1;
+                        i++;
+                        goto opts_done;
+                    }
+                    if (i + 1 >= argc) {
+                        usage();
+                        return 1;
+                    }
+                    sep = argv[i + 1];
+                    i += 2;
+                    goto opts_done;
+                } else {
+                    usage();
+                    return 1;
+                }
+            }
+            i++;
         }
     }
+opts_done:
 
     nnums = argc - i;
     if (nnums == 1) {
@@ -102,11 +198,17 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (opt_w) {
+        int w1 = num_width(first);
+        int w2 = num_width(last);
+        width = w1 > w2 ? w1 : w2;
+    }
+
     cur = first;
     for (;;) {
         if (!first_out) write_sep(sep);
         first_out = 0;
-        printf("%d", (int)cur);
+        emit_num(cur, width);
         if (step > 0) {
             if (cur > last - step) break;
             cur = cur + step;

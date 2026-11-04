@@ -220,9 +220,9 @@ login smoke covers the three plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2)
 
 ## /bin/true + /bin/false + /bin/seq — landed
 
-Thin coreutils: `true` exits 0, `false` exits 1; `seq [-s SEP] LAST` /
-`FIRST LAST` / `FIRST INCREMENT LAST` prints integer sequences (empty range
-OK; always trailing newline). Focused virtio login smoke covers the three
+Thin coreutils: `true` exits 0, `false` exits 1; `seq [-w] [-s SEP] LAST` /
+`FIRST LAST` / `FIRST INCREMENT LAST` prints integer sequences (`-w`
+equal-width zero pad; empty range OK; always trailing newline). Focused virtio login smoke covers the three
 plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
 ## /bin/cut + /bin/tr — landed
@@ -639,8 +639,9 @@ Thin tree-walk pair for daily-driver scripting (no kernel work). `find
 [PATH...] [-name GLOB] [-type f|d] [-print]` walks with `getdents`+`lstat`;
 paths are argv before the first primary (default `.`); `-name` matches the
 basename with `*`/`?` only; predicates AND; default action `-print`. `du
-[-a] [-s] [FILE...]` sums apparent `st_size` (1024-byte units, ceil); default
-prints each subdirectory total; `-a` includes files; `-s` summary only.
+[-a] [-s] [-h] [FILE...]` sums apparent `st_size` (default 1024-byte units,
+ceil; `-h` human K/M/G); default prints each subdirectory total; `-a` includes
+files; `-s` summary only.
 Focused virtio login smoke covers find name/type, du -s/-a, Ext2 walk, prior
 interactive greens (smp 1/2). Ramfs `/bin` dents 100/128.
 
@@ -798,14 +799,25 @@ unchanged). Focused virtio login smoke covers `date`/`+%s`/`+%Y-%m-%d`,
 `stat -c`/`-Lc` symlink follow, Ext2, prior greens (smp 1/2). Ramfs `/bin`
 dents 106/128.
 
+## seq -w + du -h — landed
+
+Thin display polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/seq` gains `-w`
+(equal-width zero pad; width = max decimal width of endpoints including `-`).
+`/bin/du` gains `-h` (human-readable integer 1024 powers: bare bytes / `K` /
+`M` / `G`; default KiB units unchanged). Focused virtio login smoke covers
+`seq -w`, `du -h`/`-sh`, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents
+106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`date +FORMAT` + `stat -c` +
-   `grep -c` + `tr -c` + …): prefer small coherent chunks; thin
-   `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
-   Candidates: `seq -w`, `du -h`, `xargs -I`, `sort -k`, `timeout --signal`,
-   skip `yes --version` fluff; `/bin/mkfifo` only if `mknod` exists. Avoid deep
-   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`seq -w` + `du -h` + `date +FORMAT`
+   + `stat -c` + …): prefer small coherent chunks; thin `df` **only if**
+   `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive. Candidates:
+   `xargs -I`, `sort -k`, `timeout --signal`, skip `yes --version` fluff;
+   `/bin/mkfifo` only if `mknod` exists. Avoid deep jbd / Ext2-redirect duplex
+   races / CFS nesting unless a clear bite-sized fix.
