@@ -403,6 +403,7 @@ def main():
         "[U][PASS] VMA_FILE demand mmap",
         "[U][PASS] file MAP_FIXED mmap",
         "[U][PASS] mprotect RO/RW",
+        "[U][PASS] PROT_NONE + mmap addr hint",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
         "[U][PASS] execve rejects non-ELF file",

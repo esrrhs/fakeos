@@ -55,10 +55,20 @@ enum {
     FS_KIND_RAMFS = 0,
     FS_KIND_EXT2  = 1,
 
+    PROT_NONE  = 0,
     PROT_READ  = 1,
     PROT_WRITE = 2,
     PROT_EXEC  = 4
 };
+
+/* Store PROT_NONE as 0; any other prot keeps the historical "| PROT_READ"
+ * so write-only requests stay readable the way existing callers expect. */
+static u32 normalize_vma_prot(u32 prot) {
+    if (prot == 0) {
+        return 0;
+    }
+    return prot | PROT_READ;
+}
 
 /* Fixed user-space layout: the ELF image loads near 0x400000, the brk heap
  * starts above the image, anonymous mmap allocations grow upward in a window
@@ -236,7 +246,7 @@ int as_map_anon(struct address_space *as, u64 start, u64 size, u32 prot,
     }
     as->vmas[as->nvma].start = start;
     as->vmas[as->nvma].end = end;
-    as->vmas[as->nvma].prot = prot | PROT_READ;
+    as->vmas[as->nvma].prot = normalize_vma_prot(prot);
     as->vmas[as->nvma].kind = VMA_ANON;
     as->vmas[as->nvma].shared = shared != 0 ? 1 : 0;
     as->vmas[as->nvma].fs_kind = 0;
@@ -298,6 +308,10 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
     u64 page_va = vaddr & ~0xFFFULL;
     struct vma *vma = find_vma(as, page_va);
     if (vma == 0) {
+        return 0;
+    }
+    /* PROT_NONE: VMA covers the VA but every access is fatal (guard pages). */
+    if ((vma->prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0) {
         return 0;
     }
 
@@ -928,16 +942,31 @@ u64 as_brk_h(u64 handle, u64 newbrk) {
 }
 
 /* Anonymous mmap: page-aligned reservation grown upward from MMAP_BASE.
- * shared!=0 => MAP_SHARED (fork keeps W; shm-style). Returns start VA or 0. */
-u64 as_mmap_anon_h(u64 handle, u64 len, u32 prot, u32 shared) {
+ * addr!=0 (without MAP_FIXED) is a POSIX hint: try that VA first, else fall
+ * back to mmap_next. shared!=0 => MAP_SHARED. Returns start VA or 0. */
+u64 as_mmap_anon_h(u64 handle, u64 addr, u64 len, u32 prot, u32 shared) {
     struct address_space *as = as_of(handle);
     u64 hint;
+    u64 end;
     if (as == 0 || len == 0) {
         return 0;
     }
     len = (len + 0xFFF) & ~0xFFFULL;
     if (len == 0) {
         return 0;                    /* rounding overflowed the address space */
+    }
+    /* Non-fixed address hint: honour it when free + canonical, else fall back. */
+    if (addr != 0 && (addr & 0xFFF) == 0) {
+        end = addr + len;
+        if (end > addr && end <= 0x0000800000000000ULL) {
+            if (as_map_anon(as, addr, len, prot, shared)) {
+                if (addr >= MMAP_BASE && end <= MMAP_LIMIT
+                    && end > (as->mmap_next != 0 ? as->mmap_next : MMAP_BASE)) {
+                    as->mmap_next = end;
+                }
+                return addr;
+            }
+        }
     }
     hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
     if (hint + len < hint || hint + len > MMAP_LIMIT) {
@@ -977,24 +1006,28 @@ u64 as_mmap_fixed_h(u64 handle, u64 addr, u64 len, u32 prot) {
 }
 
 /* File-backed mmap reservation (VMA_FILE). Pages fault in via as_file_page_fill.
- * shared!=0 => MAP_SHARED (fork keeps W). addr==0 picks the next mmap hint;
- * addr!=0 is MAP_FIXED (page-aligned canonical user VA; overlaps rejected;
- * does not advance mmap_next). Returns start VA or 0. */
+ * shared!=0 => MAP_SHARED (fork keeps W). fixed!=0 => MAP_FIXED at addr
+ * (overlap rejected; mmap_next unchanged). fixed==0 && addr!=0 is a hint:
+ * try addr then fall back to mmap_next. Returns start VA or 0. */
 u64 as_mmap_file_h(u64 handle, u64 addr, u64 len, u32 prot, u32 shared,
-                   u32 fs_kind, u32 ino, u64 file_off) {
+                   u32 fs_kind, u32 ino, u64 file_off, u32 fixed) {
     struct address_space *as = as_of(handle);
     u64 hint;
     u64 end;
-    u32 fixed;
+    u32 i;
+    u32 placed = 0;
+    u32 from_auto = 0;
     if (as == 0 || len == 0 || (len & 0xFFF) != 0 || ino == 0) {
         return 0;
     }
     if ((file_off & 0xFFF) != 0) {
         return 0;
     }
-    fixed = addr != 0 ? 1 : 0;
+    if (as->nvma >= MAX_VMA) {
+        return 0;
+    }
     if (fixed) {
-        if ((addr & 0xFFF) != 0) {
+        if (addr == 0 || (addr & 0xFFF) != 0) {
             return 0;
         }
         end = addr + len;
@@ -1002,27 +1035,44 @@ u64 as_mmap_file_h(u64 handle, u64 addr, u64 len, u32 prot, u32 shared,
             return 0;
         }
         hint = addr;
-    } else {
-        hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
-        if (hint + len < hint || hint + len > MMAP_LIMIT) {
-            return 0;
-        }
-        end = hint + len;
-    }
-    if (as->nvma >= MAX_VMA) {
-        return 0;
-    }
-    {
-        u32 i;
         for (i = 0; i < as->nvma; i++) {
             if (hint < as->vmas[i].end && as->vmas[i].start < end) {
                 return 0;
             }
         }
+        placed = 1;
+    } else if (addr != 0 && (addr & 0xFFF) == 0) {
+        end = addr + len;
+        if (end > addr && end <= 0x0000800000000000ULL) {
+            u32 overlap = 0;
+            for (i = 0; i < as->nvma; i++) {
+                if (addr < as->vmas[i].end && as->vmas[i].start < end) {
+                    overlap = 1;
+                    break;
+                }
+            }
+            if (!overlap) {
+                hint = addr;
+                placed = 1;
+            }
+        }
+    }
+    if (!placed) {
+        hint = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
+        if (hint + len < hint || hint + len > MMAP_LIMIT) {
+            return 0;
+        }
+        end = hint + len;
+        for (i = 0; i < as->nvma; i++) {
+            if (hint < as->vmas[i].end && as->vmas[i].start < end) {
+                return 0;
+            }
+        }
+        from_auto = 1;
     }
     as->vmas[as->nvma].start = hint;
     as->vmas[as->nvma].end = end;
-    as->vmas[as->nvma].prot = prot | PROT_READ;
+    as->vmas[as->nvma].prot = normalize_vma_prot(prot);
     as->vmas[as->nvma].kind = VMA_FILE;
     as->vmas[as->nvma].shared = shared != 0 ? 1 : 0;
     as->vmas[as->nvma].fs_kind = fs_kind;
@@ -1030,7 +1080,14 @@ u64 as_mmap_file_h(u64 handle, u64 addr, u64 len, u32 prot, u32 shared,
     as->vmas[as->nvma].file_off = file_off;
     as->nvma++;
     if (!fixed) {
-        as->mmap_next = end;
+        if (from_auto) {
+            as->mmap_next = end;
+        } else if (hint >= MMAP_BASE && end <= MMAP_LIMIT) {
+            u64 cur = as->mmap_next != 0 ? as->mmap_next : MMAP_BASE;
+            if (end > cur) {
+                as->mmap_next = end;
+            }
+        }
     }
     return hint;
 }
@@ -1084,6 +1141,7 @@ static void apply_prot_present(struct address_space *as, u64 va, u64 len,
                                u32 prot, u32 shared) {
     u64 off = 0;
     u64 nx = ((u64)1 << 63);
+    u32 none = (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0 ? 1 : 0;
     while (off < len) {
         u64 page_va = (va + off) & ~0xFFFULL;
         volatile u64 *pt = resolve_pt(as->pml4, page_va, 0, PTE_U);
@@ -1092,16 +1150,25 @@ static void apply_prot_present(struct address_space *as, u64 va, u64 len,
             if (e & PTE_P) {
                 u64 frame = entry_phys(e);
                 u32 pfn = (u32)(frame / PAGE_SIZE);
-                u64 ne = e & ~((u64)PTE_W);
-                ne &= ~nx;
-                if ((prot & PROT_WRITE) != 0 && frame != zero_frame) {
-                    if (shared != 0 || (pfn < (u32)MAX_FRAMES_AS
-                                        && frame_refs[pfn] <= 1)) {
-                        ne |= PTE_W;
-                    }
-                }
-                if ((prot & PROT_EXEC) == 0) {
+                u64 ne;
+                if (none) {
+                    /* Keep the frame (guard pages must not lose data) but
+                     * drop PTE_U so ring-3 access #PFs as a protection fault. */
+                    ne = e & ~((u64)PTE_U) & ~((u64)PTE_W);
                     ne |= nx;
+                } else {
+                    ne = e & ~((u64)PTE_W);
+                    ne &= ~nx;
+                    ne |= PTE_U;          /* restore after PROT_NONE */
+                    if ((prot & PROT_WRITE) != 0 && frame != zero_frame) {
+                        if (shared != 0 || (pfn < (u32)MAX_FRAMES_AS
+                                            && frame_refs[pfn] <= 1)) {
+                            ne |= PTE_W;
+                        }
+                    }
+                    if ((prot & PROT_EXEC) == 0) {
+                        ne |= nx;
+                    }
                 }
                 pt[pt_i(page_va)] = ne;
                 invlpg_page(page_va);
@@ -1141,7 +1208,7 @@ int as_mprotect_h(u64 handle, u64 uva, u64 len, u32 prot) {
         return 0;
     }
     v = &as->vmas[idx];
-    new_prot = prot | PROT_READ;
+    new_prot = normalize_vma_prot(prot);
     apply_prot_present(as, start, end - start, new_prot, v->shared);
 
     if (start == v->start && end == v->end) {

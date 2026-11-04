@@ -97,8 +97,18 @@ Linux x86-64 nr `getppid(110)`, `uname(63)`, `nanosleep(35)`, `clock_gettime(228
 Shell builtins: `ppid`, `uname`[`-a`], `sleep N`. Init smoke:
 `[U][PASS] getppid/uname/nanosleep/clock_gettime`.
 
+## PROT_NONE + mmap addr hint — landed
+
+`PROT_NONE` (prot 0) is stored without the historical `| PROT_READ`. Faults on a
+NONE VMA are fatal. `mprotect(PROT_NONE)` keeps present frames but clears
+`PTE_U`/`PTE_W` (guard pages must not lose data); lifting prot restores `PTE_U`.
+Non-`MAP_FIXED` non-zero `addr` is a POSIX hint for anon and file maps (try VA,
+else `mmap_next`). `MAP_FIXED` still rejects overlaps (no silent replace). Init
+smoke: `[U][PASS] PROT_NONE + mmap addr hint`.
+
 ## Suggested next steps
 
-1. PROT_NONE + mmap addr hint (+ optional MAP_FIXED replace) — prefer next.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
+1. Symlink/`readlink` (and `lstat` already-ish) — interactive POSIX gap if useful.
+2. getcwd polish / richer shell niceties — scan README daily-driver wants.
+3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+4. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd) — avoid unless needed.

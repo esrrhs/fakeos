@@ -195,6 +195,7 @@ flowchart TD
 - [x] **shell session-leader / fg**：`setsid` + 本 pgid 前台（不再清成 0）；回收 TTY 走 ioctl/tcsetpgrp。
 - [x] **VMA_FILE 按需分页 + MAP_SHARED 写回**：文件 `mmap` 建 `VMA_FILE`，缺页填充；`MAP_SHARED` 跨 fork 保写，脏页在 munmap/进程退出时写回；`make qemu-modern` 试现代 virtio-blk/net + MSI-X。
 - [x] **mmap POSIX 加深**：文件 `MAP_FIXED`（选址建 `VMA_FILE`，重叠拒绝）；`mprotect(2)`（nr 10）改 VMA prot 并即时更新叶子 PTE（含 VMA 拆分）；自测 `[U][PASS] file MAP_FIXED mmap` / `mprotect RO/RW`。
+- [x] **PROT_NONE + mmap addr hint**：`mmap`/`mprotect` 支持 `PROT_NONE`（保帧清 `PTE_U`，访问 #PF）；非 `MAP_FIXED` 的非零 `addr` 作选址提示（冲突则回退）；`MAP_FIXED` 重叠仍拒绝（无 silent replace）；自测 `[U][PASS] PROT_NONE + mmap addr hint`。
 - [x] **CFS rbtree 加权公平调度**：每 CPU 侵入式红黑树（vruntime, tid）；tick/yield 记账后 erase+insert；`pick_next`/steal 走 leftmost；`nice(2)`；自测 nice0 ≥2× nice+10 + 树不变量。
 - [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。

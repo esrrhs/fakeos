@@ -89,12 +89,13 @@ u32 as_file_page_fill(u32 fs_kind, u32 ino, u64 file_off, u64 page_kva) {
 }
 
 /* void *mmap(addr, len, prot, flags, fd, off):
- *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window
+ *  - MAP_PRIVATE|MAP_ANONYMOUS: demand-zero window (PROT_NONE reserved OK)
  *  - MAP_SHARED|MAP_ANONYMOUS: shm-style shared anon (keep W across fork)
  *  - MAP_PRIVATE / MAP_SHARED + regular file: VMA_FILE demand paging
  *    (MAP_SHARED shares frames across fork; dirty pages write back on munmap).
  *  - MAP_FIXED: anon (ASAN) or file at a caller-chosen page-aligned VA;
- *    overlaps rejected (no silent unmap).
+ *    overlaps rejected (no silent unmap / no MAP_FIXED replace).
+ *  - Non-zero addr without MAP_FIXED is a hint (try VA, else kernel pick).
  * off must be page-aligned for file maps. */
 u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
     u64 va;
@@ -135,33 +136,30 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
             va = mem.as_mmap_fixed_h(as, addr, len, (u32)prot);
             return va == 0 ? (u64)(-1) : va;
         }
-        if (addr != 0) {
-            return (u64)(-1);
-        }
-        va = mem.as_mmap_anon_h(as, len, (u32)prot, shared);
+        /* addr==0 => auto; addr!=0 => POSIX hint (fallback on overlap). */
+        va = mem.as_mmap_anon_h(as, addr, len, (u32)prot, shared);
         return va == 0 ? (u64)(-1) : va;
     }
 
-    /* File-backed: true VMA_FILE demand paging (MAP_FIXED allowed). */
+    /* File-backed: true VMA_FILE demand paging (MAP_FIXED + addr hint). */
     {
         u32 fh;
         u32 ino;
         u32 fs_kind;
+        u32 is_fixed;
         u64 alen;
-        u64 fixed_addr;
+        u64 req_addr;
         if ((off & 0xFFF) != 0) {
             return (u64)(-1);
         }
-        if (flags & MAP_FIXED) {
+        is_fixed = (flags & MAP_FIXED) != 0 ? 1 : 0;
+        if (is_fixed) {
             if (addr == 0 || (addr & 0xFFF) != 0) {
                 return (u64)(-1);
             }
-            fixed_addr = addr;
+            req_addr = addr;
         } else {
-            if (addr != 0) {
-                return (u64)(-1);
-            }
-            fixed_addr = 0;
+            req_addr = addr;         /* 0 = auto, else hint */
         }
         if ((s32)(fd & 0xFFFFFFFFULL) < 0 || (fd & 0xFFFFFFFFULL) >= 16) {
             return (u64)(-1);
@@ -190,8 +188,8 @@ u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off) {
         if (ino == 0) {
             return (u64)(-1);
         }
-        va = mem.as_mmap_file_h(as, fixed_addr, alen, (u32)prot, shared,
-                               fs_kind, ino, off);
+        va = mem.as_mmap_file_h(as, req_addr, alen, (u32)prot, shared,
+                               fs_kind, ino, off, is_fixed);
         return va == 0 ? (u64)(-1) : va;
     }
 }

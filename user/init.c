@@ -321,6 +321,98 @@ static void mmap_test(void) {
         u_munmap(mp, 4096);
         puts("[U][PASS] mprotect RO/RW");
     }
+
+    /* PROT_NONE + non-fixed addr hint (overlap falls back; FIXED still rejects). */
+    {
+        unsigned char *h;
+        unsigned char *g;
+        unsigned char *fb;
+        long pid;
+        long st;
+        const unsigned long hint = 0x2A000000UL; /* inside mmap window */
+
+        h = (unsigned char *)u_mmap((void *)hint, 4096, 3, 0x22, -1, 0);
+        if (h != (unsigned char *)hint) {
+            puts("[U][FAIL] mmap addr hint");
+            return;
+        }
+        h[0] = 0x11;
+        /* Same hint while occupied: must fall back (not FIXED replace). */
+        fb = (unsigned char *)u_mmap((void *)hint, 4096, 3, 0x22, -1, 0);
+        if (fb == (unsigned char *)-1 || fb == 0 || fb == h) {
+            puts("[U][FAIL] mmap hint fallback");
+            return;
+        }
+        fb[0] = 0x22;
+        if (h[0] != 0x11) {
+            puts("[U][FAIL] hint fallback clobbered first map");
+            return;
+        }
+
+        g = (unsigned char *)u_mmap(0, 4096, 0, 0x22, -1, 0); /* PROT_NONE */
+        if (g == (unsigned char *)-1 || g == 0) {
+            puts("[U][FAIL] PROT_NONE mmap");
+            return;
+        }
+        pid = u_fork();
+        if (pid < 0) {
+            puts("[U][FAIL] PROT_NONE fork");
+            return;
+        }
+        if (pid == 0) {
+            volatile unsigned char c = g[0];
+            (void)c;
+            u_exit(0);
+        }
+        u_wait4(pid, &st, 0, 0);
+        if (((st >> 8) & 0xff) != 0xff) {
+            puts("[U][FAIL] PROT_NONE read not killed");
+            return;
+        }
+        u_munmap(g, 4096);
+
+        g = (unsigned char *)u_mmap(0, 4096, 3, 0x22, -1, 0);
+        if (g == (unsigned char *)-1 || g == 0) {
+            puts("[U][FAIL] mprotect NONE setup mmap");
+            return;
+        }
+        g[0] = 0x55;
+        if (u_mprotect(g, 4096, 0) != 0) {
+            puts("[U][FAIL] mprotect PROT_NONE");
+            return;
+        }
+        pid = u_fork();
+        if (pid < 0) {
+            puts("[U][FAIL] mprotect NONE fork");
+            return;
+        }
+        if (pid == 0) {
+            g[0] = 1;
+            u_exit(0);
+        }
+        u_wait4(pid, &st, 0, 0);
+        if (((st >> 8) & 0xff) != 0xff) {
+            puts("[U][FAIL] mprotect NONE write not killed");
+            return;
+        }
+        if (u_mprotect(g, 4096, 3) != 0) {
+            puts("[U][FAIL] mprotect restore after NONE");
+            return;
+        }
+        if (g[0] != 0x55) {
+            puts("[U][FAIL] PROT_NONE lost page data");
+            return;
+        }
+        g[0] = 0x66;
+        if (g[0] != 0x66) {
+            puts("[U][FAIL] write after restore from NONE");
+            return;
+        }
+        u_munmap(h, 4096);
+        u_munmap(fb, 4096);
+        u_munmap(g, 4096);
+        puts("[U][PASS] PROT_NONE + mmap addr hint");
+    }
 }
 
 /* Fixed dirent layout emitted by the kernel: 48-byte records, name at +19. */
