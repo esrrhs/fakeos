@@ -412,6 +412,7 @@ flowchart TD
 - [x] **install -D**：创建目标路径的缺失父目录（GNU；文件 DEST 的父路径，或 `-t`/目录 DEST 本身）。可粘连。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **mkdir -v**：每实际创建的目录打印一行（GNU；`-p` 时逐层宣布）。`/bin/mkdir` + shell builtin 同步；可粘连 `-pv`。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **rm -v**：每成功删除的路径打印一行（文件 `removed 'PATH'`；目录 `removed directory 'PATH'`）。无 shell builtin。可粘连 `-rfv`。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **cp -v**：每成功复制打印 `'SRC' -> 'DST'`（GNU；含 `-r` 新建目录）。可粘连 `-rnv`。非 `-p`（等 utimensat）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
