@@ -1557,6 +1557,16 @@ glue with existing `-rnu` / `-cdu`. No new `/bin` dent. Focused virtio
 login smoke covers `sort -f`/`-fu` and `uniq -i` + prior greens including
 grep -w/-x (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## ls -1/-F — landed
+
+`/bin/ls` accepts `-1` (one name per line; already the short default,
+ignored under `-l`) and `-F` (classify short names: `/` dir, `*` exec,
+`@` symlink, `|` fifo, `=` sock; uses fstatat). Short listing no longer
+always appends `/` (only with `-F`). Keeps `-l/-a/-A/-d` and glued
+clusters. No new `/bin` dent. Focused virtio login smoke covers `ls -1` /
+`ls -F` + prior greens including sort -f / uniq -i (smp 1/2). Ramfs
+`/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1564,8 +1574,8 @@ grep -w/-x (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags / thin `/bin` with dent
-   room (`ls -1/-F`, `md5sum -c`, …; `set --` still deferred; skip large
-   `getopts` / here-doc / trap / `fc` / `bind` / `=~` / `select` /
-   `coproc`; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `md5sum -c`, other util flags / thin `/bin`
+   with dent room (`set --` still deferred; skip large `getopts` /
+   here-doc / trap / `fc` / `bind` / `=~` / `select` / `coproc`;
+   `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.

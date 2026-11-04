@@ -1,10 +1,11 @@
 /* fakeos userland - ls: list directory entries or file operands.
- * Forms: ls [-a|-A] [-d] [-l] [PATH...]
- * Default: hide names starting with '.' (POSIX). -a shows all including
- * . and ..; -A shows almost all (hidden but not ./..). -d lists a directory
- * itself rather than its contents. -l uses fstatat for
- * mode/nlink/uid/gid/size/mtime; symlinks show `name -> target` via readlink.
- * Glued flags (-la, -ald, ...) accepted. Multi-PATH: dirs get a `path:`
+ * Forms: ls [-a|-A] [-d] [-l] [-1] [-F] [PATH...]
+ * Default: hide names starting with '.' (POSIX); one name per line. -a shows
+ * all including . and ..; -A almost all (hidden but not ./..). -d lists a
+ * directory itself. -l uses fstatat for mode/nlink/uid/gid/size/mtime;
+ * symlinks show `name -> target` via readlink. -1 forces one-per-line (default
+ * already; ignored with -l). -F classifies short names (slash, star, at, pipe, equals).
+ * Glued flags (-laF, -ald, ...) accepted. Multi-PATH: dirs get a `path:`
  * header when more than one PATH is given. Compact argv for EXEC_MAX_ARGC=8.
  * Ownership and mtime come from live inode fields (chown + write stamps). */
 package user;
@@ -37,6 +38,10 @@ enum {
     S_IFIFO = 0x1000,
     S_IFSOCK = 0xC000,
     S_IFLNK = 0xA000,
+    S_IFREG = 0x8000,
+    S_IXUSR = 0x40,
+    S_IXGRP = 0x8,
+    S_IXOTH = 0x1,
     AT_SYMLINK_NOFOLLOW = 0x100,
     AT_EMPTY_PATH = 0x1000,
     MAX_PATHS = 8
@@ -200,20 +205,31 @@ static void print_name_long(const char *linkpath, const char *name,
     }
 }
 
-static void print_name_short(const char *name, int is_dir) {
+/* Classify suffix for -F (0 = none). */
+static char classify_char(unsigned int mode) {
+    unsigned int t = mode & S_IFMT;
+    if (t == S_IFDIR) return '/';
+    if (t == S_IFLNK) return '@';
+    if (t == S_IFIFO) return '|';
+    if (t == S_IFSOCK) return '=';
+    if (t == S_IFREG && (mode & (S_IXUSR | S_IXGRP | S_IXOTH))) return '*';
+    return 0;
+}
+
+static void print_name_short(const char *name, char suffix) {
     unsigned long k = 0;
     while (name[k] != 0) {
         k++;
     }
     u_write(1, name, k);
-    if (is_dir) {
-        u_write(1, "/", 1);
+    if (suffix != 0) {
+        u_write(1, &suffix, 1);
     }
     u_write(1, "\n", 1);
 }
 
 static int list_one(const char *path, int longfmt, int dir_as_file,
-                    int show_all, int almost_all, int print_header) {
+                    int show_all, int almost_all, int classify, int print_header) {
     char buf[1920];
     char stbuf[ST_SIZE_BYTES];
     long fd;
@@ -236,7 +252,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
         if (longfmt) {
             print_name_long(path, base, stbuf);
         } else {
-            print_name_short(base, (mode & S_IFMT) == S_IFDIR);
+            print_name_short(base, classify ? classify_char(mode) : 0);
         }
         u_close(fd);
         return 0;
@@ -262,7 +278,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                     print_name_long(full, dots[di], stbuf);
                 }
             } else {
-                print_name_short(dots[di], 1);
+                print_name_short(dots[di], classify ? '/' : 0);
             }
         }
     }
@@ -296,8 +312,16 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                 }
                 join_dir_name(full, sizeof(full), path, name);
                 print_name_long(full, name, stbuf);
+            } else if (classify) {
+                char suf = 0;
+                if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) == 0) {
+                    suf = classify_char(load_u32(stbuf + ST_MODE));
+                } else if (buf[off + 18] == 4) {
+                    suf = '/';
+                }
+                print_name_short(name, suf);
             } else {
-                print_name_short(name, buf[off + 18] == 4);
+                print_name_short(name, 0);
             }
         }
     }
@@ -306,7 +330,8 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
 }
 
 static void usage(void) {
-    u_write(2, "usage: ls [-a|-A] [-d] [-l] [PATH...]\n", 39);
+    u_write(2, "usage: ls [-a|-A] [-d] [-l] [-1F] [PATH...]
+", 44);
 }
 
 int main(int argc, char **argv) {
@@ -314,6 +339,7 @@ int main(int argc, char **argv) {
     int dir_as_file = 0;
     int show_all = 0;
     int almost_all = 0;
+    int classify = 0;
     const char *paths[MAX_PATHS];
     int npaths = 0;
     int ai;
@@ -342,6 +368,10 @@ int main(int argc, char **argv) {
                     }
                 } else if (a[j] == 'd') {
                     dir_as_file = 1;
+                } else if (a[j] == '1') {
+                    /* one-per-line (already default; ignored under -l) */
+                } else if (a[j] == 'F') {
+                    classify = 1;
                 } else {
                     usage();
                     return 1;
@@ -374,7 +404,7 @@ int main(int argc, char **argv) {
             u_write(1, "\n", 1);
         }
         if (list_one(paths[i], longfmt, dir_as_file, show_all, almost_all,
-                     headers)) {
+                     classify, headers)) {
             rc = 1;
         }
     }
