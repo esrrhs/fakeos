@@ -1153,6 +1153,22 @@ functions. Lookup order after alias: function → builtin → PATH. `type` /
 virtio login smoke covers define/call/`$1`/`$#`/`return`/`local`/type + prior
 greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 
+Thin `/bin` polish (3 new dents). Inventory unchanged on deferred kernel gaps
+(`/proc` thin → skip `ps`/`uptime`/`free`; no `statfs`/`utimensat`/`mknod` →
+`df`/`touch -r|-d`/`mkfifo` deferred). Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; `[[ ]]`
+still deferred.
+
+`/bin/hexdump [-Cv] [-n LEN|-nLEN] [-s OFF|-sOFF] [FILE...]`: canonical
+`-C` hex+ASCII (default); duplicate full-width lines collapse to `*` (`-v`
+disables). `/bin/xxd [-pr] [-l LEN|-lLEN] [-s OFF|-sOFF] [-c COLS|-cCOLS]
+[IN [OUT]]`: address dump (default), `-p` plain hex, `-r`/`-rp` reverse to
+binary (OUT only with `-r`). `/bin/file FILE...`: thin magic via `lstat` +
+prefix read (empty / ELF / `#!` / gzip / PNG / ASCII text / directory /
+symlink / data). Glued `-n`/`-s`/`-l`/`-c` keep argv under `EXEC_MAX_ARGC=8`.
+Focused virtio login smoke covers hexdump/xxd round-trip/`file` + prior
+greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1160,6 +1176,6 @@ greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `hexdump`/`xxd`/`file`, `[[ ]]`, or other
-   small `/bin`/shell bites (skip large `getopts` / here-doc). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `[[ ]]`, or other small `/bin`/shell bites
+   (skip large `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS /
+   jbd alone.
