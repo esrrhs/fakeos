@@ -947,17 +947,36 @@ Focused virtio login smoke covers u1/d1 / `*` / `-v` / prior `-N`/`-j`, Ext2,
 prior greens (smp 1/2). Ramfs `/bin` dents ~106/128. Jobs/`fg`/`bg` already
 present — left alone.
 
+## grep -E [] classes — landed
+
+Thin userland polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred — Ramfs has no block accounting, so
+statfs+df not clearly bite-sized) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+`grep -E` gains thin `[]` character classes: ranges, leading `^` negate,
+leading `]`/`-` literal, `\` escapes next inside `[]`; no `[:class:]`
+named classes, no `{}` bounds. `find_alt` / `()` matching skip bracket
+spans so `|`/`()` inside classes stay literal. Focused virtio login smoke
+covers `[abc]` / `[a-z]` / `[^0-9]` / leading `]` / `-Ei` class / class+`*`
+/ `|` inside class / Ext2 / prior greens (smp 1/2). Ramfs `/bin` dents
+~106/128. Jobs/`fg`/`bg` already present — left alone.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`grep -E` + `dd conv=` + `od -N/-j`
-   + `od -t u1/d1`/`*` + …): prefer small coherent chunks; thin `df` **only if**
-   `statfs(2)` is clearly bite-sized (Ramfs needs invented capacity + Ext2
-   `sb.blocks_count`/`free_blocks`/`block_size`), or `touch -r`/`-d` if
-   utimens arrive. Candidates: `ps`/`uptime`/`free` only if `/proc` grows;
-   skip `mkfifo` until `mknod`; leave Ext2-redirect duplex / multi-nc SMP
-   races and CFS/jbd alone. Other thin polish: job/fg/bg polish if gaps
-   remain, optional ERE `[]` if still bite-sized — dig carefully; many
-   listed utils already covered.
+3. More daily-driver gaps after inventory (`grep -E`/`[]` + `dd conv=` +
+   `od -N/-j` + `od -t u1/d1`/`*` + …): prefer small coherent chunks; thin
+   `df` **only if** `statfs(2)` is clearly bite-sized (Ramfs needs invented
+   capacity + Ext2 `sb.blocks_count`/`free_blocks`/`block_size`), or
+   `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only
+   if `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex
+   / multi-nc SMP races and CFS/jbd alone. Other thin polish after inventory:
+   job/fg/bg only if a clear gap remains; `/bin/sed` thin if absent and small
+   enough; shell `$(( ))` / for/while if thin gaps; `/bin/stty` thin,
+   `/bin/reset`, `/bin/tput cols/lines`, `/bin/watch`; skip `dirname -z`.
+   `/bin/tee -a`, `/bin/head`, `/bin/tr`, `/bin/cut`, `/bin/printf` `%x`/`%o`,
+   `/bin/date` FORMAT, `/bin/dirname` multi, `/bin/realpath`, `/bin/true`
+   already present.

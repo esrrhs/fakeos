@@ -1,7 +1,8 @@
 /* fakeos userland - grep: fixed-string line filter; thin -E ERE subset.
  * Options: -i -v -n -F -c -E. Glued short opts. -F forces fixed (wins over -E).
  * -c suppresses line output; multi-FILE prints name:count per file.
- * ERE subset: | . * + ? () ^ $ and \ escapes. No [] classes, no {} bounds.
+ * ERE subset: | . * + ? () [] ^ $ and \ escapes. No [:class:], no {} bounds.
+ * []: ranges, leading ^ negate, leading ]/- literal; \ escapes next inside [].
  */
 package user;
 
@@ -49,13 +50,34 @@ static int contains(const char *hay, const char *needle, int ign) {
     return 0;
 }
 
-/* Find top-level '|' in pat[pi..pe), respecting (). Returns index or -1. */
+/* Find closing ']' for '[' at pi. First ] after optional ^ is literal member.
+ * Returns index of ']' or -1. */
+static int find_rbrack(const char *pat, int pi, int pe) {
+    int i;
+    if (pi >= pe || pat[pi] != '[') return -1;
+    i = pi + 1;
+    if (i < pe && pat[i] == '^') i++;
+    if (i < pe && pat[i] == ']') i++; /* ] as first member */
+    for (; i < pe; i++) {
+        if (pat[i] == '\\' && i + 1 < pe) { i++; continue; }
+        if (pat[i] == ']') return i;
+    }
+    return -1;
+}
+
+/* Find top-level '|' in pat[pi..pe), respecting () and []. Returns index or -1. */
 static int find_alt(const char *pat, int pi, int pe) {
     int depth = 0;
     int i;
     for (i = pi; i < pe; i++) {
         char c = pat[i];
         if (c == '\\' && i + 1 < pe) { i++; continue; }
+        if (c == '[') {
+            int rb = find_rbrack(pat, i, pe);
+            if (rb < 0) return -1;
+            i = rb;
+            continue;
+        }
         if (c == '(') depth++;
         else if (c == ')') { if (depth > 0) depth--; }
         else if (c == '|' && depth == 0) return i;
@@ -70,6 +92,12 @@ static int find_rparen(const char *pat, int pi, int pe) {
     for (i = pi + 1; i < pe; i++) {
         char c = pat[i];
         if (c == '\\' && i + 1 < pe) { i++; continue; }
+        if (c == '[') {
+            int rb = find_rbrack(pat, i, pe);
+            if (rb < 0) return -1;
+            i = rb;
+            continue;
+        }
         if (c == '(') depth++;
         else if (c == ')') {
             depth--;
@@ -102,6 +130,13 @@ static int parse_atom(const char *pat, int pi, int pe, int *atom_s, int *atom_e,
         *next = rp + 1;
         return 0;
     }
+    if (pat[pi] == '[') {
+        int rb = find_rbrack(pat, pi, pe);
+        if (rb < 0) return -1;
+        *atom_e = rb + 1;
+        *next = rb + 1;
+        return 0;
+    }
     /* single-char atom: . ^ $ or literal */
     *atom_e = pi + 1;
     *next = pi + 1;
@@ -111,6 +146,55 @@ static int parse_atom(const char *pat, int pi, int pe, int *atom_s, int *atom_e,
 static int eqc(char a, char b, int ign) {
     if (ign) return lower(a) == lower(b);
     return a == b;
+}
+
+/* Match one char against class pat[as..ae) where pat[as]=='[' and pat[ae-1]==']'.
+ * Returns 1 match / 0 no. No [:class:] named classes. */
+static int class_match(const char *pat, int as, int ae, char ch, int ign) {
+    int i;
+    int neg = 0;
+    int hit = 0;
+    if (as >= ae || pat[as] != '[' || pat[ae - 1] != ']') return 0;
+    i = as + 1;
+    if (i < ae - 1 && pat[i] == '^') { neg = 1; i++; }
+    while (i < ae - 1) {
+        char a, b;
+        if (pat[i] == '\\' && i + 1 < ae - 1) {
+            a = pat[i + 1];
+            i += 2;
+            if (eqc(ch, a, ign)) hit = 1;
+            continue;
+        }
+        a = pat[i];
+        /* range a-b when '-' is not the last member */
+        if (i + 2 < ae - 1 && pat[i + 1] == '-') {
+            b = pat[i + 2];
+            if (b == '\\' && i + 3 < ae - 1) {
+                b = pat[i + 3];
+                i += 4;
+            } else {
+                i += 3;
+            }
+            if (ign) {
+                char c = lower(ch), lo = lower(a), hi = lower(b);
+                if (lo <= hi) {
+                    if (c >= lo && c <= hi) hit = 1;
+                } else {
+                    if (c >= hi && c <= lo) hit = 1;
+                }
+            } else {
+                if (a <= b) {
+                    if (ch >= a && ch <= b) hit = 1;
+                } else {
+                    if (ch >= b && ch <= a) hit = 1;
+                }
+            }
+            continue;
+        }
+        if (eqc(ch, a, ign)) hit = 1;
+        i++;
+    }
+    return neg ? !hit : hit;
 }
 
 /* Forward: match pat[pi..pe) against s[si..se); must consume all of pattern.
@@ -137,6 +221,12 @@ static int ere_atom(const char *pat, int as, int ae, const char *s, int si,
         /* group: pat[as+1 .. ae-1) */
         if (ae < as + 2 || pat[ae - 1] != ')') return -1;
         return ere_match(pat, as + 1, ae - 1, s, si, se, ign);
+    }
+    if (c == '[') {
+        if (ae < as + 2 || pat[ae - 1] != ']') return -1;
+        if (si >= se) return -1;
+        if (!class_match(pat, as, ae, s[si], ign)) return -1;
+        return si + 1;
     }
     if (c == '^') {
         return (si == 0) ? si : -1;
