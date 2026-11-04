@@ -386,7 +386,7 @@ plus prior interactive greens (smp 1/2).
 
 ## /bin/nl + /bin/fold — landed
 
-Thin text-pipeline pair. `nl [-b a|t|-ba|-bt] [-v START|-vN] [-i INCR|-iN] [-n ln|rn|rz|-nln|-nrn|-nrz] [-p] [-w WIDTH|-wN] [-s SEP|-sSEP] [FILE...]`
+Thin text-pipeline pair. `nl [-b a|t|-ba|-bt] [-v START|-vN] [-i INCR|-iN] [-n ln|rn|rz|-nln|-nrn|-nrz] [-p] [-d CC|-dCC] [-w WIDTH|-wN] [-s SEP|-sSEP] [FILE...]`
 numbers body lines (default `-b t` non-empty, `-v 1`, `-w 6`, tab sep).
 Compact glued forms keep argv under `EXEC_MAX_ARGC=8`.
 `fold [-w WIDTH] [-s] [FILE...]` wraps to WIDTH columns (default 80; `-s`
@@ -1990,6 +1990,15 @@ delimiter CC is `\:`; marker lines `\:`, `\:\:`, and `\:\:\:` are omitted
 and (without `-p`) reset the next number to `-v`. Keeps `-b`/`-v`/`-i`/`-n`/
 `-w`/`-s`. No new `/bin` dent. Focused virtio login smoke covers `nl -p` +
 prior greens including nl -n/-i (smp 1/2). Ramfs `/bin` dents ~114/128.
+
+## nl -d — landed
+
+`/bin/nl -d CC` (glued `-dCC`) sets the two-character logical page delimiter
+(default `\:`). A one-character CC pads the second char as `:` (POSIX).
+Marker lines are CC / CC×2 / CC×3; omitted; reset/`-p` unchanged. Keeps
+`-b`/`-v`/`-i`/`-n`/`-p`/`-w`/`-s`. No new `/bin` dent. Focused virtio login
+smoke covers `nl -d` + prior greens including nl -p (smp 1/2). Ramfs `/bin`
+dents ~114/128.
 
 ## Suggested next steps
 

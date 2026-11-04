@@ -1,10 +1,10 @@
 /* fakeos userland - nl: number lines (thin POSIX subset).
- * Forms: nl [-b a|t] [-v START] [-i INCR] [-n ln|rn|rz] [-p] [-w WIDTH] [-s SEP] [FILE...]
+ * Forms: nl [-b a|t] [-v START] [-i INCR] [-n ln|rn|rz] [-p] [-d CC] [-w WIDTH] [-s SEP] [FILE...]
  * Default: -b t (non-empty), -v 1, -i 1, -n rn, -w 6, -s tab. stdin if no FILE.
  * -n: ln left-pad spaces after digits; rn right spaces (default); rz right zeros.
- * Logical page delimiters (default CC "\:"): lines "\:", "\:\:", "\:\:\:" are
- * omitted; without -p the next number resets to -v. -p keeps numbering across
- * those markers. Glued -ba/-bt/-vN/-iN/-nln/-nrn/-nrz/-wN/-sSEP keep argv under
+ * Logical page delimiters: -d CC (default "\:"); one-char CC pads second as ':'.
+ * Marker lines are CC / CC*2 / CC*3; omitted; without -p reset to -v. -p keeps
+ * numbering. Glued -ba/-bt/-vN/-iN/-nln/-nrn/-nrz/-dCC/-wN/-sSEP under
  * EXEC_MAX_ARGC=8.
  */
 package user;
@@ -24,11 +24,12 @@ static long start_num = 1;
 static long incr = 1;     /* -i: number increment */
 static int num_fmt;       /* 0=rn (default), 1=ln, 2=rz */
 static int opt_p;         /* -p: do not reset at page delimiters */
+static char delim_cc[2] = { '\\', ':' }; /* -d CC; default "\:" */
 static int width = 6;
 static const char *sep = "\t";
 
 static void usage(void) {
-    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-n ln|rn|rz] [-p] [-w N] [-s SEP] [FILE...]\n", 78);
+    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-n ln|rn|rz] [-p] [-d CC] [-w N] [-s SEP] [FILE...]\n", 86);
 }
 
 static int is_digits(const char *s) {
@@ -83,17 +84,31 @@ static void emit_num(long num) {
     u_write(1, sep, strlen(sep));
 }
 
-/* Default section delimiter CC is "\:". Header/body/footer markers are
- * CC repeated 3/2/1 times — lines "\:\:\:", "\:\:", "\:" — omitted from
- * output. Without -p, numbering resets to start_num. */
+/* Section delimiter CC (default "\:"). Header/body/footer markers are
+ * CC repeated 3/2/1 times; omitted from output. Without -p, numbering
+ * resets to start_num. */
 static int is_page_delim(const char *line, int len) {
-    if (len == 2 && line[0] == '\\' && line[1] == ':') return 1;
-    if (len == 4 && line[0] == '\\' && line[1] == ':' &&
-        line[2] == '\\' && line[3] == ':') return 1;
-    if (len == 6 && line[0] == '\\' && line[1] == ':' &&
-        line[2] == '\\' && line[3] == ':' &&
-        line[4] == '\\' && line[5] == ':') return 1;
-    return 0;
+    int reps;
+    int i;
+    if (len == 0 || (len % 2) != 0) return 0;
+    reps = len / 2;
+    if (reps < 1 || reps > 3) return 0;
+    for (i = 0; i < reps; i++) {
+        if (line[i * 2] != delim_cc[0] || line[i * 2 + 1] != delim_cc[1])
+            return 0;
+    }
+    return 1;
+}
+
+static void set_delim_cc(const char *s) {
+    if (s == 0 || s[0] == 0) {
+        delim_cc[0] = '\\';
+        delim_cc[1] = ':';
+        return;
+    }
+    delim_cc[0] = s[0];
+    if (s[1] != 0) delim_cc[1] = s[1];
+    else delim_cc[1] = ':'; /* POSIX: missing 2nd char becomes ':' */
 }
 
 static void emit_line(const char *line, int len, long *num) {
@@ -189,6 +204,13 @@ int main(int argc, char **argv) {
             i++;
         } else if (strcmp(a, "-p") == 0) {
             opt_p = 1;
+            i++;
+        } else if (strcmp(a, "-d") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            set_delim_cc(argv[i + 1]);
+            i += 2;
+        } else if (a[1] == 'd' && a[2] != 0) {
+            set_delim_cc(a + 2);
             i++;
         } else if (strcmp(a, "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
