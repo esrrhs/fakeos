@@ -3,11 +3,12 @@
  * Paths are argv before the first primary; default PATH is ".".
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
  * folds A-Z), -path GLOB / -ipath GLOB (full path *,?; -ipath folds A-Z),
- * -type f|d, -empty (empty regular file or empty directory), -prune (do not
- * descend into a matched directory), -print / -print0 (NUL-terminated paths;
- * pairs with xargs -0), -maxdepth N, -mindepth N (start points are depth 0;
- * GNU-ish). Uses lstat(2). No -o/parens. Thin -prune: when predicates match
- * a directory, skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
+ * -type f|d|l, -empty (empty regular file or empty directory), -prune (do
+ * not descend into a matched directory), -print / -print0 (NUL-terminated
+ * paths; pairs with xargs -0), -maxdepth N, -mindepth N (start points are
+ * depth 0; GNU-ish). Uses lstat(2) so -type l sees symlinks. No -o/parens.
+ * Thin -prune: when predicates match a directory, skip walk_dir. Depth-first.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -29,6 +30,7 @@ enum {
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
     S_IFREG = 0x8000,
+    S_IFLNK = 0xA000,
     PATH_CAP = 128,
     DENT_BUF = 1920,
     DENT_REC = 48,
@@ -46,7 +48,7 @@ static char name_pat[GLOB_CAP];
 static int want_path;
 static int path_fold; /* 1 = -ipath */
 static char path_pat[GLOB_CAP];
-static int want_type; /* 0=any, 1=file, 2=dir */
+static int want_type; /* 0=any, 1=file, 2=dir, 3=symlink */
 static int want_empty;
 static int do_print = 1;
 static int print_nul; /* -print0 */
@@ -77,6 +79,10 @@ static int is_dir_mode(unsigned int mode) {
 
 static int is_reg_mode(unsigned int mode) {
     return (mode & S_IFMT) == S_IFREG;
+}
+
+static int is_lnk_mode(unsigned int mode) {
+    return (mode & S_IFMT) == S_IFLNK;
 }
 
 /* Basename of path (pointer into path; never empty for non-empty path). */
@@ -165,6 +171,7 @@ static int is_empty_path(const char *path, unsigned int mode, const char *st) {
 static int match_preds(const char *path, unsigned int mode, const char *st) {
     if (want_type == 1 && !is_reg_mode(mode)) return 0;
     if (want_type == 2 && !is_dir_mode(mode)) return 0;
+    if (want_type == 3 && !is_lnk_mode(mode)) return 0;
     if (want_name && !glob_match(name_pat, base_of(path), name_fold)) return 0;
     if (want_path && !glob_match(path_pat, path, path_fold)) return 0;
     if (want_empty && !is_empty_path(path, mode, st)) return 0;
@@ -361,12 +368,19 @@ int main(int argc, char **argv) {
             continue;
         }
         if (strcmp(argv[ai], "-type") == 0) {
-            if (ai + 1 >= argc || (argv[ai + 1][0] != 'f' && argv[ai + 1][0] != 'd')
-                || argv[ai + 1][1] != 0) {
-                u_write(2, "find: -type needs f|d\n", 22);
+            char tc;
+            if (ai + 1 >= argc || argv[ai + 1][0] == 0 || argv[ai + 1][1] != 0) {
+                u_write(2, "find: -type needs f|d|l\n", 24);
                 return 1;
             }
-            want_type = (argv[ai + 1][0] == 'f') ? 1 : 2;
+            tc = argv[ai + 1][0];
+            if (tc == 'f') want_type = 1;
+            else if (tc == 'd') want_type = 2;
+            else if (tc == 'l') want_type = 3;
+            else {
+                u_write(2, "find: -type needs f|d|l\n", 24);
+                return 1;
+            }
             ai += 2;
             continue;
         }
@@ -408,7 +422,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname|-path|-ipath GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print|-print0]\n", 130);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path|-ipath GLOB] [-type f|d|l] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print|-print0]\n", 132);
         return 1;
     }
 

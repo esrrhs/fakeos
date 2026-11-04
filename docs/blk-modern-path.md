@@ -2094,6 +2094,12 @@ comparison key after `-f`/`-s` skips (GNU). `-w0` treats all keys equal.
 Combines with `-cduiz`. No new `/bin` dent. Focused virtio login smoke
 covers `-w2` collapse + prior greens (smp 1/2).
 
+## find -type l — landed
+
+`/bin/find -type l` matches symlinks via lstat(2) (S_IFLNK), alongside
+existing `-type f|d`. No new `/bin` dent. Focused virtio login smoke covers
+`-type l` + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2102,5 +2108,5 @@ covers `-w2` collapse + prior greens (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `find -type l`, `xargs -t`, `cat -v`; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   `xargs -t`, `cat -v`; `cp -p` waits on utimensat; `set --` deferred; skip
+   large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
