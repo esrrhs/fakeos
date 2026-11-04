@@ -69,6 +69,8 @@ global u_stat
 global u_fstat
 global u_lstat
 global u_newfstatat
+global u_chmod
+global u_umask
 global u_futex
 global u_gettid
 global u_clone
@@ -337,6 +339,12 @@ USYSC1 u_fstat, 5
 
 ; long u_lstat(const char *path, void *statbuf) -- Linux nr 6 (nofollow)
 USYSC1 u_lstat, 6
+
+; long u_chmod(const char *path, long mode) -- Linux nr 90
+USYSC1 u_chmod, 90
+
+; long u_umask(long mask) -- Linux nr 95
+USYSC1 u_umask, 95
 
 ; long u_newfstatat(long dfd, const char *path, void *statbuf, long flags)
 ; 4th C arg RCX -> R10

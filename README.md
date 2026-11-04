@@ -207,6 +207,7 @@ flowchart TD
 - [x] **getcwd physical + shell cwd prompt + ls -l ->**：`chdir` 存物理路径（`CWD_LEN=128`）；提示符显示 cwd（`~` 缩写 `/home`）；`realpath` builtin；`ls -l` 对符号链接显示 `name -> target`；自测 `[U][PASS] getcwd physical`
 - [x] **shell env/export/unset/which**：shell 环境表（默认 `PATH`/`HOME`/`USER`/`FAKECC_PKG=/src`）；`export`/`unset`/`env`/`which`；`$NAME`/`$?`；`cd` 走 `$HOME`。
 - [x] **execve envp + live /proc/self/environ**：内核解析最多 8 个 env 串写入 SysV 栈与 TCB；空 envp 仍种子 `FAKECC_PKG=/src`；shell 把环境表传入子进程。virtio login smoke（smp 1/2）。
+- [x] **chmod/umask + Ext2 getdents/`ls` 文件参数**：`chmod(2)` 更新 Ramfs/Ext2 权限位（保留 `S_IFMT`）；每进程 `umask(2)`（默认 0022，fork 继承）作用于 `open(O_CREAT)`/`mkdir`/`symlink`；shell 内建 `chmod MODE FILE...` / `umask [MODE]`；Ext2 `getdents` 对齐 Ramfs 48B 布局（name@19）；`ls -l FILE` 走 `AT_EMPTY_PATH`。virtio login smoke（smp 1/2）。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
 - [x] **AHCI bio queue（跨调用方）**：共享 bio 队列（8）让多个同步调用方共用 NCQ 窗口；`ahci_selftest` 双 bio 重叠提交；`make qemu-ahci` 见 `[AHCI] [PASS] bio queue cross-caller`。

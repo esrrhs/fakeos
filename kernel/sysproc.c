@@ -210,12 +210,26 @@ u64 sys_munmap(u64 addr, u64 len) {
            ? 0 : (u64)(-1);
 }
 
-/* No permission model: chmod always succeeds (fakecc's output path uses it
- * after writing an executable). */
-u64 sys_chmod(u64 path, u64 mode) {
-    (void)path;
-    (void)mode;
-    return 0;
+/* chmod(2): update Ramfs/Ext2 permission bits (no ACL / capability model). */
+u64 sys_chmod(u64 upath, u64 mode) {
+    char path[128];
+    extern u32 copy_user_path(char *dst, u64 upath);
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted() || !fs.ext2_chmod(path, (u32)mode)) {
+            return (u64)(-1);
+        }
+        return 0;
+    }
+    return fs.fs_chmod(path, (u32)mode) ? 0 : (u64)(-1);
+}
+
+/* umask(2): set process file-creation mask; return previous mask. */
+u64 sys_umask(u64 mask) {
+    extern u32 sched_umask_set(u32 mask);
+    return (u64)sched_umask_set((u32)mask);
 }
 
 u64 sys_gettid(void) {

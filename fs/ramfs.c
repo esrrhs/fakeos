@@ -17,6 +17,7 @@ extern u64 procfs_gen_status(char *buf, u64 cap);
 extern u64 procfs_gen_maps(char *buf, u64 cap);
 extern u64 procfs_gen_cmdline(char *buf, u64 cap);
 extern u64 procfs_gen_environ(char *buf, u64 cap);
+extern u32 sched_umask_get(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal in-memory VFS + Ramfs
@@ -101,6 +102,7 @@ struct inode {
     u32 parent;
     u32 ndent;
     u32 ro;                        /* static incbin-backed file */
+    u32 mode;                      /* Linux S_IF* | permission bits */
     struct dent dents[MAX_DENTS];
     const char *sdata;             /* static data (kernel rodata) */
     char *buf;                     /* dynamic data (kmalloc) */
@@ -162,6 +164,26 @@ static u32 name_eq(const char *a, const char *b, u32 n) {
  * Inode / directory internals
  * ------------------------------------------------------------------------- */
 
+static u32 default_mode_for_type(u32 type) {
+    if (type == INO_DIR) {
+        return 0x41ED;               /* S_IFDIR | 0755 */
+    }
+    if (type == INO_SYMLINK) {
+        return 0xA1FF;               /* S_IFLNK | 0777 */
+    }
+    if (type == INO_CONSOLE || type == INO_NULL || type == INO_ZERO) {
+        return 0x21B6;               /* S_IFCHR | 0666 */
+    }
+    /* files + /proc synthetics default to regular 0644 */
+    return 0x81A4;
+}
+
+static u32 apply_umask_mode(u32 ifmt, u32 create_perm) {
+    u32 um = sched_umask_get() & 0x1FF;
+    u32 perm = create_perm & 0x1FF;
+    return (ifmt & 0xF000) | (perm & ~um);
+}
+
 static u32 alloc_ino(u32 type, u32 parent) {
     u32 i;
     /* Slots 2..MAX_INODES-1, skipping fixed console/null/zero slots. */
@@ -175,6 +197,7 @@ static u32 alloc_ino(u32 type, u32 parent) {
             inodes[i].parent = parent;
             inodes[i].ndent = 0;
             inodes[i].ro = 0;
+            inodes[i].mode = default_mode_for_type(type);
             inodes[i].sdata = 0;
             inodes[i].buf = 0;
             inodes[i].size = 0;
@@ -431,6 +454,7 @@ void fs_init(void) {
         inodes[i].parent = 0;
         inodes[i].ndent = 0;
         inodes[i].ro = 0;
+        inodes[i].mode = 0;
         inodes[i].sdata = 0;
         inodes[i].buf = 0;
         inodes[i].size = 0;
@@ -451,26 +475,34 @@ void fs_init(void) {
      * slots from 2 up); root's parent is itself so "/.." stays at root. */
     inodes[ROOT_INO].type = INO_DIR;
     inodes[ROOT_INO].parent = ROOT_INO;
+    inodes[ROOT_INO].mode = 0x41ED;          /* S_IFDIR | 0755 */
 
     /* Permanent console character device; linked as /dev/tty by
      * fs_publish_chrdevs() after /dev exists. */
     inodes[CONSOLE_INO].type = INO_CONSOLE;
     inodes[CONSOLE_INO].parent = CONSOLE_INO;
+    inodes[CONSOLE_INO].mode = 0x21B6;       /* S_IFCHR | 0666 */
 
     /* Fixed /dev/null and /dev/zero nodes (linked in fs_publish_chrdevs). */
     inodes[NULL_INO].type = INO_NULL;
     inodes[NULL_INO].parent = NULL_INO;
+    inodes[NULL_INO].mode = 0x21B6;
     inodes[ZERO_INO].type = INO_ZERO;
     inodes[ZERO_INO].parent = ZERO_INO;
+    inodes[ZERO_INO].mode = 0x21B6;
 
     /* Fixed /proc/self/{status,maps,cmdline,environ}; linked in fs_publish_procfs. */
     inodes[PROC_STATUS_INO].type = INO_PROC_STATUS;
+    inodes[PROC_STATUS_INO].mode = 0x81A4;
     inodes[PROC_STATUS_INO].parent = PROC_STATUS_INO;
     inodes[PROC_MAPS_INO].type = INO_PROC_MAPS;
+    inodes[PROC_MAPS_INO].mode = 0x81A4;
     inodes[PROC_MAPS_INO].parent = PROC_MAPS_INO;
     inodes[PROC_CMDLINE_INO].type = INO_PROC_CMDLINE;
+    inodes[PROC_CMDLINE_INO].mode = 0x81A4;
     inodes[PROC_CMDLINE_INO].parent = PROC_CMDLINE_INO;
     inodes[PROC_ENVIRON_INO].type = INO_PROC_ENVIRON;
+    inodes[PROC_ENVIRON_INO].mode = 0x81A4;
     inodes[PROC_ENVIRON_INO].parent = PROC_ENVIRON_INO;
 
     opens[CONSOLE_FH].used = 1;
@@ -611,6 +643,7 @@ u32 fs_symlink(const char *target, const char *linkpath) {
     if (ino == 0) {
         return 0;
     }
+    inodes[ino].mode = apply_umask_mode(0xA000, 0x1FF); /* IFLNK|0777 */
     buf = (char *)mem.kmalloc(tlen + 1);
     if (buf == 0) {
         inodes[ino].type = INO_FREE;
@@ -670,6 +703,7 @@ u32 fs_create(const char *path) {
     if (ino == 0) {
         return 0;
     }
+    inodes[ino].mode = apply_umask_mode(0x8000, 0x1B6); /* IFREG|0666 */
     if (!dir_add(parent, last, last_n, ino)) {
         inodes[ino].type = INO_FREE;
         return 0;
@@ -689,6 +723,7 @@ u32 fs_mkdir(const char *path) {
     if (ino == 0) {
         return 0;
     }
+    inodes[ino].mode = apply_umask_mode(0x4000, 0x1FF); /* IFDIR|0777 */
     if (!dir_add(parent, last, last_n, ino)) {
         inodes[ino].type = INO_FREE;
         return 0;
@@ -986,6 +1021,10 @@ void fs_file_retain(u32 fh) {
 }
 
 u32 fs_file_open(const char *path, u32 flags) {
+    return fs_file_open_mode(path, flags, 0x1B6); /* default creat 0666 */
+}
+
+u32 fs_file_open_mode(const char *path, u32 flags, u32 creat_mode) {
     u32 ino = walk_lookup(path);
     u32 mode = flags & 3;
     u32 readable = 0;
@@ -999,6 +1038,10 @@ u32 fs_file_open(const char *path, u32 flags) {
         ino = fs_create(path);
         if (ino == 0) {
             return FH_BAD;
+        }
+        /* fs_create applied 0666&~umask; honor open(2) mode when non-zero. */
+        if (creat_mode != 0) {
+            inodes[ino].mode = apply_umask_mode(0x8000, creat_mode);
         }
     } else if ((flags & O_CREAT) != 0 && (flags & O_EXCL) != 0) {
         return FH_BAD;                /* O_CREAT|O_EXCL and name exists */
@@ -1433,6 +1476,22 @@ u32 fs_ino_count(void) {
     return n;
 }
 
+
+/* chmod(2): replace permission bits (07777), keep S_IFMT. */
+u32 fs_chmod(const char *path, u32 mode) {
+    u32 ino = walk_lookup_nofollow(path);
+    u32 cur;
+    if (ino == 0) {
+        return 0;
+    }
+    cur = inodes[ino].mode;
+    if (cur == 0) {
+        cur = default_mode_for_type(inodes[ino].type);
+    }
+    inodes[ino].mode = (cur & 0xF000) | (mode & 0x0FFF);
+    return 1;
+}
+
 /* Fill Linux-ish mode/size/rdev for a ramfs inode. Returns 0 on failure.
  * mode already includes S_IFxxx | permission bits; rdev is major/minor for
  * char devices (null/zero/tty), else 0. */
@@ -1453,30 +1512,25 @@ u32 fs_stat_ino(u32 ino, u32 *mode_out, u64 *size_out, u32 *rdev_out,
     size = inodes[ino].size;
     rdev = 0;
     nlink = 1;
+    mode = inodes[ino].mode;
+    if (mode == 0) {
+        mode = default_mode_for_type(t);
+    }
     if (t == INO_DIR) {
-        mode = 0x41ED;               /* S_IFDIR | 0755 */
         nlink = inodes[ino].ndent + 2;
         size = 0;
-    } else if (t == INO_FILE) {
-        mode = 0x81A4;               /* S_IFREG | 0644 */
     } else if (t == INO_CONSOLE) {
-        mode = 0x21B6;               /* S_IFCHR | 0666 */
         rdev = (5 << 8) | 0;         /* tty-ish */
         size = 0;
     } else if (t == INO_NULL) {
-        mode = 0x21B6;
         rdev = (1 << 8) | 3;         /* /dev/null */
         size = 0;
     } else if (t == INO_ZERO) {
-        mode = 0x21B6;
         rdev = (1 << 8) | 5;         /* /dev/zero */
         size = 0;
-    } else if (t == INO_SYMLINK) {
-        mode = 0xA1FF;               /* S_IFLNK | 0777 */
     } else if (inode_is_proc(t)) {
-        mode = 0x81A4;               /* S_IFREG | 0644 */
         size = 0;                    /* live size known after open snapshot */
-    } else {
+    } else if (t != INO_FILE && t != INO_SYMLINK) {
         return 0;
     }
     if (mode_out) {

@@ -8,6 +8,7 @@ typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
 extern void kprintf(const char *fmt, ...);
+extern u32 sched_umask_get(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
@@ -1916,7 +1917,17 @@ u32 ext2_mount(void) {
     return 1;
 }
 
+static u16 ext2_creat_mode(u32 ifmt, u32 creat_perm) {
+    u32 um = sched_umask_get() & 0x1FF;
+    u32 perm = creat_perm & 0x1FF;
+    return (u16)((ifmt & EXT2_S_IFMT) | (perm & ~um));
+}
+
 u32 ext2_open(const char *path, u32 flags) {
+    return ext2_open_mode(path, flags, 0x1B6); /* default creat 0666 */
+}
+
+u32 ext2_open_mode(const char *path, u32 flags, u32 creat_mode) {
     const char *rel;
     char last[NAME_MAX + 1];
     u32 last_n;
@@ -1927,6 +1938,7 @@ u32 ext2_open(const char *path, u32 flags) {
     u32 acc = flags & 3;
     u32 want_creat = (flags & O_CREAT) != 0;
     u32 want_trunc = (flags & O_TRUNC) != 0;
+    u32 cperm = (creat_mode != 0) ? (creat_mode & 0x1FF) : 0x1B6;
 
     if (!sb.mounted) return 0;
     rel = persist_rel(path);
@@ -1961,7 +1973,7 @@ u32 ext2_open(const char *path, u32 flags) {
             neu = alloc_inode_num();
             if (neu == 0) { jl_commit(); return 0; }
             for (k = 0; k < 128; k++) ino_raw[k] = 0;
-            wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFREG | 0x1A4));
+            wr16(ino_raw + I_MODE, ext2_creat_mode(EXT2_S_IFREG, cperm));
             wr16(ino_raw + I_LINKS, 1);
             wr32(ino_raw + I_SIZE_LO, 0);
             wr32(ino_raw + I_BLOCKS, 0);
@@ -2038,6 +2050,38 @@ u32 ext2_fh_ino(u32 fh) {
     return opens[s].ino;
 }
 
+
+/* chmod(2) on an Ext2 path: replace permission bits, keep file type. */
+u32 ext2_chmod(const char *path, u32 mode) {
+    const char *rel;
+    u32 ino;
+    u32 i;
+    u16 cur;
+    u16 neu;
+    if (!sb.mounted || path == 0) return 0;
+    rel = persist_rel(path);
+    if (rel == 0) return 0;
+    if (rel[0] == 0) {
+        ino = EXT2_ROOT_INO;
+    } else {
+        ino = walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0);
+        if (ino == 0) return 0;
+    }
+    if (!inode_read(ino, ino_raw)) return 0;
+    cur = rd16(ino_raw + I_MODE);
+    neu = (u16)((cur & EXT2_S_IFMT) | (mode & 0x0FFF));
+    jl_begin();
+    wr16(ino_raw + I_MODE, neu);
+    if (!inode_write(ino, ino_raw)) { jl_commit(); return 0; }
+    jl_commit();
+    for (i = 0; i < MAX_OPEN; i++) {
+        if (opens[i].used && opens[i].ino == ino) {
+            opens[i].mode = neu;
+        }
+    }
+    return 1;
+}
+
 /* Path-based Ext2 stat: fills ino/mode/size from the on-disk inode.
  * Returns 1 on success. */
 u32 ext2_stat_path(const char *path, u32 *ino_out, u32 *mode_out, u64 *size_out,
@@ -2102,7 +2146,7 @@ u32 ext2_symlink(const char *target, const char *linkpath) {
     neu = alloc_inode_num();
     if (neu == 0) { jl_commit(); return 0; }
     for (k = 0; k < 128; k++) ino_raw[k] = 0;
-    wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFLNK | 0x1FF));
+    wr16(ino_raw + I_MODE, ext2_creat_mode(EXT2_S_IFLNK, 0x1FF));
     wr16(ino_raw + I_LINKS, 1);
     wr32(ino_raw + I_SIZE_LO, tlen);
     if (tlen < SYMLINK_FAST_MAX) {
@@ -2413,20 +2457,37 @@ u64 ext2_getdents(u32 fh, char *kbuf, u64 len) {
                         opens[s].off += produced / DENT_RECLEN;
                         return produced;
                     }
-                    /* Record: ino:u32, reclen:u16=48, type:u8, namelen:u8, name */
-                    wr32((u8 *)(kbuf + produced), ino);
-                    wr16((u8 *)(kbuf + produced + 4), (u16)DENT_RECLEN);
-                    if (ftype == EXT2_FT_DIR) {
-                        kbuf[produced + 6] = (char)4;
-                    } else if (ftype == EXT2_FT_SYMLINK) {
-                        kbuf[produced + 6] = (char)10;
-                    } else {
-                        kbuf[produced + 6] = (char)8;
-                    }
-                    kbuf[produced + 7] = (char)namelen;
-                    for (k = 0; k < 40; k++) kbuf[produced + 8 + k] = 0;
-                    for (k = 0; k < namelen && k < 39; k++) {
-                        kbuf[produced + 8 + k] = (char)blk_buf[pos + 8 + k];
+                    /* Match Ramfs getdents64 layout used by /bin/ls:
+                     * ino:u64@0, off:u64@8, reclen:u16@16=48, type:u8@18,
+                     * name@19 (29 bytes NUL-padded). */
+                    {
+                        u32 t;
+                        for (k = 0; k < DENT_RECLEN; k++) {
+                            kbuf[produced + k] = 0;
+                        }
+                        /* d_ino little-endian u64 */
+                        kbuf[produced + 0] = (char)(ino & 0xFF);
+                        kbuf[produced + 1] = (char)((ino >> 8) & 0xFF);
+                        kbuf[produced + 2] = (char)((ino >> 16) & 0xFF);
+                        kbuf[produced + 3] = (char)((ino >> 24) & 0xFF);
+                        /* d_off = next index (cookie); approximate with produced */
+                        t = (u32)(opens[s].off + produced / DENT_RECLEN + 1);
+                        kbuf[produced + 8] = (char)(t & 0xFF);
+                        kbuf[produced + 9] = (char)((t >> 8) & 0xFF);
+                        kbuf[produced + 10] = (char)((t >> 16) & 0xFF);
+                        kbuf[produced + 11] = (char)((t >> 24) & 0xFF);
+                        kbuf[produced + 16] = (char)(DENT_RECLEN & 0xFF);
+                        kbuf[produced + 17] = (char)((DENT_RECLEN >> 8) & 0xFF);
+                        if (ftype == EXT2_FT_DIR) {
+                            kbuf[produced + 18] = (char)4;
+                        } else if (ftype == EXT2_FT_SYMLINK) {
+                            kbuf[produced + 18] = (char)10;
+                        } else {
+                            kbuf[produced + 18] = (char)8;
+                        }
+                        for (k = 0; k < namelen && k < 29; k++) {
+                            kbuf[produced + 19 + k] = (char)blk_buf[pos + 8 + k];
+                        }
                     }
                     produced += DENT_RECLEN;
                 }
@@ -2456,7 +2517,7 @@ u32 ext2_mkdir(const char *path) {
     neu = alloc_inode_num();
     if (neu == 0) { jl_commit(); return 0; }
     for (k = 0; k < 128; k++) ino_raw[k] = 0;
-    wr16(ino_raw + I_MODE, (u16)(EXT2_S_IFDIR | 0x1ED));
+    wr16(ino_raw + I_MODE, ext2_creat_mode(EXT2_S_IFDIR, 0x1FF));
     wr16(ino_raw + I_LINKS, 2);                /* . and parent link */
     wr32(ino_raw + I_SIZE_LO, sb.block_size);
     phys = alloc_block();

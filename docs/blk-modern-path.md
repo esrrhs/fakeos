@@ -141,8 +141,20 @@ on open). Empty/NULL envp seeds `FAKECC_PKG=/src` so kbuild/fakecc keep working.
 Shell passes its env table through `execve`. Focused virtio login smoke covers
 `export` + `cat /proc/self/environ` alongside login/`uname`/`ls -l`/`udptest`.
 
+## chmod / umask + Ext2 getdents / ls file operands — landed
+
+`chmod(2)` (nr 90) updates Ramfs inode `mode` and Ext2 `i_mode` permission bits
+(keeps `S_IFMT`; no ACL model). Per-TCB `umask` (default `0022`, fork/clone
+inherits) is applied on Ramfs/Ext2 create/`mkdir`/`symlink` and on
+`open(O_CREAT)` via the creat mode argument. Shell builtins: `chmod MODE FILE...`,
+`umask` / `umask MODE` (octal). Ext2 `getdents` now matches the Ramfs 48-byte
+record layout (`d_type@18`, `d_name@19`) so `ls` works on `/home`. `/bin/ls`
+accepts file operands (`AT_EMPTY_PATH` fstat). Focused virtio login smoke covers
+chmod/umask/`ls -l` on Ramfs+Ext2 plus login/`uname`/`udptest`/`env` (smp 1/2).
+
 ## Suggested next steps
 
-1. Optional shell polish: tab completion, timestamps / multi-column `ls`.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Deep jbd — avoid unless needed.
+1. Optional shell polish: tab completion, timestamps on `ls -l` (wire Ext2/Ramfs mtime into `stat`).
+2. `chown`/`getuid` stubs if ownership display is wanted.
+3. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+4. Deep jbd — avoid unless needed.

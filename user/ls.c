@@ -1,7 +1,8 @@
 /* fakeos userland - ls: list one directory (default: current directory).
  * Parses the kernel's fixed 48-byte dirent records (name at offset 19).
  * Optional -l uses fstatat(dirfd, name) for mode/size; symlinks show
- * `name -> target` via readlink (daily-driver). */
+ * `name -> target` via readlink. File operands print one entry.
+ * chmod/umask: modes come from live inode permission bits. */
 package user;
 
 typedef unsigned long u64;
@@ -11,7 +12,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
-extern long u_getdents(long fd, void *buf, unsigned long len);
+extern long u_getdents(long fd, void *buf, unsigned long n);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern void printf(const char *fmt, ...);
@@ -27,7 +28,8 @@ enum {
     S_IFIFO = 0x1000,
     S_IFSOCK = 0xC000,
     S_IFLNK = 0xA000,
-    AT_SYMLINK_NOFOLLOW = 0x100
+    AT_SYMLINK_NOFOLLOW = 0x100,
+    AT_EMPTY_PATH = 0x1000
 };
 
 static unsigned int load_u32(const char *p) {
@@ -45,7 +47,6 @@ static unsigned long load_u64(const char *p) {
     }
     return v;
 }
-
 
 static void join_dir_name(char *out, unsigned long cap, const char *dir,
                           const char *name) {
@@ -112,6 +113,48 @@ static void mode_string(unsigned int mode, char *out) {
     out[10] = 0;
 }
 
+static const char *basename_of(const char *path) {
+    const char *base = path;
+    unsigned long i = 0;
+    while (path[i] != 0) {
+        if (path[i] == '/') {
+            base = path + i + 1;
+        }
+        i++;
+    }
+    if (base[0] == 0) {
+        return path;
+    }
+    return base;
+}
+
+static void print_name_long(const char *dirpath, const char *name,
+                            const char *stbuf) {
+    char mstr[12];
+    unsigned int mode;
+    unsigned long size;
+    mode = load_u32(stbuf + ST_MODE);
+    size = load_u64(stbuf + ST_SIZE);
+    mode_string(mode, mstr);
+    if ((mode & S_IFMT) == S_IFLNK) {
+        char full[96];
+        char tgt[96];
+        long rn;
+        join_dir_name(full, sizeof(full), dirpath, name);
+        rn = u_readlink(full, tgt, sizeof(tgt) - 1);
+        if (rn >= 0) {
+            tgt[rn] = 0;
+            printf("%s %u %s -> %s\n", mstr, (unsigned int)size, name, tgt);
+        } else {
+            printf("%s %u %s -> ?\n", mstr, (unsigned int)size, name);
+        }
+    } else if ((mode & S_IFMT) == S_IFDIR) {
+        printf("%s %u %s/\n", mstr, (unsigned int)size, name);
+    } else {
+        printf("%s %u %s\n", mstr, (unsigned int)size, name);
+    }
+}
+
 int main(int argc, char **argv) {
     const char *path = ".";
     int longfmt = 0;
@@ -131,8 +174,21 @@ int main(int argc, char **argv) {
 
     fd = u_open(path, 0, 0);
     if (fd < 0) {
-        printf("ls: %s: no such directory\n", path);
+        printf("ls: %s: no such file or directory\n", path);
         return 1;
+    }
+    if (u_newfstatat(fd, "", stbuf, AT_EMPTY_PATH) == 0) {
+        unsigned int mode = load_u32(stbuf + ST_MODE);
+        if ((mode & S_IFMT) != S_IFDIR) {
+            const char *base = basename_of(path);
+            if (longfmt) {
+                print_name_long(".", base, stbuf);
+            } else {
+                printf("%s\n", base);
+            }
+            u_close(fd);
+            return 0;
+        }
     }
     for (;;) {
         long off;
@@ -149,35 +205,11 @@ int main(int argc, char **argv) {
             }
             name[k] = 0;
             if (longfmt) {
-                char mstr[12];
-                unsigned int mode;
-                unsigned long size;
                 if (u_newfstatat(fd, name, stbuf, AT_SYMLINK_NOFOLLOW) != 0) {
                     printf("?????????? 0 %s\n", name);
                     continue;
                 }
-                mode = load_u32(stbuf + ST_MODE);
-                size = load_u64(stbuf + ST_SIZE);
-                mode_string(mode, mstr);
-                if ((mode & S_IFMT) == S_IFLNK) {
-                    char full[96];
-                    char tgt[96];
-                    long rn;
-                    join_dir_name(full, sizeof(full), path, name);
-                    rn = u_readlink(full, tgt, sizeof(tgt) - 1);
-                    if (rn >= 0) {
-                        tgt[rn] = 0;
-                        printf("%s %u %s -> %s\n", mstr, (unsigned int)size,
-                               name, tgt);
-                    } else {
-                        printf("%s %u %s -> ?\n", mstr, (unsigned int)size,
-                               name);
-                    }
-                } else if ((mode & S_IFMT) == S_IFDIR) {
-                    printf("%s %u %s/\n", mstr, (unsigned int)size, name);
-                } else {
-                    printf("%s %u %s\n", mstr, (unsigned int)size, name);
-                }
+                print_name_long(path, name, stbuf);
             } else {
                 if (buf[off + 18] == 4) {
                     name[k++] = '/';

@@ -354,7 +354,7 @@ u64 sys_open(u64 upath, u64 flags, u64 mode) {
     char path[PATH_KMAX];
     u32 fh;
     u32 fd;
-    (void)mode;
+    u32 cmode = (u32)mode;
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
     }
@@ -362,9 +362,9 @@ u64 sys_open(u64 upath, u64 flags, u64 mode) {
         if (!fs.ext2_mounted()) {
             return (u64)(-1);
         }
-        fh = fs.ext2_open(path, (u32)flags);
+        fh = fs.ext2_open_mode(path, (u32)flags, cmode);
     } else {
-        fh = fs.fs_file_open(path, (u32)flags);
+        fh = fs.fs_file_open_mode(path, (u32)flags, cmode);
     }
     if (fh == 0) {
         return (u64)(-1);

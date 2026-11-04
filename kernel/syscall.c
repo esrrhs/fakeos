@@ -73,6 +73,7 @@ extern u64 sys_mprotect(u64 addr, u64 len, u64 prot);
 extern u64 sys_nice(u64 inc);
 extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
+extern u64 sys_umask(u64 mask);
 extern u64 sys_gettid(void);
 extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
 extern u64 sys_set_tid_address(u64 tidptr);
@@ -152,6 +153,7 @@ enum {
     SC_YIELD = 24,
     SC_GETPID = 39,
     SC_CHMOD = 90,
+    SC_UMASK = 95,
     SC_GETTID = 186,
     SC_CLONE = 56,
     SC_FORK  = 57,
@@ -442,6 +444,9 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_CHMOD) {
         return sys_chmod(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_UMASK) {
+        return sys_umask(f->rdi);
     }
     if (f->rax == SC_GETTID) {
         return sys_gettid();

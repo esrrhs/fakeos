@@ -11,6 +11,8 @@ typedef unsigned long u64;
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
+extern long u_chmod(const char *path, long mode);
+extern long u_umask(long mask);
 extern long u_close(long fd);
 extern long u_dup2(long oldfd, long newfd);
 extern long u_pipe(int *pipefd);
@@ -755,7 +757,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill") ||
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "unset") ||
-           eq(cmd, "which");
+           eq(cmd, "which") || eq(cmd, "chmod") || eq(cmd, "umask");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -876,9 +878,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; echo $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
@@ -1068,6 +1070,71 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             } else {
                 printf("%s: not found\n", tokens[1]);
                 rc = 1;
+            }
+        }
+    } else if (eq(tokens[0], "umask")) {
+        if (tokens[1] == 0) {
+            long curm = u_umask(0);
+            char b[4];
+            unsigned int v;
+            u_umask(curm);
+            v = (unsigned int)(curm & 0x1FF);
+            b[0] = (char)('0' + ((v >> 6) & 7));
+            b[1] = (char)('0' + ((v >> 3) & 7));
+            b[2] = (char)('0' + (v & 7));
+            b[3] = 0;
+            puts(b);
+            rc = 0;
+        } else {
+            unsigned int mode = 0;
+            const char *s = tokens[1];
+            int j;
+            int bad = 0;
+            for (j = 0; s[j] != 0; j++) {
+                if (s[j] < '0' || s[j] > '7') {
+                    bad = 1;
+                    break;
+                }
+                mode = (mode << 3) | (unsigned int)(s[j] - '0');
+            }
+            if (bad) {
+                puts("sh: umask: bad mode");
+                rc = 1;
+            } else {
+                u_umask((long)mode);
+                rc = 0;
+            }
+        }
+    } else if (eq(tokens[0], "chmod")) {
+        unsigned int mode = 0;
+        const char *s;
+        int j;
+        int ai;
+        int bad = 0;
+        if (tokens[1] == 0 || tokens[2] == 0) {
+            puts("usage: chmod MODE FILE...");
+            rc = 1;
+        } else {
+            s = tokens[1];
+            for (j = 0; s[j] != 0; j++) {
+                if (s[j] < '0' || s[j] > '7') {
+                    bad = 1;
+                    break;
+                }
+                mode = (mode << 3) | (unsigned int)(s[j] - '0');
+            }
+            if (bad) {
+                puts("sh: chmod: bad mode");
+                rc = 1;
+            } else {
+                rc = 0;
+                for (ai = 2; tokens[ai] != 0; ai++) {
+                    if (u_chmod(tokens[ai], (long)mode) != 0) {
+                        printf("sh: chmod: %s: failed\n", tokens[ai]);
+                        rc = 1;
+                        break;
+                    }
+                }
             }
         }
     } else if (eq(tokens[0], "pwd")) {
@@ -1517,7 +1584,7 @@ int main(int argc, char **argv) {
     }
 
     sh_env_init();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, chmod/umask, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
