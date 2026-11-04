@@ -10,8 +10,8 @@ typedef types.uint64_t u64;
 extern void kprintf(const char *fmt, ...);
 extern u32 sched_umask_get(void);
 extern u64 sched_tick_count(void);
-extern u32 sched_current_uid(void);
-extern u32 sched_current_gid(void);
+extern u32 sched_current_euid(void);
+extern u32 sched_current_egid(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal Ext2 (rev 0/1) over VirtIO-blk.
@@ -1938,8 +1938,8 @@ static u32 now_sec(void) {
 /* Stamp owner + atime/ctime/mtime on a freshly zeroed inode raw. */
 static void ext2_stamp_new(u8 *raw) {
     u32 now = now_sec();
-    wr16(raw + I_UID, (u16)(sched_current_uid() & 0xFFFF));
-    wr16(raw + I_GID, (u16)(sched_current_gid() & 0xFFFF));
+    wr16(raw + I_UID, (u16)(sched_current_euid() & 0xFFFF));
+    wr16(raw + I_GID, (u16)(sched_current_egid() & 0xFFFF));
     wr32(raw + I_ATIME, now);
     wr32(raw + I_CTIME, now);
     wr32(raw + I_MTIME, now);

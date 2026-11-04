@@ -79,6 +79,12 @@ extern u64 sys_getuid(void);
 extern u64 sys_geteuid(void);
 extern u64 sys_getgid(void);
 extern u64 sys_getegid(void);
+extern u64 sys_setuid(u64 uid);
+extern u64 sys_setgid(u64 gid);
+extern u64 sys_setreuid(u64 ruid, u64 euid);
+extern u64 sys_setregid(u64 rgid, u64 egid);
+extern u64 sys_getgroups(u64 size, u64 list);
+extern u64 sys_setgroups(u64 size, u64 list);
 extern u64 sys_gettid(void);
 extern u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
 extern u64 sys_set_tid_address(u64 tidptr);
@@ -162,8 +168,14 @@ enum {
     SC_UMASK = 95,
     SC_GETUID = 102,
     SC_GETGID = 104,
+    SC_SETUID = 105,
+    SC_SETGID = 106,
     SC_GETEUID = 107,
     SC_GETEGID = 108,
+    SC_SETREUID = 113,
+    SC_SETREGID = 114,
+    SC_GETGROUPS = 115,
+    SC_SETGROUPS = 116,
     SC_GETTID = 186,
     SC_CLONE = 56,
     SC_FORK  = 57,
@@ -472,6 +484,24 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_GETEGID) {
         return sys_getegid();
+    }
+    if (f->rax == SC_SETUID) {
+        return sys_setuid(f->rdi);
+    }
+    if (f->rax == SC_SETGID) {
+        return sys_setgid(f->rdi);
+    }
+    if (f->rax == SC_SETREUID) {
+        return sys_setreuid(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_SETREGID) {
+        return sys_setregid(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_GETGROUPS) {
+        return sys_getgroups(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_SETGROUPS) {
+        return sys_setgroups(f->rdi, f->rsi);
     }
     if (f->rax == SC_GETTID) {
         return sys_gettid();

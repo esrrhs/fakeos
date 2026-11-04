@@ -18,6 +18,10 @@ extern long u_getuid(void);
 extern long u_geteuid(void);
 extern long u_getgid(void);
 extern long u_getegid(void);
+extern long u_getgroups(long size, unsigned int *list);
+extern long u_setuid(long uid);
+extern long u_setgid(long gid);
+extern long u_setreuid(long ruid, long euid);
 extern long u_close(long fd);
 extern long u_dup2(long oldfd, long newfd);
 extern long u_pipe(int *pipefd);
@@ -763,7 +767,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "unset") ||
            eq(cmd, "which") || eq(cmd, "chmod") || eq(cmd, "umask")
-        || eq(cmd, "chown") || eq(cmd, "id");
+        || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -884,9 +888,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, chown, id, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; echo $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
         return 0;
@@ -1144,10 +1148,61 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "id")) {
-        printf("uid=%d euid=%d gid=%d egid=%d\n",
+        unsigned int gids[8];
+        long ng;
+        long gi;
+        printf("uid=%d euid=%d gid=%d egid=%d",
                (int)u_getuid(), (int)u_geteuid(),
                (int)u_getgid(), (int)u_getegid());
+        ng = u_getgroups(8, gids);
+        if (ng < 0) {
+            ng = 0;
+        }
+        if (ng > 0) {
+            printf(" groups=");
+            for (gi = 0; gi < ng; gi++) {
+                if (gi) printf(",");
+                printf("%d", (int)gids[gi]);
+            }
+        }
+        printf("\n");
         rc = 0;
+    } else if (eq(tokens[0], "seteuid")) {
+        if (tokens[1] == 0) {
+            puts("usage: seteuid UID");
+            rc = 1;
+        } else {
+            unsigned long v = 0;
+            const char *s = tokens[1];
+            while (*s >= '0' && *s <= '9') {
+                v = v * 10UL + (unsigned long)(*s - '0');
+                s++;
+            }
+            if (*s != 0 || u_setreuid((long)(-1), (long)v) != 0) {
+                puts("sh: seteuid failed");
+                rc = 1;
+            } else {
+                rc = 0;
+            }
+        }
+    } else if (eq(tokens[0], "setuid")) {
+        if (tokens[1] == 0) {
+            puts("usage: setuid UID");
+            rc = 1;
+        } else {
+            unsigned long v = 0;
+            const char *s = tokens[1];
+            while (*s >= '0' && *s <= '9') {
+                v = v * 10UL + (unsigned long)(*s - '0');
+                s++;
+            }
+            if (*s != 0 || u_setuid((long)v) != 0) {
+                puts("sh: setuid failed");
+                rc = 1;
+            } else {
+                rc = 0;
+            }
+        }
     } else if (eq(tokens[0], "chown")) {
         /* chown UID[:GID] FILE...  (decimal; missing GID keeps old) */
         if (tokens[1] == 0 || tokens[2] == 0) {

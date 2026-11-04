@@ -41,5 +41,6 @@ BLOB environ,    "user/environ.txt"
 BLOB resolv_conf,"user/resolv.conf"
 BLOB hosts_file, "user/hosts"
 BLOB passwd_file,"user/passwd"
+BLOB group_file, "user/group"
 
 section .note.GNU-stack noalloc noexec nowrite progbits

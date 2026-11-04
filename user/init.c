@@ -40,6 +40,12 @@ extern long u_geteuid(void);
 extern long u_getgid(void);
 extern long u_getegid(void);
 extern long u_chown(const char *path, long uid, long gid);
+extern long u_setuid(long uid);
+extern long u_setgid(long gid);
+extern long u_setreuid(long ruid, long euid);
+extern long u_setregid(long rgid, long egid);
+extern long u_getgroups(long size, unsigned int *list);
+extern long u_setgroups(long size, unsigned int *list);
 extern long u_stat(const char *path, void *statbuf);
 extern long u_fstat(long fd, void *statbuf);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
@@ -1664,6 +1670,110 @@ static unsigned long st_u64(const char *st, unsigned int off) {
     return v;
 }
 
+
+/* setuid/seteuid + supplementary groups. */
+static void cred_setuid_groups_test(void) {
+    unsigned int gids[8];
+    unsigned int want[3];
+    long ng;
+    long fd;
+    unsigned int st_uid;
+    char st[144];
+    unsigned long i;
+
+    if (u_getuid() != 0 || u_geteuid() != 0) {
+        puts("[U][FAIL] cred test needs root");
+        return;
+    }
+    want[0] = 10;
+    want[1] = 100;
+    want[2] = 1000;
+    if (u_setgroups(3, want) != 0) {
+        puts("[U][FAIL] setgroups");
+        return;
+    }
+    ng = u_getgroups(8, gids);
+    if (ng != 3 || gids[0] != 10 || gids[1] != 100 || gids[2] != 1000) {
+        puts("[U][FAIL] getgroups roundtrip");
+        return;
+    }
+    if (u_getgroups(0, 0) != 3) {
+        puts("[U][FAIL] getgroups size=0 count");
+        return;
+    }
+    /* seteuid via setreuid(-1, e): drop effective, keep real. */
+    if (u_setreuid((long)(-1), 1000) != 0) {
+        puts("[U][FAIL] seteuid 1000");
+        return;
+    }
+    if (u_getuid() != 0 || u_geteuid() != 1000) {
+        puts("[U][FAIL] after seteuid r/e");
+        return;
+    }
+    /* Non-root cannot setgroups. */
+    if (u_setgroups(1, want) == 0) {
+        puts("[U][FAIL] setgroups as non-root should fail");
+        return;
+    }
+    /* Non-root cannot seteuid to foreign uid. */
+    if (u_setreuid((long)(-1), 7) == 0) {
+        puts("[U][FAIL] seteuid foreign should fail");
+        return;
+    }
+    /* Restore euid with setreuid to ruid. */
+    if (u_setreuid((long)(-1), 0) != 0) {
+        puts("[U][FAIL] restore euid");
+        return;
+    }
+    if (u_geteuid() != 0) {
+        puts("[U][FAIL] euid not restored");
+        return;
+    }
+    /* setgid + setuid drop for create stamp via euid. */
+    if (u_setgid(1000) != 0 || u_setreuid((long)(-1), 1000) != 0) {
+        puts("[U][FAIL] prep euid create");
+        return;
+    }
+    fd = u_open("/tmp/cred_euid.txt", 0x40 | 0x200 | 2, 0x1A4);
+    if (fd < 0) {
+        puts("[U][FAIL] open cred_euid create");
+        return;
+    }
+    u_close(fd);
+    for (i = 0; i < 144; i++) st[i] = 0;
+    if (u_stat("/tmp/cred_euid.txt", st) != 0) {
+        puts("[U][FAIL] stat cred_euid");
+        return;
+    }
+    st_uid = (unsigned int)(unsigned char)st[28]
+           | ((unsigned int)(unsigned char)st[29] << 8)
+           | ((unsigned int)(unsigned char)st[30] << 16)
+           | ((unsigned int)(unsigned char)st[31] << 24);
+    if (st_uid != 1000) {
+        puts("[U][FAIL] create owner not euid");
+        return;
+    }
+    /* Full setuid drop + restore (init must stay root for later). */
+    if (u_setuid(0) != 0) {
+        puts("[U][FAIL] setuid restore root");
+        return;
+    }
+    if (u_setgid(0) != 0) {
+        puts("[U][FAIL] setgid restore root");
+        return;
+    }
+    if (u_setgroups(0, 0) != 0) {
+        puts("[U][FAIL] clear groups");
+        return;
+    }
+    if (u_getuid() != 0 || u_geteuid() != 0 || u_getgid() != 0 || u_getegid() != 0) {
+        puts("[U][FAIL] creds not root at end");
+        return;
+    }
+    puts("[U][PASS] setuid/seteuid/groups");
+}
+
+
 /* getuid/chown stubs + mtime stamped into struct stat. */
 static void owner_mtime_test(void) {
     char st[144];
@@ -2040,6 +2150,7 @@ int main(int argc, char **argv) {
     proc_self_test();
     stat_test();
     owner_mtime_test();
+    cred_setuid_groups_test();
     symlink_test();
     getcwd_test();
     dirent_test();

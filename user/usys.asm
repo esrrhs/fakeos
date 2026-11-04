@@ -76,6 +76,12 @@ global u_getuid
 global u_geteuid
 global u_getgid
 global u_getegid
+global u_setuid
+global u_setgid
+global u_setreuid
+global u_setregid
+global u_getgroups
+global u_setgroups
 global u_futex
 global u_gettid
 global u_clone
@@ -365,6 +371,24 @@ USYSC1 u_getgid, 104
 
 ; long u_getegid(void) -- Linux nr 108
 USYSC1 u_getegid, 108
+
+; long u_setuid(long uid) -- Linux nr 105
+USYSC1 u_setuid, 105
+
+; long u_setgid(long gid) -- Linux nr 106
+USYSC1 u_setgid, 106
+
+; long u_setreuid(long ruid, long euid) -- Linux nr 113; -1 = unchanged
+USYSC1 u_setreuid, 113
+
+; long u_setregid(long rgid, long egid) -- Linux nr 114; -1 = unchanged
+USYSC1 u_setregid, 114
+
+; long u_getgroups(long size, unsigned int *list) -- Linux nr 115
+USYSC1 u_getgroups, 115
+
+; long u_setgroups(long size, const unsigned int *list) -- Linux nr 116
+USYSC1 u_setgroups, 116
 
 ; long u_newfstatat(long dfd, const char *path, void *statbuf, long flags)
 ; 4th C arg RCX -> R10

@@ -173,9 +173,23 @@ or no common-prefix progress rings BEL. Skipped when ECHO is off. Focused
 virtio login smoke covers Tab (`ec`→`echo`, `/tm`→`/tmp/`, `/bin/l`→`/bin/ls`
 or shared `l` prefix) plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
+
+## setuid/seteuid + groups — landed
+
+Credential mutators on the TCB: `setuid`/`setgid` (nr 105/106), `setreuid`/`setregid`
+(nr 113/114; `(u32)-1` unchanged — `seteuid` is `setreuid(-1, e)`), and
+`getgroups`/`setgroups` (nr 115/116; up to 8 supplementary gids). Privilege is
+`euid == 0`; otherwise uid/gid targets must match real or effective. New files
+take `euid`/`egid`. `/etc/group` is published; `/bin/login` parses passwd uid/gid,
+loads supplementary groups, then `setgroups`/`setgid`/`setuid` before exec (and
+seeds `USER`/`HOME`/`FAKECC_PKG`). Shell `id` prints `groups=`; thin `setuid` /
+`seteuid` builtins for interactive checks. Passwd ships `root` and `user` (1000).
+Init smoke: `[U][PASS] setuid/seteuid/groups`. Focused virtio login smoke covers
+id/groups/`seteuid`/`setuid` plus login/`uname`/`ls -l`/`udptest`/`env` (smp 1/2).
+
 ## Suggested next steps
 
-1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-2. Deep jbd — avoid unless needed.
-3. More interactive polish: double-Tab match listing, setuid/groups, history
-   persistence, head/wc if still missing, networking user tools.
+1. Double-Tab match listing / more TTY line-edit polish.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+3. Utils if thin: head/wc; history persistence; net user tools.
+4. Deep jbd — avoid unless needed.

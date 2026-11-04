@@ -19,8 +19,8 @@ extern u64 procfs_gen_cmdline(char *buf, u64 cap);
 extern u64 procfs_gen_environ(char *buf, u64 cap);
 extern u32 sched_umask_get(void);
 extern u64 sched_tick_count(void);
-extern u32 sched_current_uid(void);
-extern u32 sched_current_gid(void);
+extern u32 sched_current_euid(void);
+extern u32 sched_current_egid(void);
 
 /* ---------------------------------------------------------------------------
  * Minimal in-memory VFS + Ramfs
@@ -208,8 +208,8 @@ static u32 alloc_ino(u32 type, u32 parent) {
             inodes[i].ndent = 0;
             inodes[i].ro = 0;
             inodes[i].mode = default_mode_for_type(type);
-            inodes[i].uid = sched_current_uid();
-            inodes[i].gid = sched_current_gid();
+            inodes[i].uid = sched_current_euid();
+            inodes[i].gid = sched_current_egid();
             inodes[i].mtime = now_sec();
             inodes[i].sdata = 0;
             inodes[i].buf = 0;

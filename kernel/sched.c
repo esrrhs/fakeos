@@ -114,6 +114,8 @@ struct tcb {
     u32 euid;          /* effective uid (geteuid)                         */
     u32 gid;           /* real gid (getgid)                               */
     u32 egid;          /* effective gid (getegid)                         */
+    u32 ngroups;       /* supplementary group count (getgroups)           */
+    u32 groups[8];     /* supplementary gids; NGROUPS_MAX=8               */
 };
 
 /* Sleeping locks: wait channel is the object's own address.
@@ -1990,6 +1992,7 @@ void sched_init(void) {
         threads[i].euid = 0;
         threads[i].gid = 0;
         threads[i].egid = 0;
+        threads[i].ngroups = 0;
         threads[i].id = i;
         idle_mark[i] = 0;
     }
@@ -2149,6 +2152,7 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].euid = 0;
     threads[i].gid = 0;
     threads[i].egid = 0;
+    threads[i].ngroups = 0;
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
@@ -2220,6 +2224,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].euid = 0;
     threads[i].gid = 0;
     threads[i].egid = 0;
+    threads[i].ngroups = 0;
     cfs_set_nice_fields(&threads[i], 0);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
@@ -2321,6 +2326,13 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
     threads[i].euid = threads[sched_cur()].euid;
     threads[i].gid = threads[sched_cur()].gid;
     threads[i].egid = threads[sched_cur()].egid;
+    threads[i].ngroups = threads[sched_cur()].ngroups;
+    {
+        u32 gi;
+        for (gi = 0; gi < 8; gi++) {
+            threads[i].groups[gi] = threads[sched_cur()].groups[gi];
+        }
+    }
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = threads[sched_cur()].tg;
@@ -2424,6 +2436,13 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
     threads[i].euid = threads[sched_cur()].euid;
     threads[i].gid = threads[sched_cur()].gid;
     threads[i].egid = threads[sched_cur()].egid;
+    threads[i].ngroups = threads[sched_cur()].ngroups;
+    {
+        u32 gi;
+        for (gi = 0; gi < 8; gi++) {
+            threads[i].groups[gi] = threads[sched_cur()].groups[gi];
+        }
+    }
     cfs_set_nice_fields(&threads[i], threads[sched_cur()].nice);
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = threads[sched_cur()].tg;
@@ -3205,6 +3224,57 @@ u32 sched_current_gid(void) {
 
 u32 sched_current_egid(void) {
     return threads[sched_cur()].egid;
+}
+
+/* Credential mutators: callers enforce capability rules. */
+void sched_set_uid(u32 uid) {
+    threads[sched_cur()].uid = uid;
+}
+
+void sched_set_euid(u32 euid) {
+    threads[sched_cur()].euid = euid;
+}
+
+void sched_set_gid(u32 gid) {
+    threads[sched_cur()].gid = gid;
+}
+
+void sched_set_egid(u32 egid) {
+    threads[sched_cur()].egid = egid;
+}
+
+u32 sched_current_ngroups(void) {
+    return threads[sched_cur()].ngroups;
+}
+
+u32 sched_groups_get(u32 *dst, u32 n) {
+    u32 i;
+    u32 ng = threads[sched_cur()].ngroups;
+    if (ng > 8) {
+        ng = 8;
+    }
+    if (dst == 0) {
+        return ng;
+    }
+    if (n < ng) {
+        return 0xFFFFFFFF; /* EFAULT-ish: buffer too small */
+    }
+    for (i = 0; i < ng; i++) {
+        dst[i] = threads[sched_cur()].groups[i];
+    }
+    return ng;
+}
+
+u32 sched_groups_set(const u32 *src, u32 n) {
+    u32 i;
+    if (n > 8) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        threads[sched_cur()].groups[i] = src[i];
+    }
+    threads[sched_cur()].ngroups = n;
+    return 1;
 }
 
 u32 sched_current_ppid(void) {

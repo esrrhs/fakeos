@@ -216,7 +216,7 @@ $(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
 endef
 $(foreach p,$(USER_PROGS),$(eval $(call USER_ELF_RULE,$(p))))
 
-$(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt user/resolv.conf user/hosts user/passwd
+$(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt user/resolv.conf user/hosts user/passwd user/group
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<

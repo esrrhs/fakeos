@@ -232,7 +232,7 @@ u64 sys_umask(u64 mask) {
     return (u64)sched_umask_set((u32)mask);
 }
 
-/* Credential stubs: all processes start as root (uid/gid 0). */
+/* Credential stubs: processes start as root (uid/gid 0); login may drop. */
 u64 sys_getuid(void) {
     extern u32 sched_current_uid(void);
     return (u64)sched_current_uid();
@@ -251,6 +251,174 @@ u64 sys_getgid(void) {
 u64 sys_getegid(void) {
     extern u32 sched_current_egid(void);
     return (u64)sched_current_egid();
+}
+
+static u32 cred_is_super(void) {
+    extern u32 sched_current_euid(void);
+    return sched_current_euid() == 0;
+}
+
+static u32 cred_uid_ok(u32 want) {
+    extern u32 sched_current_uid(void);
+    extern u32 sched_current_euid(void);
+    if (cred_is_super()) {
+        return 1;
+    }
+    return want == sched_current_uid() || want == sched_current_euid();
+}
+
+static u32 cred_gid_ok(u32 want) {
+    extern u32 sched_current_gid(void);
+    extern u32 sched_current_egid(void);
+    if (cred_is_super()) {
+        return 1;
+    }
+    return want == sched_current_gid() || want == sched_current_egid();
+}
+
+/* setuid(2): privileged sets real+effective; else only if uid is own ruid/euid. */
+u64 sys_setuid(u64 uid) {
+    extern void sched_set_uid(u32 uid);
+    extern void sched_set_euid(u32 euid);
+    extern u32 sched_current_uid(void);
+    u32 u = (u32)uid;
+    if (cred_is_super()) {
+        sched_set_uid(u);
+        sched_set_euid(u);
+        return 0;
+    }
+    if (!cred_uid_ok(u)) {
+        return (u64)(-1);
+    }
+    /* Unprivileged: match Linux-ish drop of euid to ruid when requested. */
+    if (u == sched_current_uid()) {
+        sched_set_euid(u);
+        return 0;
+    }
+    return (u64)(-1);
+}
+
+u64 sys_setgid(u64 gid) {
+    extern void sched_set_gid(u32 gid);
+    extern void sched_set_egid(u32 egid);
+    extern u32 sched_current_gid(void);
+    u32 g = (u32)gid;
+    if (cred_is_super()) {
+        sched_set_gid(g);
+        sched_set_egid(g);
+        return 0;
+    }
+    if (!cred_gid_ok(g)) {
+        return (u64)(-1);
+    }
+    if (g == sched_current_gid()) {
+        sched_set_egid(g);
+        return 0;
+    }
+    return (u64)(-1);
+}
+
+/* setreuid(2): (u32)-1 leaves a field unchanged. seteuid via setreuid(-1, e). */
+u64 sys_setreuid(u64 ruid, u64 euid) {
+    extern void sched_set_uid(u32 uid);
+    extern void sched_set_euid(u32 euid);
+    extern u32 sched_current_uid(void);
+    extern u32 sched_current_euid(void);
+    u32 cur_r = sched_current_uid();
+    u32 cur_e = sched_current_euid();
+    u32 new_r = (ruid == (u64)0xFFFFFFFFFFFFFFFFULL || ruid == (u64)0xFFFFFFFFUL)
+                ? cur_r : (u32)ruid;
+    u32 new_e = (euid == (u64)0xFFFFFFFFFFFFFFFFULL || euid == (u64)0xFFFFFFFFUL)
+                ? cur_e : (u32)euid;
+    if (!cred_is_super()) {
+        if (!cred_uid_ok(new_r) || !cred_uid_ok(new_e)) {
+            return (u64)(-1);
+        }
+    }
+    sched_set_uid(new_r);
+    sched_set_euid(new_e);
+    return 0;
+}
+
+u64 sys_setregid(u64 rgid, u64 egid) {
+    extern void sched_set_gid(u32 gid);
+    extern void sched_set_egid(u32 egid);
+    extern u32 sched_current_gid(void);
+    extern u32 sched_current_egid(void);
+    u32 cur_r = sched_current_gid();
+    u32 cur_e = sched_current_egid();
+    u32 new_r = (rgid == (u64)0xFFFFFFFFFFFFFFFFULL || rgid == (u64)0xFFFFFFFFUL)
+                ? cur_r : (u32)rgid;
+    u32 new_e = (egid == (u64)0xFFFFFFFFFFFFFFFFULL || egid == (u64)0xFFFFFFFFUL)
+                ? cur_e : (u32)egid;
+    if (!cred_is_super()) {
+        if (!cred_gid_ok(new_r) || !cred_gid_ok(new_e)) {
+            return (u64)(-1);
+        }
+    }
+    sched_set_gid(new_r);
+    sched_set_egid(new_e);
+    return 0;
+}
+
+/* getgroups(2)/setgroups(2): supplementary gids; size 0 => return count. */
+u64 sys_getgroups(u64 size, u64 list) {
+    extern u32 sched_groups_get(u32 *dst, u32 n);
+    extern u32 sched_current_ngroups(void);
+    extern u64 sched_current_as_h(void);
+    u32 ng;
+    u32 tmp[8];
+    u32 i;
+    u64 as;
+    ng = sched_current_ngroups();
+    if (size == 0) {
+        return (u64)ng;
+    }
+    if (size < (u64)ng) {
+        return (u64)(-1);
+    }
+    if (sched_groups_get(tmp, 8) == 0xFFFFFFFF) {
+        return (u64)(-1);
+    }
+    as = sched_current_as_h();
+    if (as == 0 || list == 0 || !mem.as_user_range_ok(as, list, (u64)ng * 4)) {
+        return (u64)(-1);
+    }
+    {
+        volatile u32 *u = (volatile u32 *)list;
+        for (i = 0; i < ng; i++) {
+            u[i] = tmp[i];
+        }
+    }
+    return (u64)ng;
+}
+
+u64 sys_setgroups(u64 size, u64 list) {
+    extern u32 sched_groups_set(const u32 *src, u32 n);
+    extern u64 sched_current_as_h(void);
+    u32 tmp[8];
+    u32 i;
+    u64 as;
+    if (!cred_is_super()) {
+        return (u64)(-1);
+    }
+    if (size > 8) {
+        return (u64)(-1);
+    }
+    if (size == 0) {
+        return sched_groups_set(0, 0) ? 0 : (u64)(-1);
+    }
+    as = sched_current_as_h();
+    if (as == 0 || list == 0 || !mem.as_user_range_ok(as, list, size * 4)) {
+        return (u64)(-1);
+    }
+    {
+        volatile u32 *u = (volatile u32 *)list;
+        for (i = 0; i < (u32)size; i++) {
+            tmp[i] = u[i];
+        }
+    }
+    return sched_groups_set(tmp, (u32)size) ? 0 : (u64)(-1);
 }
 
 /* chown(2): update Ramfs/Ext2 owner; (u32)-1 leaves a field unchanged. */
