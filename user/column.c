@@ -1,10 +1,10 @@
 /* fakeos userland - column: table layout (thin).
- * Forms: column -t [-s SEP|-sSEP] [FILE...]
+ * Forms: column -t [-s SEP|-sSEP] [-o OSEP|-oOSEP] [FILE...]
  * -t required: determine column widths and pad fields into a table.
  * Default field split is runs of spaces/tabs. -s SEP treats each character
- * in SEP as a separator (empty fields kept). Columns separated by two
- * spaces on output. Glued -sSEP keeps argv under EXEC_MAX_ARGC=8.
- * stdin if no FILE. Bounded: MAX_LINES x MAX_COLS.
+ * in SEP as a separator (empty fields kept). -o OSEP sets the output
+ * column separator (default two spaces). Glued -sSEP/-oOSEP/-toOSEP keep
+ * argv under EXEC_MAX_ARGC=8. stdin if no FILE. Bounded: MAX_LINES x MAX_COLS.
  */
 package user;
 
@@ -24,6 +24,7 @@ enum {
 
 static int table_mode;
 static const char *sep = 0; /* NULL => whitespace runs */
+static const char *out_sep = "  "; /* between columns on output */
 
 static char lines[MAX_LINES][LINE_MAX];
 static int nlines;
@@ -33,7 +34,7 @@ static int col_width[MAX_COLS];
 static int max_cols;
 
 static void usage(void) {
-    u_write(2, "usage: column -t [-s SEP] [FILE...]\n", 36);
+    u_write(2, "usage: column -t [-s SEP] [-o OSEP] [FILE...]\n", 48);
 }
 
 static int is_ws(char c) {
@@ -152,7 +153,10 @@ static void emit_table(void) {
                 int pad = col_width[c] - fl;
                 if (pad < 0) pad = 0;
                 for (k = 0; k < pad; k++) u_write(1, " ", 1);
-                u_write(1, "  ", 2);
+                {
+                    unsigned long ol = strlen(out_sep);
+                    if (ol > 0) u_write(1, out_sep, ol);
+                }
             }
         }
         u_write(1, "\n", 1);
@@ -188,29 +192,59 @@ int main(int argc, char **argv) {
             i += 2;
             continue;
         }
+        if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 >= argc) { usage(); return 1; }
+            out_sep = argv[i + 1];
+            i += 2;
+            continue;
+        }
         if (argv[i][1] == 's' && argv[i][2] != 0) {
             sep = argv[i] + 2;
             i++;
             continue;
         }
-        /* allow combined -ts / -ts: */
-        if (argv[i][1] == 't' && argv[i][2] == 's') {
-            table_mode = 1;
-            if (argv[i][3] != 0) {
-                sep = argv[i] + 3;
-                i++;
-            } else {
-                if (i + 1 >= argc) { usage(); return 1; }
-                sep = argv[i + 1];
-                i += 2;
-            }
+        if (argv[i][1] == 'o' && argv[i][2] != 0) {
+            out_sep = argv[i] + 2;
+            i++;
             continue;
         }
-        if (argv[i][1] == 't' && argv[i][2] == 0) {
-            /* already handled -t */
+        /* combined -ts / -tsSEP / -to / -toOSEP / -tso... */
+        if (argv[i][1] == 't') {
+            int j = 2;
+            table_mode = 1;
+            while (argv[i][j]) {
+                if (argv[i][j] == 's') {
+                    if (argv[i][j + 1] != 0) {
+                        sep = argv[i] + j + 1;
+                        i++;
+                        goto next_arg;
+                    }
+                    if (i + 1 >= argc) { usage(); return 1; }
+                    sep = argv[i + 1];
+                    i += 2;
+                    goto next_arg;
+                }
+                if (argv[i][j] == 'o') {
+                    if (argv[i][j + 1] != 0) {
+                        out_sep = argv[i] + j + 1;
+                        i++;
+                        goto next_arg;
+                    }
+                    if (i + 1 >= argc) { usage(); return 1; }
+                    out_sep = argv[i + 1];
+                    i += 2;
+                    goto next_arg;
+                }
+                usage();
+                return 1;
+            }
+            i++;
+            continue;
         }
         usage();
         return 1;
+    next_arg:
+        continue;
     }
 
     if (!table_mode) {

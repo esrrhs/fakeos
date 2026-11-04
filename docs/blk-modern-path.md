@@ -478,11 +478,12 @@ Thin text-layout pair. `pr [-n] [-t] [-w WIDTH|-wWIDTH] [-l LENGTH|-lLENGTH]
 [-h HEADER|-hHEADER] [FILE...]` paginates with a 5-line header (title + Page N)
 and form feeds; body lines per page are LENGTH-5 (default LENGTH 66, WIDTH 72).
 `-t` omits headers/form feeds; `-n` prefixes 5-digit line numbers + tab. `column
--t [-s SEP|-sSEP] [FILE...]` sizes columns from input and pads fields (default
-whitespace-run split; `-s` treats each SEP char as a separator). Glued
-`-wN`/`-lN`/`-hTEXT`/`-sSEP`/`-tsSEP` keep argv under `EXEC_MAX_ARGC=8`.
-Focused virtio login smoke covers `pr -t`/`-n`/`-w`/`-l`/`-h`, `column -t`/
-`-s`/`-ts:`, plus prior interactive greens (smp 1/2).
+-t [-s SEP|-sSEP] [-o OSEP|-oOSEP] [FILE...]` sizes columns from input and pads
+fields (default whitespace-run split; `-s` treats each SEP char as a separator;
+`-o` sets the output column separator, default two spaces). Glued
+`-wN`/`-lN`/`-hTEXT`/`-sSEP`/`-oOSEP`/`-tsSEP`/`-toOSEP` keep argv under
+`EXEC_MAX_ARGC=8`. Focused virtio login smoke covers `pr -t`/`-n`/`-w`/`-l`/`-h`,
+`column -t`/`-s`/`-ts:`/`-o`, plus prior interactive greens (smp 1/2).
 
 ## /bin/md5sum + /bin/sha1sum — landed
 
@@ -1922,6 +1923,13 @@ prior greens including split -d (smp 1/2). Ramfs `/bin` dents ~114/128.
 No new `/bin` dent. Focused virtio login smoke covers `-z` + prior greens
 including ls -i (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## column -o — landed
+
+`/bin/column -o OSEP` (also glued `-oOSEP` / `-toOSEP`) sets the output column
+separator after width padding (default two spaces). Keeps `-t`/`-s`/`-tsSEP`.
+No new `/bin` dent. Focused virtio login smoke covers `column -o` + prior
+greens including realpath/readlink -z (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1929,6 +1937,6 @@ including ls -i (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `column` polish / other util flags on existing
-   `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: further `column` flags (fill/`-c`/`-x`) or other
+   util flags on existing `/bin` (`cp -p` waits on utimensat; `set --` deferred;
+   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
