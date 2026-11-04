@@ -1,9 +1,11 @@
 /* fakeos userland - split: split a file into pieces (thin POSIX subset).
- * Forms: split [-l LINES|-lLINES] [-b SIZE|-bSIZE] [-a N|-aN] [FILE [PREFIX]]
+ * Forms: split [-d] [-l LINES|-lLINES] [-b SIZE|-bSIZE] [-a N|-aN]
+ *              [FILE [PREFIX]]
  * Default: 1000 lines, PREFIX "x", suffix length 2 (xaa, xab, ...).
+ * -d: numeric suffixes (x00, x01, ...) instead of alphabetic; -a sets width.
  * -b SIZE splits by bytes (decimal; optional k/K=1024, m/M=1MiB, b/B=512).
  * -l and -b: last one wins. FILE "-" or omitted reads stdin.
- * Glued -lN/-bN/-aN keep argv under EXEC_MAX_ARGC=8.
+ * Glued -lN/-bN/-aN/-d keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -29,10 +31,11 @@ static int lines_per = 1000;
 static unsigned long bytes_per = 0; /* 0 = line mode */
 static int byte_mode = 0;
 static int suff_len = 2;
+static int numeric_suf; /* -d: decimal suffixes */
 static const char *prefix = "x";
 
 static void usage(void) {
-    u_write(2, "usage: split [-l LINES] [-b SIZE] [-a N] [FILE [PREFIX]]\n", 58);
+    u_write(2, "usage: split [-d] [-l LINES] [-b SIZE] [-a N] [FILE [PREFIX]]\n", 62);
 }
 
 static int is_digits(const char *s) {
@@ -74,16 +77,18 @@ static int parse_size(const char *s, unsigned long *out) {
     return 1;
 }
 
-/* Encode idx as base-26 alphabetic suffix of length suff_len (aa..zz). */
+/* Encode idx as alphabetic (base-26) or numeric (base-10, -d) suffix. */
 static int encode_suffix(char *out, int idx) {
     int i;
     int v = idx;
     int max = 1;
-    for (i = 0; i < suff_len; i++) max *= 26;
+    int base = numeric_suf ? 10 : 26;
+    for (i = 0; i < suff_len; i++) max *= base;
     if (idx < 0 || idx >= max) return 0;
     for (i = suff_len - 1; i >= 0; i--) {
-        out[i] = (char)('a' + (v % 26));
-        v /= 26;
+        int dig = v % base;
+        out[i] = numeric_suf ? (char)('0' + dig) : (char)('a' + dig);
+        v /= base;
     }
     out[suff_len] = 0;
     return 1;
@@ -211,6 +216,7 @@ int main(int argc, char **argv) {
     const char *file = 0;
     long fd;
 
+    numeric_suf = 0;
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         const char *a = argv[i];
         if (strcmp(a, "--") == 0) {
@@ -218,7 +224,10 @@ int main(int argc, char **argv) {
             break;
         }
         if (strcmp(a, "-") == 0) break; /* stdin file operand */
-        if (strcmp(a, "-l") == 0) {
+        if (strcmp(a, "-d") == 0) {
+            numeric_suf = 1;
+            i++;
+        } else if (strcmp(a, "-l") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
             lines_per = (int)strtol_dec(argv[i + 1]);
             if (lines_per < 1) lines_per = 1;
