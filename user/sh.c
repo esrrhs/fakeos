@@ -1,6 +1,6 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
- * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * readlink, realpath, env/export[-n]/unset/which/type/command[-vV]/hash/read/alias/unalias/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg, wait.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
@@ -10,7 +10,8 @@
  * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
  * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4).
  * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false).
- * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly; wait [PID|%N]. */
+ * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly; wait [PID|%N];
+ * command [-vV] NAME [ARGS…] (skip alias/function). */
 package user;
 
 typedef unsigned long u64;
@@ -2770,9 +2771,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, wait, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command[-vV], hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command [-vV]|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -3320,9 +3321,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             rc = bad ? 1 : (any ? 0 : 1);
         }
     } else if (eq(tokens[0], "command")) {
-        /* Thin: command -v NAME... (pathname or builtin name). */
+        /* command [-v|-V] NAME... | command NAME [ARGS...]
+         * -v/-V: describe (alias/function/builtin/path). No flag: run NAME
+         * skipping alias and function lookup (builtin or PATH). */
         int ai = 1;
-        int vflag = 0;
+        int vflag = 0; /* 0 run, 1=-v, 2=-V, -1 error */
         int bad = 0;
         int any = 0;
         if (tokens[1] != 0 && tokens[1][0] == '-' && tokens[1][1] != 0) {
@@ -3331,9 +3334,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             if (!(o[0] == '-' && o[1] == 0)) {
                 for (j = 0; o[j] != 0; j++) {
                     if (o[j] == 'v') {
-                        vflag = 1;
+                        if (vflag != 2) vflag = 1;
+                    } else if (o[j] == 'V') {
+                        vflag = 2;
                     } else {
-                        puts("usage: command -v NAME...");
+                        puts("usage: command [-vV] NAME [ARGS...]");
                         rc = 1;
                         vflag = -1;
                         break;
@@ -3344,38 +3349,96 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         if (vflag < 0) {
             /* usage already printed */
-        } else if (!vflag) {
-            puts("usage: command -v NAME...");
-            rc = 1;
+        } else if (vflag == 0) {
+            char **av = tokens + ai;
+            if (av[0] == 0) {
+                puts("usage: command [-vV] NAME [ARGS...]");
+                rc = 1;
+            } else if (is_builtin(av[0])) {
+                /* Nested: no extra redirects (already applied). */
+                rc = run_builtin(av, rc_in, 0, 0, 0);
+            } else {
+                long child;
+                long st = 0;
+                long reaped;
+                char path[96];
+                const char *target = resolve_cmd(av, path);
+                child = u_fork();
+                if (child < 0) {
+                    puts("sh: fork failed");
+                    rc = 1;
+                } else if (child == 0) {
+                    job_set_pgrp(0, 0);
+                    if (u_execve(target, av, sh_build_envp()) < 0) {
+                        printf("sh: %s: command not found\n", av[0]);
+                        u_exit(127);
+                    }
+                    u_exit(127);
+                } else {
+                    job_set_pgrp(child, child);
+                    u_tcsetpgrp(0, child);
+                    reaped = u_wait4(child, &st, WUNTRACED | WCONTINUED, 0);
+                    shell_claim_tty();
+                    if (reaped == child && status_stopped(st)) {
+                        int ji = job_note_stopped(child, av[0]);
+                        if (ji >= 0) {
+                            printf("[%d]+ Stopped %s\n", ji + 1, jobs[ji].name);
+                        }
+                        rc = 148;
+                    } else if (reaped == child) {
+                        rc = status_exit(st);
+                    } else {
+                        rc = 127;
+                    }
+                }
+            }
         } else if (tokens[ai] == 0) {
-            puts("usage: command -v NAME...");
+            puts("usage: command [-vV] NAME...");
             rc = 1;
         } else {
             for (; tokens[ai] != 0; ai++) {
                 char path[96];
                 const char *target;
                 long fd;
+                const char *aval;
                 any = 1;
-                {
-                    const char *aval = alias_lookup(tokens[ai]);
-                    if (aval != 0) {
-                        printf("alias %s='%s'\n", tokens[ai], aval);
-                    } else if (func_lookup(tokens[ai]) != 0) {
-                        puts(tokens[ai]);
-                    } else if (is_builtin(tokens[ai])) {
-                        puts(tokens[ai]);
+                aval = alias_lookup(tokens[ai]);
+                if (aval != 0) {
+                    if (vflag == 2) {
+                        printf("%s is aliased to `%s'\n", tokens[ai], aval);
                     } else {
-                        char *av[2];
-                        av[0] = tokens[ai];
-                        av[1] = 0;
-                        target = resolve_cmd(av, path);
-                        fd = u_open(target, 0, 0);
-                        if (fd >= 0) {
-                            u_close(fd);
-                            puts(target);
+                        printf("alias %s='%s'\n", tokens[ai], aval);
+                    }
+                } else if (func_lookup(tokens[ai]) != 0) {
+                    if (vflag == 2) {
+                        printf("%s is a shell function\n", tokens[ai]);
+                    } else {
+                        puts(tokens[ai]);
+                    }
+                } else if (is_builtin(tokens[ai])) {
+                    if (vflag == 2) {
+                        printf("%s is a shell builtin\n", tokens[ai]);
+                    } else {
+                        puts(tokens[ai]);
+                    }
+                } else {
+                    char *av2[2];
+                    av2[0] = tokens[ai];
+                    av2[1] = 0;
+                    target = resolve_cmd(av2, path);
+                    fd = u_open(target, 0, 0);
+                    if (fd >= 0) {
+                        u_close(fd);
+                        if (vflag == 2) {
+                            printf("%s is %s\n", tokens[ai], target);
                         } else {
-                            bad = 1;
+                            puts(target);
                         }
+                    } else {
+                        if (vflag == 2) {
+                            printf("sh: command: %s: not found\n", tokens[ai]);
+                        }
+                        bad = 1;
                     }
                 }
             }
@@ -5561,7 +5624,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command[-vV]/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

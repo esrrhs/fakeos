@@ -1242,6 +1242,17 @@ status (127 if unknown). Focused virtio login smoke covers
 `true&wait`/`false&wait`/`wait %1` + prior greens (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## shell command [-vV] + run — landed
+
+Thin shell polish (no new `/bin` dent). Inventory: `command -v` already
+existed — extended carefully. Deferred kernel gaps unchanged.
+
+`command NAME [ARGS…]` runs NAME skipping alias and function lookup
+(builtin via nested `run_builtin`, else fork+PATH exec). `-v` keeps short
+identify; `-V` verbose (type-like). Focused virtio login smoke covers
+alias/function bypass + `-v`/`-V` + prior greens (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1249,6 +1260,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `command` (run without alias/function), more
-   printf/test edges, or other small `/bin`/shell bites (skip large
-   `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: more printf/test edges, or other small
+   `/bin`/shell bites (skip large `getopts` / here-doc). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.
