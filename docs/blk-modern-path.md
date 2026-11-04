@@ -585,15 +585,26 @@ pathconf yet). Focused virtio login smoke covers tsort diamond + cycle,
 pathchk ok/`-p` reject, plus prior interactive greens (smp 1/2). Ramfs `/bin`
 dents 96/128.
 
+## /bin/logname + /bin/nohup — landed
+
+Thin POSIX pair. `logname` prints the login name: `LOGNAME` then `USER` from
+`/proc/self/environ`, else `/etc/passwd` for `getuid()`, else numeric (no utmp).
+Shell seeds `LOGNAME=root` alongside `USER`. `nohup COMMAND [ARG...]` ignores
+SIGHUP; if stdout is a TTY appends to `./nohup.out`, mirrors stderr onto stdout
+when stderr is a TTY, and redirects tty stdin from `/dev/null`. COMMAND without
+`/` resolves as `/bin/COMMAND`. Compact argv for `EXEC_MAX_ARGC=8`. Focused
+virtio login smoke covers logname, nohup→nohup.out, plus prior interactive
+greens (smp 1/2). Ramfs `/bin` dents 98/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (tsort/pathchk +
-   rmdir/unlink + tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
-   factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
-   small coherent chunks such as `logname`/`nohup`, or cp/mv polish / `rmdir -p`.
-   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
-   bite-sized fix.
+4. More daily-driver gaps: remaining thin POSIX after inventory (logname/nohup +
+   tsort/pathchk + rmdir/unlink + tac/nproc/timeout + chown/chgrp + install +
+   cal + id/groups + factor/clear/tty/whoami + base64 + checksum trio already
+   present) — prefer small coherent chunks such as cp/mv polish / `rmdir -p`,
+   or other thin POSIX still missing. Avoid deep jbd / Ext2-redirect duplex
+   races / CFS nesting unless a clear bite-sized fix.

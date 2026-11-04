@@ -474,6 +474,8 @@ def main():
         "[FS] published /bin/unlink (",
         "[FS] published /bin/tsort (",
         "[FS] published /bin/pathchk (",
+        "[FS] published /bin/logname (",
+        "[FS] published /bin/nohup (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",

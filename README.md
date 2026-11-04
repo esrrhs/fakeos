@@ -254,6 +254,7 @@ flowchart TD
 - [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout SECONDS CMD...`（fork+nanosleep 轮询+SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir DIR...`（空目录；shell-mirror）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
+- [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。

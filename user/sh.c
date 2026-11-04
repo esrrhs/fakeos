@@ -800,6 +800,7 @@ static void sh_env_init(void) {
     sh_setenv("PATH", "/bin:/usr/bin:.");
     sh_setenv("HOME", "/home");
     sh_setenv("USER", "root");
+    sh_setenv("LOGNAME", "root");
     sh_setenv("FAKECC_PKG", "/src");
 }
 
