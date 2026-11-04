@@ -1658,6 +1658,13 @@ last of `-s`/`-d` wins. Keeps `-a`/`-h`. No new `/bin` dent. Focused virtio
 login smoke covers `du -d` + prior greens including ls -R (smp 1/2). Ramfs
 `/bin` dents ~114/128.
 
+## sed -i — landed
+
+`/bin/sed -i` edits FILE in place (same-dir `.sedtmp` + `rename(2)`; no
+backup extension). Refuses stdin/`-`. Glues with `-n`. Keeps thin `s///g`
+`d`/`p`/`q`. No new `/bin` dent. Focused virtio login smoke covers `sed -i`
++ prior greens including du -d (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1665,7 +1672,6 @@ login smoke covers `du -d` + prior greens including ls -R (smp 1/2). Ramfs
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `sed -i` / `find -empty` / `cmp -n` / date
-   `+%F`/`%T` / other util flags (`cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd
-   alone.
+   deferred. Next thin polish: `find -empty` / `cmp -n` / date `+%F`/`%T` /
+   other util flags (`cp -p` waits on utimensat; `set --` deferred; skip
+   large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
