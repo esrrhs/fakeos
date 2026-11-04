@@ -159,10 +159,15 @@ void blk_async_poll(void) {
     }
 }
 
-/* Batch async writes for Ext2 journal ordered meta-copy. Callback lives in
- * drivers so callers need no cross-package end_io typedef. Buffers must stay
- * valid until return. Polls to completion (pre-sched safe). Max 4. */
-enum { BLK_AIO_BATCH_MAX = 4, BLK_AIO_POLL_SPINS = 5000000 };
+/* Batch async writes for Ext2 journal meta-copy + data-path. Callback lives
+ * in drivers so callers need no cross-package end_io typedef. Buffers must
+ * stay valid until return. Polls to completion (pre-sched safe). Max 8;
+ * submits in waves of 4 so AHCI NCQ depth is not exceeded. */
+enum {
+    BLK_AIO_BATCH_MAX = 8,
+    BLK_AIO_WAVE = 4,
+    BLK_AIO_POLL_SPINS = 5000000
+};
 
 static u32 blk_aio_done;
 static u32 blk_aio_ok_n;
@@ -175,31 +180,39 @@ static void blk_aio_cb(void *private, u32 ok) {
 
 u32 blk_async_write_batch(u64 *sectors, u8 *bufs, u32 buf_bytes,
                           u32 count, u32 n) {
-    u32 i;
-    u32 spins;
-    u32 accepted;
+    u32 off;
     if (n == 0) return 1;
     if (sectors == 0 || bufs == 0 || buf_bytes == 0 || count == 0) return 0;
     if (n > BLK_AIO_BATCH_MAX) return 0;
-    blk_aio_done = 0;
-    blk_aio_ok_n = 0;
-    accepted = 0;
-    for (i = 0; i < n; i++) {
-        u8 *kbuf = bufs + (u64)i * (u64)buf_bytes;
-        if (!blk_async_rw(sectors[i], kbuf, count, 1, blk_aio_cb, 0)) {
-            spins = 0;
-            while (blk_aio_done < accepted && spins < BLK_AIO_POLL_SPINS) {
-                blk_async_poll();
-                spins = spins + 1;
+    off = 0;
+    while (off < n) {
+        u32 wave = n - off;
+        u32 i;
+        u32 spins;
+        u32 accepted;
+        if (wave > BLK_AIO_WAVE) wave = BLK_AIO_WAVE;
+        blk_aio_done = 0;
+        blk_aio_ok_n = 0;
+        accepted = 0;
+        for (i = 0; i < wave; i++) {
+            u8 *kbuf = bufs + (u64)(off + i) * (u64)buf_bytes;
+            if (!blk_async_rw(sectors[off + i], kbuf, count, 1, blk_aio_cb, 0)) {
+                spins = 0;
+                while (blk_aio_done < accepted && spins < BLK_AIO_POLL_SPINS) {
+                    blk_async_poll();
+                    spins = spins + 1;
+                }
+                return 0;
             }
-            return 0;
+            accepted = accepted + 1;
         }
-        accepted = accepted + 1;
+        spins = 0;
+        while (blk_aio_done < wave && spins < BLK_AIO_POLL_SPINS) {
+            blk_async_poll();
+            spins = spins + 1;
+        }
+        if (blk_aio_done != wave || blk_aio_ok_n != wave) return 0;
+        off = off + wave;
     }
-    spins = 0;
-    while (blk_aio_done < n && spins < BLK_AIO_POLL_SPINS) {
-        blk_async_poll();
-        spins = spins + 1;
-    }
-    return blk_aio_done == n && blk_aio_ok_n == n;
+    return 1;
 }

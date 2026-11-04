@@ -315,7 +315,8 @@ def main():
         "[EXT2] [PASS] journal ordered blk_async meta-copy",
         "[EXT2] [PASS] journal copy pool grow",
         "[EXT2] [PASS] journal revoke-aware meta-copy replay",
-        "[EXT2] journal-lite ordered + descriptor/revoke + meta-copy/8 + revoke-aware replay + blk_async online (not a full journal)",
+        "[EXT2] [PASS] data-path blk_async full-block",
+        "[EXT2] journal-lite ordered + descriptor/revoke + meta-copy/8 + revoke-aware replay + data-path blk_async/8 online (not a full journal)",
         # AHCI probe log (QEMU may or may not expose 01.06)
         re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
         "Multiboot Physical Memory Map",

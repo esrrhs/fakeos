@@ -24,8 +24,10 @@ extern void kprintf(const char *fmt, ...);
  * batch writes; META_PENDING with a matching COMMIT replays those copies
  * onto home blocks (also blk_async), skipping any home listed in a ring
  * REVOKE for that gen, before clearing the marker (SB idle write lost
- * after commit). Dirty/incomplete mounts without COMMIT still recount.
- * ORDERED flushes data before COMMIT (not a full jbd).
+ * after commit). File data full-block writes ride a separate 8-slot
+ * blk_async bounce queue (flushed before ORDERED commit / sync / read).
+ * Dirty/incomplete mounts without COMMIT still recount. ORDERED flushes
+ * data before COMMIT (not a full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -138,9 +140,66 @@ static u32 name_eq(const char *a, u32 an, const char *b, u32 bn) {
     return 1;
 }
 
+/* File-data blk_async bounce queue (full FS blocks). Distinct from the
+ * journal meta-copy jl_aio_* pool so data can pipeline before jl_commit
+ * reuses that path. Flushed before ORDERED commit, sync, and any bread. */
+enum { DATA_AIO_MAX = 8 };
+static u8 data_aio_bufs[DATA_AIO_MAX * 4096];
+static u64 data_aio_secs[DATA_AIO_MAX];
+static u32 data_aio_n;
+static u32 data_aio_submits;           /* cumulative blocks submitted */
+
+static u32 data_aio_flush(void) {
+    u32 n;
+    u32 sectors;
+    if (data_aio_n == 0) return 1;
+    if (sb.block_size == 0) {
+        data_aio_n = 0;
+        return 0;
+    }
+    n = data_aio_n;
+    data_aio_n = 0;
+    sectors = sb.block_size / SECTOR_SIZE;
+    if (!drivers.blk_async_write_batch(data_aio_secs, data_aio_bufs, 4096,
+                                       sectors, n)) {
+        return 0;
+    }
+    data_aio_submits = data_aio_submits + n;
+    return 1;
+}
+
+static u32 bwrite_data(u32 block, const u8 *src) {
+    u32 b;
+    if (src == 0 || sb.block_size == 0 || sb.block_size > 4096) return 0;
+    if (data_aio_n >= DATA_AIO_MAX) {
+        if (!data_aio_flush()) return 0;
+    }
+    for (b = 0; b < sb.block_size; b++) {
+        data_aio_bufs[(u64)data_aio_n * 4096 + b] = src[b];
+    }
+    data_aio_secs[data_aio_n] = ((u64)block * (u64)sb.block_size)
+                                / (u64)SECTOR_SIZE;
+    data_aio_n = data_aio_n + 1;
+    return 1;
+}
+
+static u32 data_aio_has(u32 block) {
+    u64 sec;
+    u32 i;
+    if (data_aio_n == 0 || sb.block_size == 0) return 0;
+    sec = ((u64)block * (u64)sb.block_size) / (u64)SECTOR_SIZE;
+    for (i = 0; i < data_aio_n; i++) {
+        if (data_aio_secs[i] == sec) return 1;
+    }
+    return 0;
+}
+
 static u32 bread(u32 block, u8 *dst) {
     u32 sectors = sb.block_size / SECTOR_SIZE;
     u64 sector0 = ((u64)block * (u64)sb.block_size) / (u64)SECTOR_SIZE;
+    /* Only drain when this FS block is queued (RMW / data read hazard).
+     * Meta breads must not break multi-block data batching. */
+    if (data_aio_has(block) && !data_aio_flush()) return 0;
     return drivers.blk_read(sector0, dst, sectors);
 }
 static u32 bwrite(u32 block, const u8 *src) {
@@ -746,6 +805,8 @@ static void jl_begin(void) {
  * clear META_PENDING. A second ORDERED flush makes the commit durable
  * before the SB idle. */
 static void jl_commit(void) {
+    /* Data-before-commit: drain async file-data queue, then device FLUSH. */
+    data_aio_flush();
     if (jl_mode == JL_MODE_ORDERED) {
         drivers.blk_flush();
     }
@@ -1744,9 +1805,9 @@ u32 ext2_mount(void) {
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen,
             (u64)jl_jblk, (u64)jl_ring_len);
-    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy/%u + revoke-aware replay + blk_async online (not a full journal)\n",
+    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy/%u + revoke-aware replay + data-path blk_async/%u online (not a full journal)\n",
             jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback",
-            (u64)JL_MAX_COPIES);
+            (u64)JL_MAX_COPIES, (u64)DATA_AIO_MAX);
     return 1;
 }
 
@@ -1934,7 +1995,13 @@ u64 ext2_ino_pwrite(u32 ino, u64 off, const char *kbuf, u64 len) {
         for (k = 0; k < take; k++) {
             blk_buf[boff + k] = (u8)kbuf[done + k];
         }
-        if (!bwrite(phys, blk_buf)) {
+        /* Full-block file data rides blk_async bounce; partials stay sync. */
+        if (boff == 0 && take == sb.block_size) {
+            if (!bwrite_data(phys, blk_buf)) {
+                jl_commit();
+                return done != 0 ? done : (u64)(-1);
+            }
+        } else if (!bwrite(phys, blk_buf)) {
             jl_commit();
             return done != 0 ? done : (u64)(-1);
         }
@@ -2025,7 +2092,15 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
             if (!bread(phys, blk_buf)) { jl_commit(); return done != 0 ? done : (u64)(-1); }
         }
         for (k = 0; k < take; k++) blk_buf[boff + k] = (u8)kbuf[done + k];
-        if (!bwrite(phys, blk_buf)) { jl_commit(); return done != 0 ? done : (u64)(-1); }
+        if (boff == 0 && take == sb.block_size) {
+            if (!bwrite_data(phys, blk_buf)) {
+                jl_commit();
+                return done != 0 ? done : (u64)(-1);
+            }
+        } else if (!bwrite(phys, blk_buf)) {
+            jl_commit();
+            return done != 0 ? done : (u64)(-1);
+        }
         opens[s].off += take;
         done += take;
         if (opens[s].off > opens[s].size) {
@@ -2472,8 +2547,9 @@ u32 ext2_ftruncate(u32 fh, u64 length) {
 
 u32 ext2_sync(void) {
     if (!sb.mounted) return 0;
-    /* Durability barrier: clear jl pending, mark VALID_FS, then FLUSH.
-     * Applies in both ORDERED and WRITEBACK modes (fsync/sync drain). */
+    /* Durability barrier: drain data aio, clear jl pending, mark VALID_FS,
+     * then FLUSH. Applies in both ORDERED and WRITEBACK modes. */
+    data_aio_flush();
     jl_flags = JL_IDLE;
     sb_write_counts(EXT2_VALID_FS);
     return drivers.blk_flush();
@@ -3109,6 +3185,83 @@ void ext2_selftest(void) {
         jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] journal revoke-aware meta-copy replay\n");
     }
+
+    /* Data-path blk_async: one write of 8 full FS blocks must advance
+     * data_aio_submits by >= 8 (bounce queue + batch, distinct from meta). */
+    {
+        static u8 data_pat[8 * 1024];
+        u32 fh;
+        u32 bs = sb.block_size;
+        u32 nblk;
+        u32 total;
+        u32 i;
+        u32 before;
+        u64 n;
+        u32 saved_mode = jl_mode;
+        if (bs == 0 || bs > 1024) bs = 1024;
+        nblk = 8;
+        total = nblk * bs;
+        for (i = 0; i < total; i++) {
+            data_pat[i] = (u8)(0x5A ^ (i & 0xFF));
+        }
+        jl_set_mode(JL_MODE_ORDERED);
+        before = data_aio_submits;
+        fh = ext2_open("/mnt/dataaio.bin", O_CREAT | O_RDWR | O_TRUNC);
+        if (fh == 0) {
+            kprintf("[EXT2] [FAIL] data-path aio create
+");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        n = ext2_write(fh, (char *)data_pat, total);
+        if (n != total) {
+            kprintf("[EXT2] [FAIL] data-path aio write %u/%u
+",
+                    n, (u64)total);
+            ext2_close(fh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (data_aio_submits < before + nblk) {
+            kprintf("[EXT2] [FAIL] data-path aio submits %u -> %u (want +%u)
+",
+                    (u64)before, (u64)data_aio_submits, (u64)nblk);
+            ext2_close(fh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (ext2_lseek(fh, 0, SEEK_SET) != 0) {
+            kprintf("[EXT2] [FAIL] data-path aio lseek
+");
+            ext2_close(fh);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < total; i++) data_pat[i] = 0;
+        n = ext2_read(fh, (char *)data_pat, total);
+        ext2_close(fh);
+        if (n != total) {
+            kprintf("[EXT2] [FAIL] data-path aio read %u
+", n);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < total; i++) {
+            if (data_pat[i] != (u8)(0x5A ^ (i & 0xFF))) {
+                kprintf("[EXT2] [FAIL] data-path aio mismatch @%u
+",
+                        (u64)i);
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        ext2_unlink("/mnt/dataaio.bin");
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] data-path blk_async full-block (submits=%u n=%u)
+",
+                (u64)data_aio_submits, (u64)nblk);
+    }
+
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to
      * avoid RMW amplification that wedges VirtIO-blk under TCG. Use
