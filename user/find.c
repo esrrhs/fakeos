@@ -2,11 +2,11 @@
  *   find [PATH...] [EXPRESSION]
  * Paths are argv before the first primary; default PATH is ".".
  * Primaries (AND): -name GLOB / -iname GLOB (basename *,? only; -iname
- * folds A-Z), -path GLOB (full path *,? only), -type f|d, -prune (do not
- * descend into a matched directory), -print, -maxdepth N, -mindepth N
- * (start points are depth 0; GNU-ish). Uses lstat(2). No -o/parens. Thin
- * -prune: when predicates match a directory, skip walk_dir. Depth-first.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * folds A-Z), -path GLOB (full path *,? only), -type f|d, -empty (empty
+ * regular file or empty directory), -prune (do not descend into a matched
+ * directory), -print, -maxdepth N, -mindepth N (start points are depth 0;
+ * GNU-ish). Uses lstat(2). No -o/parens. Thin -prune: when predicates match
+ * a directory, skip walk_dir. Depth-first. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -23,6 +23,7 @@ extern void printf(const char *fmt, ...);
 enum {
     O_RDONLY = 0,
     ST_MODE = 24,
+    ST_SIZE = 48,
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
@@ -44,6 +45,7 @@ static char name_pat[GLOB_CAP];
 static int want_path;
 static char path_pat[GLOB_CAP];
 static int want_type; /* 0=any, 1=file, 2=dir */
+static int want_empty;
 static int do_print = 1;
 static int want_prune;
 static int max_depth = DEPTH_UNLIM;
@@ -55,6 +57,15 @@ static unsigned int load_u32(const char *p) {
          | ((unsigned int)(unsigned char)p[1] << 8)
          | ((unsigned int)(unsigned char)p[2] << 16)
          | ((unsigned int)(unsigned char)p[3] << 24);
+}
+
+static unsigned long load_u64(const char *p) {
+    unsigned long v = 0;
+    unsigned long i;
+    for (i = 0; i < 8; i++) {
+        v |= ((unsigned long)(unsigned char)p[i]) << (8 * i);
+    }
+    return v;
 }
 
 static int is_dir_mode(unsigned int mode) {
@@ -113,11 +124,47 @@ static int glob_match(const char *pat, const char *s, int fold) {
     }
 }
 
-static int match_preds(const char *path, unsigned int mode) {
+/* Directory empty: no getdents names other than . / .. */
+static int dir_is_empty(const char *path) {
+    char dent[DENT_BUF];
+    long fd;
+    long n;
+    fd = u_open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    for (;;) {
+        long off;
+        n = u_getdents(fd, dent, sizeof(dent));
+        if (n <= 0) break;
+        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+            char name[NAME_LEN];
+            unsigned long k = 0;
+            while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
+                name[k] = dent[off + NAME_OFF + k];
+                k++;
+            }
+            name[k] = 0;
+            if (name[0] == 0) continue;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+            u_close(fd);
+            return 0;
+        }
+    }
+    u_close(fd);
+    return 1;
+}
+
+static int is_empty_path(const char *path, unsigned int mode, const char *st) {
+    if (is_reg_mode(mode)) return load_u64(st + ST_SIZE) == 0;
+    if (is_dir_mode(mode)) return dir_is_empty(path);
+    return 0;
+}
+
+static int match_preds(const char *path, unsigned int mode, const char *st) {
     if (want_type == 1 && !is_reg_mode(mode)) return 0;
     if (want_type == 2 && !is_dir_mode(mode)) return 0;
     if (want_name && !glob_match(name_pat, base_of(path), name_fold)) return 0;
     if (want_path && !glob_match(path_pat, path, 0)) return 0;
+    if (want_empty && !is_empty_path(path, mode, st)) return 0;
     return 1;
 }
 
@@ -154,6 +201,7 @@ static int is_primary(const char *a) {
     if (strcmp(a, "-iname") == 0) return 1;
     if (strcmp(a, "-path") == 0) return 1;
     if (strcmp(a, "-type") == 0) return 1;
+    if (strcmp(a, "-empty") == 0) return 1;
     if (strcmp(a, "-print") == 0) return 1;
     if (strcmp(a, "-prune") == 0) return 1;
     if (strcmp(a, "-maxdepth") == 0) return 1;
@@ -235,10 +283,10 @@ static void walk(const char *path, int depth) {
         return;
     }
     mode = load_u32(st + ST_MODE);
-    if (depth >= min_depth && match_preds(path, mode)) emit(path);
+    if (depth >= min_depth && match_preds(path, mode, st)) emit(path);
     if (is_dir_mode(mode) && depth < max_depth) {
         /* Thin -prune: matched directory is not descended. */
-        if (want_prune && match_preds(path, mode)) {
+        if (want_prune && match_preds(path, mode, st)) {
             /* skip */
         } else {
             walk_dir(path, depth);
@@ -307,6 +355,11 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
+        if (strcmp(argv[ai], "-empty") == 0) {
+            want_empty = 1;
+            ai++;
+            continue;
+        }
         if (strcmp(argv[ai], "-print") == 0) {
             do_print = 1;
             ai++;
@@ -333,7 +386,7 @@ int main(int argc, char **argv) {
             ai += 2;
             continue;
         }
-        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-prune] [-maxdepth N] [-mindepth N] [-print]\n", 107);
+        u_write(2, "usage: find [PATH...] [-name|-iname|-path GLOB] [-type f|d] [-empty] [-prune] [-maxdepth N] [-mindepth N] [-print]\n", 116);
         return 1;
     }
 

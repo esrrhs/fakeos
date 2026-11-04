@@ -1665,6 +1665,14 @@ backup extension). Refuses stdin/`-`. Glues with `-n`. Keeps thin `s///g`
 `d`/`p`/`q`. No new `/bin` dent. Focused virtio login smoke covers `sed -i`
 + prior greens including du -d (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## find -empty — landed
+
+`/bin/find -empty` matches empty regular files (`st_size == 0`) or empty
+directories (no getdents entries beyond `.`/`..`). ANDs with other
+primaries. No new `/bin` dent. Focused virtio login smoke covers
+`find -empty` + prior greens including sed -i (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1672,6 +1680,6 @@ backup extension). Refuses stdin/`-`. Glues with `-n`. Keeps thin `s///g`
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `find -empty` / `cmp -n` / date `+%F`/`%T` /
-   other util flags (`cp -p` waits on utimensat; `set --` deferred; skip
-   large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `cmp -n` / date `+%F`/`%T` / other util flags
+   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
