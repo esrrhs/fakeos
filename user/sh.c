@@ -1,6 +1,6 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
- * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias/return/local, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
@@ -250,9 +250,19 @@ static int eq(const char *a, const char *b) {
 
 enum {
     SH_ST_MODE = 24,
+    SH_ST_SIZE = 48,
     SH_ST_BYTES = 144,
     SH_S_IFMT = 0xF000,
+    SH_S_IFIFO = 0x1000,
+    SH_S_IFCHR = 0x2000,
     SH_S_IFDIR = 0x4000,
+    SH_S_IFBLK = 0x6000,
+    SH_S_IFREG = 0x8000,
+    SH_S_IFLNK = 0xA000,
+    SH_S_IFSOCK = 0xC000,
+    SH_S_IRANY = 0x124,
+    SH_S_IWANY = 0x92,
+    SH_S_IXANY = 0x49,
     SH_PATH_CAP = 128,
     SH_DENT_BUF = 1920,
     SH_DENT_REC = 48,
@@ -275,6 +285,150 @@ static int sh_is_dir(const char *path) {
     if (u_stat(path, st) != 0) return 0;
     mode = sh_load_u32(st + SH_ST_MODE);
     return (mode & SH_S_IFMT) == SH_S_IFDIR;
+}
+
+/* ---- thin [[ ]] (string/file tests + &&/||; no regex) ------------------- */
+static unsigned long sh_load_u64(const char *p) {
+    unsigned long v = 0;
+    unsigned long i;
+    for (i = 0; i < 8; i++) {
+        v |= ((unsigned long)(unsigned char)p[i]) << (8 * i);
+    }
+    return v;
+}
+
+static int db_stat(const char *path, int nofollow, char *st) {
+    if (nofollow) {
+        return u_lstat(path, st) == 0;
+    }
+    return u_stat(path, st) == 0;
+}
+
+static int db_ftype(const char *path, unsigned int want, int nofollow) {
+    char st[SH_ST_BYTES];
+    unsigned int mode;
+    if (!db_stat(path, nofollow, st)) return 0;
+    mode = sh_load_u32(st + SH_ST_MODE);
+    return (mode & SH_S_IFMT) == want;
+}
+
+static int db_exists(const char *path) {
+    char st[SH_ST_BYTES];
+    return db_stat(path, 0, st);
+}
+
+static int db_size_nz(const char *path) {
+    char st[SH_ST_BYTES];
+    if (!db_stat(path, 0, st)) return 0;
+    return sh_load_u64(st + SH_ST_SIZE) > 0;
+}
+
+static int db_mode_any(const char *path, unsigned int bits) {
+    char st[SH_ST_BYTES];
+    unsigned int mode;
+    if (!db_stat(path, 0, st)) return 0;
+    mode = sh_load_u32(st + SH_ST_MODE);
+    return (mode & bits) != 0;
+}
+
+/* One primary at *pos.. until &&/||/end. Advances *pos. 0/1 or -1 error. */
+static int db_primary(char **av, int end, int *pos) {
+    int neg = 0;
+    int n = 0;
+    int base;
+    const char *a0;
+    const char *a1;
+    const char *a2;
+    int t = 0;
+
+    if (*pos >= end) return -1;
+    if (eq(av[*pos], "!")) {
+        neg = 1;
+        (*pos)++;
+        if (*pos >= end) return -1;
+    }
+    base = *pos;
+    while (base + n < end && !eq(av[base + n], "&&") && !eq(av[base + n], "||")) {
+        n++;
+    }
+    if (n == 0) return -1;
+    a0 = av[base];
+    a1 = (n >= 2) ? av[base + 1] : 0;
+    a2 = (n >= 3) ? av[base + 2] : 0;
+    *pos = base + n;
+
+    if (n == 1) {
+        t = (a0[0] != 0);
+        return neg ? !t : t;
+    }
+    if (n == 2) {
+        if (eq(a0, "-z")) t = (a1[0] == 0);
+        else if (eq(a0, "-n")) t = (a1[0] != 0);
+        else if (eq(a0, "-e")) t = db_exists(a1);
+        else if (eq(a0, "-f")) t = db_ftype(a1, SH_S_IFREG, 0);
+        else if (eq(a0, "-d")) t = db_ftype(a1, SH_S_IFDIR, 0);
+        else if (eq(a0, "-h") || eq(a0, "-L")) t = db_ftype(a1, SH_S_IFLNK, 1);
+        else if (eq(a0, "-b")) t = db_ftype(a1, SH_S_IFBLK, 0);
+        else if (eq(a0, "-c")) t = db_ftype(a1, SH_S_IFCHR, 0);
+        else if (eq(a0, "-p")) t = db_ftype(a1, SH_S_IFIFO, 0);
+        else if (eq(a0, "-S")) t = db_ftype(a1, SH_S_IFSOCK, 0);
+        else if (eq(a0, "-s")) t = db_size_nz(a1);
+        else if (eq(a0, "-r")) t = db_mode_any(a1, SH_S_IRANY);
+        else if (eq(a0, "-w")) t = db_mode_any(a1, SH_S_IWANY);
+        else if (eq(a0, "-x")) t = db_mode_any(a1, SH_S_IXANY);
+        else return -1;
+        return neg ? !t : t;
+    }
+    if (n == 3) {
+        if (eq(a1, "==") || eq(a1, "=")) t = eq(a0, a2);
+        else if (eq(a1, "!=")) t = !eq(a0, a2);
+        else return -1;
+        return neg ? !t : t;
+    }
+    return -1;
+}
+
+/* argv[0]=="[[", last =="]]". Exit 0 true / 1 false / 2 error. */
+static long eval_dbracket(char **argv) {
+    int n = 0;
+    int pos;
+    int end;
+    int t;
+
+    while (argv[n] != 0) n++;
+    if (n < 2 || !eq(argv[0], "[[") || !eq(argv[n - 1], "]]")) {
+        puts("sh: [[: missing ']]'");
+        return 2;
+    }
+    end = n - 1;
+    if (end == 1) {
+        return 1; /* [[ ]] -> false */
+    }
+    pos = 1;
+    t = db_primary(argv, end, &pos);
+    if (t < 0) {
+        puts("sh: [[: syntax error");
+        return 2;
+    }
+    while (pos < end) {
+        int op;
+        int t2;
+        if (eq(argv[pos], "&&")) op = 1;
+        else if (eq(argv[pos], "||")) op = 2;
+        else {
+            puts("sh: [[: syntax error");
+            return 2;
+        }
+        pos++;
+        t2 = db_primary(argv, end, &pos);
+        if (t2 < 0) {
+            puts("sh: [[: syntax error");
+            return 2;
+        }
+        if (op == 1) t = (t && t2);
+        else t = (t || t2);
+    }
+    return t ? 0 : 1;
 }
 
 static void sh_join_path(char *out, unsigned long cap, const char *dir,
@@ -1944,7 +2098,8 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue")
         || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs")
         || eq(cmd, "alias") || eq(cmd, "unalias")
-        || eq(cmd, "return") || eq(cmd, "local");
+        || eq(cmd, "return") || eq(cmd, "local")
+        || eq(cmd, "[[");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -2474,9 +2629,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, return, local, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, return, local, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $((arith)); name(){…;}; for/while/until/if/elif/case/esac; break/continue/return; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2696,6 +2851,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
 
     if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
         return 1;
+    }
+    if (eq(tokens[0], "[[")) {
+        rc = eval_dbracket(tokens);
+        pop_redirects(saved_in, saved_out);
+        return rc;
     }
     if (eq(tokens[0], "kill")) {
         long pid;
@@ -4850,13 +5010,32 @@ static long run_list(char **tokens, long rc_in) {
         long child;
         long status = 0;
 
-        while (tokens[i] != 0 && !eq(tokens[i], "&&") && !eq(tokens[i], "||")) {
-            if (ns < MAX_TOK - 1) {
+        /* Thin [[ ... ]]: keep inner &&/|| until closing ]]. */
+        if (eq(tokens[i], "[[")) {
+            int closed = 0;
+            while (tokens[i] != 0 && ns < MAX_TOK - 1) {
                 stage[ns++] = tokens[i];
+                if (eq(tokens[i], "]]")) {
+                    i++;
+                    closed = 1;
+                    break;
+                }
+                i++;
             }
-            i++;
+            stage[ns] = 0;
+            if (!closed) {
+                puts("sh: [[: missing ']]'");
+                return 2;
+            }
+        } else {
+            while (tokens[i] != 0 && !eq(tokens[i], "&&") && !eq(tokens[i], "||")) {
+                if (ns < MAX_TOK - 1) {
+                    stage[ns++] = tokens[i];
+                }
+                i++;
+            }
+            stage[ns] = 0;
         }
-        stage[ns] = 0;
         if (tokens[i] != 0 && eq(tokens[i], "&&")) {
             op = 1;
             i++;
@@ -4965,7 +5144,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/functions/envp, set -e/-u, $((arith))/$0..$9/$#, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/functions/envp, set -e/-u, $((arith))/$0..$9/$#, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

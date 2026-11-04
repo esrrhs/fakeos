@@ -1169,6 +1169,21 @@ symlink / data). Glued `-n`/`-s`/`-l`/`-c` keep argv under `EXEC_MAX_ARGC=8`.
 Focused virtio login smoke covers hexdump/xxd round-trip/`file` + prior
 greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell [[ ]] — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc.
+
+`[[ EXPR ]]` builtin: string `==` / `=` / `!=`, `-z` / `-n`, file tests
+mirroring thin `test(1)` (`-e/-f/-d/-h/-L/-b/-c/-p/-S/-s/-r/-w/-x`), unary
+`!`, and left-to-right inner `&&` / `||` (no regex, no `( )`). `run_list`
+gathers from `[[` through closing `]]` so inner `&&`/`||` are not shell list
+ops; shell-level `[[ … ]] && cmd` still works. Focused virtio login smoke
+covers string/file/`&&`/`||`/`!`/if + prior greens (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1176,6 +1191,5 @@ greens (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `[[ ]]`, or other small `/bin`/shell bites
-   (skip large `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS /
-   jbd alone.
+   deferred. Next thin polish: other small `/bin`/shell bites (skip large
+   `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
