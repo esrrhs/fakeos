@@ -1425,6 +1425,14 @@ arrays; no new `/bin` dent). Reuses `sh_setenv` / `sh_mark_export` /
 assign/export/readonly/print + prior greens (smp 1/2). Ramfs `/bin` dents
 ~114/128.
 
+## shell hash -p — landed
+
+Thin `hash -p PATH NAME` remembers NAME→PATH without a PATH walk (bash-like;
+no existence check). Keeps `hash -r`, bare list (`NAME=PATH`), and
+`hash NAME` resolve+remember. No new `/bin` dent. Focused virtio login
+smoke covers `-p`/list/`-r` + prior greens including declare (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1432,7 +1440,7 @@ assign/export/readonly/print + prior greens (smp 1/2). Ramfs `/bin` dents
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `set --` if positional frames grow, or other
-   small `/bin`/shell bites (skip large `getopts` / here-doc / trap unless
-   bite-sized; `ulimit`/`times` need kernel rlimit/rusage). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `hash -t`/`hash -l` list form, or other
+   small `/bin`/shell bites (`set --` still deferred until positional
+   frames; skip large `getopts` / here-doc / trap; `ulimit`/`times` need
+   kernel rlimit/rusage). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
