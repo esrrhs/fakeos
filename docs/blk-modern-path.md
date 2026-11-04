@@ -1197,6 +1197,17 @@ no IFS). Bare `$@` / `$*` in `for x in …` expand to one word per positional.
 Focused virtio login smoke covers shift/`$@`/`$*`/for + prior greens
 (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## shell :/true/false — landed
+
+Thin shell polish (no new `/bin` dent; Tab lists `true`/`false`/`:`).
+Inventory unchanged on deferred kernel gaps. `/bin/true` and `/bin/false`
+already published; shell builtins shadow them for no-fork use and enable
+`while :` (no `/bin/:`).
+
+`:` / `true` always exit 0; `false` exits 1; arguments ignored (POSIX).
+Focused virtio login smoke covers `:`/`true`/`false`/type/`while :` + prior
+greens (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1204,6 +1215,6 @@ Focused virtio login smoke covers shift/`$@`/`$*`/for + prior greens
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `:`/`true`/`false` builtins, thin `eval` /
-   `source`/`.`, `readonly`, or other small `/bin`/shell bites (skip large
-   `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: thin `eval` / `source`/`.`, `readonly`, or
+   other small `/bin`/shell bites (skip large `getopts` / here-doc). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
