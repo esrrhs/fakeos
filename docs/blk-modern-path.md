@@ -664,13 +664,25 @@ behavior unchanged). Focused virtio login smoke covers `wc -L`/`-lL`,
 `dirname` multi, Ext2 file, prior greens (smp 1/2). Ramfs `/bin` dents
 101/128.
 
+## touch -c + /bin/kill — landed
+
+Thin POSIX / shell-mirror pair. Inventory: still no `statfs(2)`, so thin `df`
+deferred. `touch` gains `-c` (do not create missing files; missing paths are
+silent success). New `/bin/kill [-SIG] PID...` mirrors the shell builtin for
+`xargs`/scripts (default SIGTERM=15; numeric signal 0..31; negative PID targets
+process group per `kill(2)`). Compact argv for `EXEC_MAX_ARGC=8`. No kernel
+work. Focused virtio login smoke covers touch `-c`, `/bin/kill -0` probe /
+SIGTERM of background sleep, Ext2 touch, prior greens (smp 1/2). Ramfs `/bin`
+dents 102/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`wc -L` + `dirname` multi + `shuf`
-   + head/tail `-c` + `find`/`du` + …): prefer small coherent chunks such as
-   thin `df` **only if** `statfs(2)` is added, or other missing thin POSIX
-   (e.g. `touch -c`, `/bin/kill`, thin `diff`). Avoid deep jbd /
-   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+3. More daily-driver gaps after inventory (`touch -c` + `/bin/kill` + `wc -L` +
+   `dirname` multi + `shuf` + head/tail `-c` + `find`/`du` + …): prefer small
+   coherent chunks such as thin `df` **only if** `statfs(2)` is added, or other
+   missing thin POSIX (e.g. thin `diff`, `touch -r`/`-d` if utimens arrive).
+   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
+   bite-sized fix.

@@ -479,6 +479,7 @@ def main():
         "[FS] published /bin/find (",
         "[FS] published /bin/du (",
         "[FS] published /bin/shuf (",
+        "[FS] published /bin/kill (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",

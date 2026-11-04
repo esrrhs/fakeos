@@ -200,6 +200,8 @@ extern char user_du_start;
 extern char user_du_end;
 extern char user_shuf_start;
 extern char user_shuf_end;
+extern char user_kill_start;
+extern char user_kill_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -411,6 +413,7 @@ void rootfs_publish(void) {
     publish_one("/bin/find", (u64)(&user_find_start), (u64)(&user_find_end));
     publish_one("/bin/du", (u64)(&user_du_start), (u64)(&user_du_end));
     publish_one("/bin/shuf", (u64)(&user_shuf_start), (u64)(&user_shuf_end));
+    publish_one("/bin/kill", (u64)(&user_kill_start), (u64)(&user_kill_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));

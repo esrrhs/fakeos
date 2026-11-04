@@ -258,6 +258,7 @@ flowchart TD
 - [x] **/bin/find + /bin/du**：薄树遍历；`find [PATH...] [-name GLOB] [-type f|d] [-print]`（basename `*`/`?` glob；`lstat`；默认 `.`）；`du [-a][-s] [FILE...]` 表观大小（1024B 单位）。virtio login smoke（smp 1/2）。
 - [x] **/bin/shuf + head/tail -c**：`shuf [-n N] [-i LO-HI] [-e ARG...] [FILE...]` Fisher-Yates 行乱序（clock+pid 种子）；`head`/`tail` 增加 `-c N`/`-cN` 字节模式（`tail -c` 可 seek 走 lseek+fstat，否则字节环）。virtio login smoke（smp 1/2）。
 - [x] **wc -L + dirname multi-arg**：`wc` 增加 `-L`/`-lwcL` 最长行字节长度（默认仍为行/词/字节）；`dirname PATH...` 支持多操作数逐行输出（GNU 多参）。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
