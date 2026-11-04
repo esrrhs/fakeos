@@ -1,9 +1,10 @@
 /* fakeos userland - cat: concatenate files, or stdin when none given.
- *   cat [-n|-b] [-s] [-v] [FILE...]
+ *   cat [-n|-b] [-s] [-v] [-E] [-T] [-A] [FILE...]
  * -n number all lines; -b number non-blank lines (overrides -n numbering
  * style); -s squeeze consecutive blank lines to one; -v show nonprinting
- * (^ and M- notation; TAB/NL left as-is). Glued -nbsv ok. Number column is
- * width 6 + tab (GNU-ish). Compact argv for EXEC_MAX_ARGC=8.
+ * (^ and M- notation); -E mark line ends with '$'; -T show tabs as ^I;
+ * -A same as -vET. Glued -nbsvETA ok. Number column is width 6 + tab
+ * (GNU-ish). Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -22,19 +23,43 @@ static int opt_n;
 static int opt_b;
 static int opt_s;
 static int opt_v;
+static int opt_E; /* show $ at EOL */
+static int opt_T; /* show TAB as ^I */
 static int prev_blank; /* across files for -s */
 
 static void usage(void) {
-    u_write(2, "usage: cat [-nbsv] [FILE...]\n", 28);
+    u_write(2, "usage: cat [-nbsvETA] [FILE...]\n", 31);
 }
 
-/* GNU cat -v: high bit as M-, controls (not TAB/NL) as ^X, DEL as ^?. */
-static void emit_vis(unsigned char c) {
+/* Emit one byte under -v/-E/-T (GNU-ish). */
+static void emit_one(unsigned char c) {
+    if (c == '\t') {
+        if (opt_T) u_write(1, "^I", 2);
+        else {
+            char ch = '\t';
+            u_write(1, &ch, 1);
+        }
+        return;
+    }
+    if (c == '\n') {
+        if (opt_E) u_write(1, "$", 1);
+        {
+            char ch = '\n';
+            u_write(1, &ch, 1);
+        }
+        return;
+    }
+    if (!opt_v) {
+        char ch = (char)c;
+        u_write(1, &ch, 1);
+        return;
+    }
+    /* -v: high bit as M-, controls as ^X, DEL as ^?. */
     if (c >= 128) {
         u_write(1, "M-", 2);
         c = (unsigned char)(c - 128);
     }
-    if (c < 32 && c != '\t' && c != '\n') {
+    if (c < 32) {
         char hat = '^';
         char x = (char)(c + 64);
         u_write(1, &hat, 1);
@@ -49,11 +74,11 @@ static void emit_vis(unsigned char c) {
 
 static void emit_bytes(const char *buf, int n) {
     int i;
-    if (!opt_v) {
+    if (!opt_v && !opt_E && !opt_T) {
         if (n > 0) u_write(1, buf, (unsigned long)n);
         return;
     }
-    for (i = 0; i < n; i++) emit_vis((unsigned char)buf[i]);
+    for (i = 0; i < n; i++) emit_one((unsigned char)buf[i]);
 }
 
 static void emit_num(long num) {
@@ -82,9 +107,9 @@ static int cat_fd_raw(long fd) {
     char buf[1024];
     long n;
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
-        if (opt_v) {
+        if (opt_v || opt_E || opt_T) {
             int i;
-            for (i = 0; i < (int)n; i++) emit_vis((unsigned char)buf[i]);
+            for (i = 0; i < (int)n; i++) emit_one((unsigned char)buf[i]);
         } else if (u_write(1, buf, (u64)n) < 0) {
             return 1;
         }
@@ -142,7 +167,7 @@ static int cat_fd_lines(long fd, long *num) {
 
 static int cat_fd(long fd, long *num) {
     if (opt_n || opt_b || opt_s) return cat_fd_lines(fd, num);
-    return cat_fd_raw(fd); /* also handles -v alone */
+    return cat_fd_raw(fd); /* also handles -v/-E/-T alone */
 }
 
 int main(int argc, char **argv) {
@@ -168,6 +193,14 @@ int main(int argc, char **argv) {
                 opt_s = 1;
             } else if (o == 'v') {
                 opt_v = 1;
+            } else if (o == 'E') {
+                opt_E = 1;
+            } else if (o == 'T') {
+                opt_T = 1;
+            } else if (o == 'A') {
+                opt_v = 1;
+                opt_E = 1;
+                opt_T = 1;
             } else {
                 usage();
                 return 1;

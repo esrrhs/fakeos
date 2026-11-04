@@ -2113,6 +2113,12 @@ dent. Focused virtio login smoke covers `-t` + prior greens (smp 1/2).
 NL unchanged). Combines with `-n`/`-b`/`-s`; glued `-nbsv`. No new `/bin`
 dent. Focused virtio login smoke covers `-v` + prior greens (smp 1/2).
 
+## cat -E/-T/-A — landed
+
+`/bin/cat -E` marks EOL with `$`; `-T` shows TAB as `^I`; `-A` is `-vET`.
+Combines with existing `-n`/`-b`/`-s`/`-v`. Glued `-nbsvETA`. No new `/bin`
+dent. Focused virtio login smoke covers `-E`/`-T` + prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
