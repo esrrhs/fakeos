@@ -269,6 +269,7 @@ flowchart TD
 - [x] **date +FORMAT + stat -c**：`date` 支持 `+FORMAT`（启动相对秒当 epoch 填日历字段；`%s/%N/%Y/%m/%d/%H/%M/%S/%y/%%`）；`stat` 增加 `-c FORMAT`/`-cFORMAT`/`-Lc`（`%n%s%i%a%f%F%h%u%g%Y%%`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **seq -w + du -h**：`seq` 增加 `-w`（等宽前导零，宽度取端点十进制宽度）；`du` 增加 `-h`（1024 幂整数人类可读：裸字节/`K`/`M`/`G`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **xargs -I + sort -k + timeout --signal**：`xargs -I R`/`-IR` 按行替换初始参数中的 R；`sort -k N`/`-kN` 按空白字段排序（可与 `-n`/`-r` 组合）；`timeout -s SIG`/`--signal=SIG` 超时发指定信号（0..31，默认 9；未收尸则回退 SIGKILL）。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **id -un/-gn + hostname -s + rm -f + ln -sf**：`id`/`sh` 增加 `-u`/`-g`/`-n`（粘连 `-un`/`-gn`；`-n` 经 `/etc/passwd`/`/etc/group` 解析名，缺省数值）；`hostname -s` 截到首 `.`；`rm -f` 忽略缺失（可与 `-r` 粘连；无操作数时 `-f` 成功）；`ln -sf`/`-f` 先 unlink 再 link（拒覆盖目录；shell-mirror）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/ls -l polish**：`ls` 增加 `-a`/`-A`/`-d`、粘连短选项、多 PATH（多目录打印 `path:` 头）；默认隐藏 `.` 前缀名；`-a` 合成输出 `.`/`..`（getdents 无此项）；`-l` 增加 `nlink`（`mode nlink uid gid size mtime name`）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **touch -c + /bin/kill**：`touch [-c] FILE...`（`-c` 不创建缺失文件）；外部 `/bin/kill [-SIG] PID...`（默认 SIGTERM=15；负 PID 为进程组；shell-mirror，供 xargs/脚本）。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -r + /bin/mv 递归目录**：`cp [-r|-R]` 递归复制；`mv` 目录树优先 `rename(2)`，跨 FS 则 copy-tree+`rm -r`；环检测；仍支持 `SRC DST` 与 `SRC... DIRECTORY`（`DIR/basename`）。virtio login smoke（smp 1/2）。

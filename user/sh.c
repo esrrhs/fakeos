@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-s], readlink,
+ * Builtins: echo [-neE] ($?/$VAR), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -1107,9 +1107,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown, id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -1367,25 +1367,111 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "id")) {
+        /* id [-u|-g] [-n] — glued -un/-nu/-gn/-ng; names via /etc. */
         unsigned int gids[8];
         long ng;
         long gi;
-        printf("uid=%d euid=%d gid=%d egid=%d",
-               (int)u_getuid(), (int)u_geteuid(),
-               (int)u_getgid(), (int)u_getegid());
-        ng = u_getgroups(8, gids);
-        if (ng < 0) {
-            ng = 0;
-        }
-        if (ng > 0) {
-            printf(" groups=");
-            for (gi = 0; gi < ng; gi++) {
-                if (gi) printf(",");
-                printf("%d", (int)gids[gi]);
+        int ti = 1;
+        int only_u = 0;
+        int only_g = 0;
+        int want_name = 0;
+        int bad = 0;
+        while (tokens[ti] != 0 && tokens[ti][0] == '-' && tokens[ti][1] != 0) {
+            const char *o = tokens[ti] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'u') only_u = 1;
+                else if (o[j] == 'g') only_g = 1;
+                else if (o[j] == 'n') want_name = 1;
+                else { bad = 1; break; }
             }
+            if (bad) break;
+            ti++;
         }
-        printf("\n");
-        rc = 0;
+        if (bad || tokens[ti] != 0 || (only_u && only_g)
+            || (want_name && !only_u && !only_g)) {
+            puts("usage: id [-u|-g] [-n]");
+            rc = 1;
+        } else if (only_u || only_g) {
+            unsigned int idv = only_u ? (unsigned int)u_geteuid()
+                                      : (unsigned int)u_getegid();
+            char name[64];
+            int got = 0;
+            if (want_name) {
+                char buf[512];
+                long fd = u_open(only_u ? "/etc/passwd" : "/etc/group", 0, 0);
+                long n;
+                long i;
+                name[0] = 0;
+                if (fd >= 0) {
+                    n = u_read(fd, buf, sizeof(buf) - 1);
+                    u_close(fd);
+                    if (n > 0) {
+                        buf[n] = 0;
+                        i = 0;
+                        while (i < n) {
+                            char *line = buf + i;
+                            char *f0;
+                            char *f2 = 0;
+                            char *p;
+                            int col = 0;
+                            unsigned int v = 0;
+                            int any = 0;
+                            while (i < n && buf[i] != '\n') i++;
+                            if (i < n) { buf[i] = 0; i++; }
+                            if (line[0] == 0 || line[0] == '#') continue;
+                            f0 = line;
+                            p = line;
+                            while (*p) {
+                                if (*p == ':') {
+                                    *p = 0;
+                                    col++;
+                                    if (col == 2) { f2 = p + 1; break; }
+                                    p++;
+                                } else p++;
+                            }
+                            if (f2 == 0) continue;
+                            while (*f2 && *f2 != ':') {
+                                if (*f2 < '0' || *f2 > '9') { any = 0; break; }
+                                v = v * 10u + (unsigned int)(*f2 - '0');
+                                f2++;
+                                any = 1;
+                            }
+                            if (!any || v != idv) continue;
+                            {
+                                int k = 0;
+                                while (f0[k] != 0 && k < 63) { name[k] = f0[k]; k++; }
+                                name[k] = 0;
+                                got = 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (got && name[0] != 0) {
+                puts(name);
+            } else {
+                printf("%u\n", idv);
+            }
+            rc = 0;
+        } else {
+            printf("uid=%d euid=%d gid=%d egid=%d",
+                   (int)u_getuid(), (int)u_geteuid(),
+                   (int)u_getgid(), (int)u_getegid());
+            ng = u_getgroups(8, gids);
+            if (ng < 0) ng = 0;
+            if (ng > 0) {
+                printf(" groups=");
+                for (gi = 0; gi < ng; gi++) {
+                    if (gi) printf(",");
+                    printf("%d", (int)gids[gi]);
+                }
+            }
+            printf("\n");
+            rc = 0;
+        }
     } else if (eq(tokens[0], "seteuid")) {
         if (tokens[1] == 0) {
             puts("usage: seteuid UID");
@@ -1609,25 +1695,56 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "ln")) {
-        /* ln [-s] TARGET LINKPATH */
-        if (tokens[1] != 0 && eq(tokens[1], "-s")) {
-            if (tokens[2] == 0 || tokens[3] == 0 || tokens[4] != 0) {
-                puts("sh: ln: usage: ln [-s] TARGET LINKPATH");
-                rc = 1;
-            } else if (u_symlink(tokens[2], tokens[3]) != 0) {
-                puts("sh: ln: symlink failed");
-                rc = 1;
-            } else {
-                rc = 0;
+        /* ln [-sf] TARGET LINKPATH */
+        int ti = 1;
+        int symbolic = 0;
+        int force = 0;
+        int bad = 0;
+        while (tokens[ti] != 0 && tokens[ti][0] == '-' && tokens[ti][1] != 0) {
+            const char *o = tokens[ti] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 's') symbolic = 1;
+                else if (o[j] == 'f') force = 1;
+                else { bad = 1; break; }
             }
-        } else if (tokens[1] == 0 || tokens[2] == 0 || tokens[3] != 0) {
-            puts("sh: ln: usage: ln [-s] TARGET LINKPATH");
-            rc = 1;
-        } else if (u_link(tokens[1], tokens[2]) != 0) {
-            puts("sh: ln: link failed");
+            if (bad) break;
+            ti++;
+        }
+        if (bad || tokens[ti] == 0 || tokens[ti + 1] == 0 || tokens[ti + 2] != 0) {
+            puts("sh: ln: usage: ln [-sf] TARGET LINKPATH");
             rc = 1;
         } else {
-            rc = 0;
+            const char *target = tokens[ti];
+            const char *linkpath = tokens[ti + 1];
+            if (force) {
+                char st[144];
+                if (u_stat(linkpath, st) == 0) {
+                    unsigned int mode = (unsigned int)(unsigned char)st[24]
+                        | ((unsigned int)(unsigned char)st[25] << 8)
+                        | ((unsigned int)(unsigned char)st[26] << 16)
+                        | ((unsigned int)(unsigned char)st[27] << 24);
+                    if ((mode & 0xF000u) == 0x4000u) {
+                        puts("sh: ln: cannot overwrite directory");
+                        rc = 1;
+                        target = 0;
+                    } else {
+                        u_unlink(linkpath);
+                    }
+                }
+            }
+            if (target != 0) {
+                if (symbolic) {
+                    if (u_symlink(target, linkpath) != 0) {
+                        puts("sh: ln: symlink failed");
+                        rc = 1;
+                    } else rc = 0;
+                } else if (u_link(target, linkpath) != 0) {
+                    puts("sh: ln: link failed");
+                    rc = 1;
+                } else rc = 0;
+            }
         }
     } else if (eq(tokens[0], "readlink")) {
         char buf[128];
