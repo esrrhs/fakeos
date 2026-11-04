@@ -1759,6 +1759,13 @@ pairs with `xargs -0` / `sort -z`). Keeps `-s`/`-d`; glued `-sz`/`-zs`. No
 new `/bin` dent. Focused virtio login smoke covers `paste -z` + prior greens
 including tee -i (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## env -0 — landed
+
+`/bin/env -0` ends each printed `NAME=val` with NUL instead of newline (GNU-ish;
+print mode only; ignored with COMMAND). Keeps `-i`/`-u`/assignments. No new
+`/bin` dent. Focused virtio login smoke covers `env -0` + prior greens
+including paste -z (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1766,6 +1773,6 @@ including tee -i (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `env -0` / `fold -b` / other util flags on
-   existing `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `fold -b` / other util flags on existing `/bin`
+   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.

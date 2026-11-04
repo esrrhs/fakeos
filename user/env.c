@@ -1,10 +1,12 @@
 /* fakeos userland - env: print or run with a modified environment (thin).
  * Forms: env
- *        env [-i] [-u NAME]... [NAME=VALUE]...
- *        env [-i] [-u NAME]... [NAME=VALUE]... COMMAND [ARG...]
+ *        env [-i] [-0] [-u NAME]... [NAME=VALUE]...
+ *        env [-i] [-0] [-u NAME]... [NAME=VALUE]... COMMAND [ARG...]
  *        env - ...                 (bare '-' same as -i)
- * Without COMMAND: print the resulting environment (one NAME=val per line).
- * With COMMAND: execve with that envp (PATH-lite /bin/ for COMMAND without '/').
+ * Without COMMAND: print the resulting environment (one NAME=val per line;
+ * -0 ends each assignment with NUL instead of newline).
+ * With COMMAND: execve with that envp (PATH-lite /bin/ for COMMAND without '/');
+ * -0 is ignored when exec'ing.
  * Inherited start state comes from /proc/self/environ (execve envp).
  * Empty envp still seeds FAKECC_PKG=/src in the kernel (EXEC_MAX_ENVC=8).
  * Compact argv for EXEC_MAX_ARGC=8. printenv is an alias of this binary.
@@ -26,8 +28,10 @@ enum {
     ENV_BUF = 256
 };
 
+static int opt_0; /* -0: NUL after each printed assignment */
+
 static void usage(void) {
-    u_write(2, "usage: env [-i] [-u NAME]... [NAME=VALUE]... [COMMAND [ARG...]]\n", 66);
+    u_write(2, "usage: env [-i] [-0] [-u NAME]... [NAME=VALUE]... [COMMAND [ARG...]]\n", 69);
 }
 
 static int name_match(const char *entry, const char *name) {
@@ -129,7 +133,12 @@ static void print_slots(char slots[][ARG_SLOT], int count) {
         unsigned long n = strlen(slots[i]);
         if (n > 0) {
             u_write(1, slots[i], n);
-            u_write(1, "\n", 1);
+            if (opt_0) {
+                char z = 0;
+                u_write(1, &z, 1);
+            } else {
+                u_write(1, "\n", 1);
+            }
         }
     }
 }
@@ -178,6 +187,7 @@ int main(int argc, char **argv) {
     int cleared = 0;
     int i;
 
+    opt_0 = 0;
     count = load_environ(slots);
 
     while (ai < argc) {
@@ -191,6 +201,11 @@ int main(int argc, char **argv) {
         if (a[0] == '-' && a[1] == 'i' && a[2] == 0) {
             count = 0;
             cleared = 1;
+            ai++;
+            continue;
+        }
+        if (a[0] == '-' && a[1] == '0' && a[2] == 0) {
+            opt_0 = 1;
             ai++;
             continue;
         }
