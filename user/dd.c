@@ -5,7 +5,8 @@
  * b (=512) suffix. skip/seek are in input/output blocks. status=none quiets
  * the records summary on stderr.
  * conv= comma-list: notrunc (keep of= size), sync (pad short reads to bs with
- * NUL), fsync (fsync of= before close).
+ * NUL), fsync (fsync of= before close), lcase / ucase (ASCII A-Z / a-z case
+ * convert; later of the two wins if both listed).
  */
 package user;
 
@@ -61,7 +62,8 @@ static int parse_num(const char *s, unsigned long *out) {
 }
 
 /* Parse comma-separated conv= tokens into flags. Returns 0 on unknown token. */
-static int parse_conv(const char *s, int *notrunc, int *pad_sync, int *do_fsync) {
+static int parse_conv(const char *s, int *notrunc, int *pad_sync, int *do_fsync,
+                      int *do_lcase, int *do_ucase) {
     char tok[32];
     int ti;
     int i = 0;
@@ -80,6 +82,12 @@ static int parse_conv(const char *s, int *notrunc, int *pad_sync, int *do_fsync)
             *pad_sync = 1;
         } else if (strcmp(tok, "fsync") == 0) {
             *do_fsync = 1;
+        } else if (strcmp(tok, "lcase") == 0) {
+            *do_lcase = 1;
+            *do_ucase = 0;
+        } else if (strcmp(tok, "ucase") == 0) {
+            *do_ucase = 1;
+            *do_lcase = 0;
         } else {
             return 0;
         }
@@ -130,6 +138,8 @@ int main(int argc, char **argv) {
     int notrunc = 0;
     int pad_sync = 0;
     int do_fsync = 0;
+    int do_lcase = 0;
+    int do_ucase = 0;
     long in_fd = 0;
     long out_fd = 1;
     int close_in = 0;
@@ -176,7 +186,8 @@ int main(int argc, char **argv) {
                 return 1;
             }
         } else if (eq_key(argv[i], "conv=")) {
-            if (!parse_conv(argv[i] + 5, &notrunc, &pad_sync, &do_fsync)) {
+            if (!parse_conv(argv[i] + 5, &notrunc, &pad_sync, &do_fsync,
+                            &do_lcase, &do_ucase)) {
                 usage();
                 return 1;
             }
@@ -250,6 +261,16 @@ int main(int argc, char **argv) {
         if ((unsigned long)n == bs) in_full++;
         else in_partial++;
         write_len = (unsigned long)n;
+        if (do_lcase || do_ucase) {
+            unsigned long j;
+            for (j = 0; j < write_len; j++) {
+                unsigned char c = buf[j];
+                if (do_lcase && c >= 'A' && c <= 'Z')
+                    buf[j] = (unsigned char)(c + ('a' - 'A'));
+                else if (do_ucase && c >= 'a' && c <= 'z')
+                    buf[j] = (unsigned char)(c - ('a' - 'A'));
+            }
+        }
         if (pad_sync && write_len < bs) {
             unsigned long z;
             for (z = write_len; z < bs; z++) buf[z] = 0;
