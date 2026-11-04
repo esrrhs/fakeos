@@ -620,16 +620,26 @@ only. Focused virtio login smoke covers recursive tree copy (Ramfs + Ext2),
 refuse-without-`-r`, self-copy refuse, prior interactive greens (smp 1/2).
 Ramfs `/bin` dents 98/128.
 
+## /bin/mv recursive directory trees — landed
+
+`/bin/mv` moves directory trees: prefer `rename(2)` same-FS; on EXDEV/fail,
+copy-tree (getdents collect + mkdir/merge) then recursive remove source.
+Still supports `SRC DST` and `SRC... DIRECTORY` (`DIR/basename`). Cycle guard
+rejects DST under/equal to SRC. No new `/bin` publish (dent count unchanged).
+Shell has no builtin `mv` — external only. Focused virtio login smoke covers
+Ramfs rename tree, cross-FS Ramfs→Ext2 copy+rm, into-dir, cycle refuse, prior
+interactive greens (smp 1/2). Ramfs `/bin` dents 98/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (`cp -r` +
-   cp/mv dir targets + rmdir -p + logname/nohup + tsort/pathchk + rmdir/unlink +
-   tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
+4. More daily-driver gaps: remaining thin POSIX after inventory (`mv` recursive +
+   `cp -r` + cp/mv dir targets + rmdir -p + logname/nohup + tsort/pathchk +
+   rmdir/unlink + tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
    factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
-   small coherent chunks such as recursive `mv` dir trees, `head`/`tail`
-   polish, or other thin POSIX still missing. Avoid deep jbd / Ext2-redirect
-   duplex races / CFS nesting unless a clear bite-sized fix.
+   small coherent chunks such as `head`/`tail` polish, or other thin POSIX
+   still missing. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
+   unless a clear bite-sized fix.
