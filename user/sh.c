@@ -8,7 +8,7 @@
  * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators).
  * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL).
  * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
- * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; $1… (depth 4). */
+ * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4). */
 package user;
 
 typedef unsigned long u64;
@@ -1536,6 +1536,50 @@ static int pos_argc(void) {
     return pos_stack[func_depth - 1].argc;
 }
 
+/* Shift $1.. left by n (default 1). Returns 0 ok, -1 if n > $#. */
+static int pos_shift(int n) {
+    struct sh_posframe *fr;
+    int i;
+    int j;
+    if (func_depth <= 0) {
+        /* No script argv yet — empty positional list. */
+        if (n == 0) return 0;
+        return -1;
+    }
+    fr = &pos_stack[func_depth - 1];
+    if (n < 0) return -1;
+    if (n > fr->argc) return -1;
+    for (i = 0; i + n < fr->argc; i++) {
+        j = 0;
+        while (fr->args[i + n][j] != 0 && j + 1 < POS_VAL) {
+            fr->args[i][j] = fr->args[i + n][j];
+            j++;
+        }
+        fr->args[i][j] = 0;
+    }
+    fr->argc -= n;
+    return 0;
+}
+
+/* Append space-joined $1..$# into out (thin $@ / $*). */
+static void pos_join_all(char *out, int outsz) {
+    int oi = 0;
+    int i;
+    int argc = pos_argc();
+    out[0] = 0;
+    for (i = 1; i <= argc; i++) {
+        const char *val = pos_get(i);
+        int k = 0;
+        if (val == 0) val = "";
+        if (i > 1 && oi + 1 < outsz) out[oi++] = ' ';
+        while (val[k] != 0 && oi + 1 < outsz) {
+            out[oi++] = val[k];
+            k++;
+        }
+        out[oi] = 0;
+    }
+}
+
 static void locals_restore_frame(int depth) {
     int i;
     for (i = MAX_LOCAL - 1; i >= 0; i--) {
@@ -2022,6 +2066,19 @@ static void expand_token(const char *in, char *out, int outsz, long rc_in) {
             p += 2;
             continue;
         }
+        /* $@ / $* — thin: space-joined $1..$# (same; no IFS split) */
+        if (p[1] == '@' || p[1] == '*') {
+            char joined[128];
+            int k = 0;
+            pos_join_all(joined, 128);
+            while (joined[k] != 0 && oi + 1 < outsz) {
+                out[oi++] = joined[k];
+                k++;
+            }
+            out[oi] = 0;
+            p += 2;
+            continue;
+        }
         /* $0 .. $9 (single digit; thin) */
         if (p[1] >= '0' && p[1] <= '9') {
             const char *val = pos_get(p[1] - '0');
@@ -2098,7 +2155,7 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue")
         || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs")
         || eq(cmd, "alias") || eq(cmd, "unalias")
-        || eq(cmd, "return") || eq(cmd, "local")
+        || eq(cmd, "return") || eq(cmd, "local") || eq(cmd, "shift")
         || eq(cmd, "[[");
 }
 
@@ -2544,6 +2601,34 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         func_ret_rc = code;
         return code;
     }
+    if (eq(tokens[0], "shift")) {
+        long n = 1;
+        if (tokens[1] != 0) {
+            const char *s = tokens[1];
+            int i = 0;
+            if (tokens[2] != 0) {
+                puts("sh: shift: too many arguments");
+                return 1;
+            }
+            if (s[0] == 0) {
+                puts("sh: shift: numeric argument required");
+                return 1;
+            }
+            while (s[i] != 0) {
+                if (s[i] < '0' || s[i] > '9') {
+                    puts("sh: shift: numeric argument required");
+                    return 1;
+                }
+                i++;
+            }
+            n = strtol_dec(s);
+        }
+        if (pos_shift((int)n) != 0) {
+            puts("sh: shift: shift count out of range");
+            return 1;
+        }
+        return 0;
+    }
     if (eq(tokens[0], "local")) {
         int ai = 1;
         if (func_depth <= 0) {
@@ -2629,9 +2714,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, return, local, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -4237,8 +4322,24 @@ static long run_for(char **tokens, long rc_in) {
         }
         body[bi] = 0;
     }
-    /* Expand word list once (POSIX). */
+    /* Expand word list once (POSIX). Thin: bare $@ / $* become $1..$# words. */
     for (wi = word0; wi < wordn && nwords < MAX_TOK; wi++) {
+        if (eq(tokens[wi], "$@") || eq(tokens[wi], "$*")) {
+            int pi;
+            int argc = pos_argc();
+            for (pi = 1; pi <= argc && nwords < MAX_TOK; pi++) {
+                const char *val = pos_get(pi);
+                int k = 0;
+                if (val == 0) val = "";
+                while (val[k] != 0 && k + 1 < 128) {
+                    word_bufs[nwords][k] = val[k];
+                    k++;
+                }
+                word_bufs[nwords][k] = 0;
+                nwords++;
+            }
+            continue;
+        }
         expand_err = 0;
         expand_token(tokens[wi], word_bufs[nwords], 128, rc);
         if (expand_err) {
@@ -5144,7 +5245,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/functions/envp, set -e/-u, $((arith))/$0..$9/$#, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

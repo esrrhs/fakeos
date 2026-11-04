@@ -1184,6 +1184,19 @@ ops; shell-level `[[ … ]] && cmd` still works. Focused virtio login smoke
 covers string/file/`&&`/`||`/`!`/if + prior greens (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## shell shift + $@/$* — landed
+
+Thin shell polish (no new `/bin` dent; Tab lists `shift`). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc.
+
+`shift [N]` (default 1) left-shifts function positionals; fails if `N > $#`
+or non-numeric. `$@` / `$*` expand to space-joined `$1..$#` (thin; same;
+no IFS). Bare `$@` / `$*` in `for x in …` expand to one word per positional.
+Focused virtio login smoke covers shift/`$@`/`$*`/for + prior greens
+(smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1191,5 +1204,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (skip large
+   deferred. Next thin polish: `:`/`true`/`false` builtins, thin `eval` /
+   `source`/`.`, `readonly`, or other small `/bin`/shell bites (skip large
    `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

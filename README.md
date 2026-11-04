@@ -291,6 +291,7 @@ flowchart TD
 - [x] **shell functions/local**：`name () { …; }` / `name() { …; }`（cap 8；body 串）；`return`；`local NAME[=VAL]`；`$0`..`$9`/`$#`；`type`/`which`/`command -v` 识别函数。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/hexdump + /bin/xxd + /bin/file**：`hexdump [-Cv] [-n LEN] [-s OFF]` 规范 hex+ASCII（重复行 `*`；`-v` 关闭）；`xxd [-pr] [-l LEN] [-s OFF] [-c COLS]` 地址转储/`-p` 纯 hex/`-r` 反转；`file FILE...` 薄 magic（空/ELF/`#!`/gzip/PNG/ASCII/目录/符号链接等）。粘连 `-n/-s/-l/-c` 保 `EXEC_MAX_ARGC=8`。Ramfs `/bin` dents ~114/128。virtio login smoke（smp 1/2）。
 - [x] **shell [[ ]]**：薄 `[[ EXPR ]]`（`==`/`=`/`!=`、`-z`/`-n`、文件测 `-e/-f/-d/-h/-L/-b/-c/-p/-S/-s/-r/-w/-x`、`!`、内联 `&&`/`||`；无正则）；`run_list` 收齐至 `]]` 以免内联 `&&`/`||` 被拆。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **shell shift + $@/$***：薄 `shift [N]`（默认 1；超出 `$#` 失败）；`$@`/`$*` 展开为 `$1..$#` 空格拼接（thin，无 IFS）；`for x in $@`/`$*` 拆成多词。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
