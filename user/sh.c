@@ -10,7 +10,7 @@
  * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
  * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4).
  * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false).
- * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly (reject set/unset). */
+ * eval / source / . (thin; depth 4; EVAL_BUF 512); readonly; wait [PID|%N]. */
 package user;
 
 typedef unsigned long u64;
@@ -2192,7 +2192,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "help") || eq(cmd, "pid") || eq(cmd, "ppid") ||
            eq(cmd, "uname") || eq(cmd, "sleep") || eq(cmd, "sync") ||
            eq(cmd, "clear") || eq(cmd, "history") || eq(cmd, "jobs") ||
-           eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill") ||
+           eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "wait") || eq(cmd, "kill") ||
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "readonly") || eq(cmd, "unset") ||
            eq(cmd, "which") || eq(cmd, "type") || eq(cmd, "command") ||
@@ -2770,11 +2770,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], readonly, unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, wait, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export [-n] NAME[=val] / readonly NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
-        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
+        puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
         return 0;
     }
     if (eq(tokens[0], "history")) {
@@ -2991,6 +2991,93 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
 
 
+    if (eq(tokens[0], "wait")) {
+        /* wait           -> all active jobs
+         * wait PID       -> one pid (job table or any child)
+         * wait %N        -> job N */
+        long rcw = 0;
+        int ai = 1;
+        if (tokens[1] == 0) {
+            int i;
+            for (i = 0; i < MAX_JOBS; i++) {
+                long status = 0;
+                long reaped;
+                long pid;
+                if (!jobs[i].active) continue;
+                pid = jobs[i].pid;
+                if (jobs[i].stopped) {
+                    long pg = jobs[i].pgid != 0 ? jobs[i].pgid : pid;
+                    u_kill(-pg, SIGCONT_N);
+                    jobs[i].stopped = 0;
+                }
+                reaped = u_wait4(pid, &status, 0, 0);
+                if (reaped == pid) {
+                    rcw = status_exit(status);
+                    jobs[i].active = 0;
+                    jobs[i].stopped = 0;
+                } else {
+                    rcw = 127;
+                    jobs[i].active = 0;
+                    jobs[i].stopped = 0;
+                }
+            }
+            return rcw;
+        }
+        for (; tokens[ai] != 0; ai++) {
+            long status = 0;
+            long reaped;
+            long pid = 0;
+            int ji = -1;
+            if (tokens[ai][0] == '%') {
+                long n = strtol_dec(tokens[ai] + 1);
+                if (n >= 1 && n <= MAX_JOBS && jobs[n - 1].active) {
+                    ji = (int)(n - 1);
+                    pid = jobs[ji].pid;
+                } else {
+                    printf("sh: wait: %s: no such job\n", tokens[ai]);
+                    rcw = 127;
+                    continue;
+                }
+            } else {
+                const char *s = tokens[ai];
+                int k = 0;
+                if (s[0] == 0) {
+                    puts("sh: wait: bad pid");
+                    rcw = 127;
+                    continue;
+                }
+                while (s[k] != 0) {
+                    if (s[k] < '0' || s[k] > '9') {
+                        puts("sh: wait: bad pid");
+                        rcw = 127;
+                        pid = -1;
+                        break;
+                    }
+                    k++;
+                }
+                if (pid < 0) continue;
+                pid = strtol_dec(s);
+                ji = job_find_pid(pid);
+            }
+            if (ji >= 0 && jobs[ji].stopped) {
+                long pg = jobs[ji].pgid != 0 ? jobs[ji].pgid : pid;
+                u_kill(-pg, SIGCONT_N);
+                jobs[ji].stopped = 0;
+            }
+            reaped = u_wait4(pid, &status, 0, 0);
+            if (reaped == pid) {
+                rcw = status_exit(status);
+                if (ji >= 0) {
+                    jobs[ji].active = 0;
+                    jobs[ji].stopped = 0;
+                }
+            } else {
+                printf("sh: wait: pid %d is not a child of this shell\n", (int)pid);
+                rcw = 127;
+            }
+        }
+        return rcw;
+    }
     if (eq(tokens[0], "jobs")) {
         int i;
         int cur = job_current();
@@ -5474,7 +5561,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/readonly/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

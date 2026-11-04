@@ -689,7 +689,7 @@ static void tab_scan_builtins(const char *pfx, u32 pfx_n) {
         "echo", "cd", "mkdir", "rmdir", "pwd", "pid", "ppid", "uname",
         "sleep", "ln", "readlink", "realpath", "env", "export", "readonly", "unset",
         "which", "chmod", "umask", "chown", "id", "sync", "clear",
-        "history", "jobs", "fg", "bg", "kill", "exit", "help",
+        "history", "jobs", "fg", "bg", "wait", "kill", "exit", "help",
         "pushd", "popd", "dirs", "type", "command", "hash", "read",
         "set", "break", "continue", "alias", "unalias", "return", "local", "shift",
         "true", "false", ":", "eval", "source", 0

@@ -1230,6 +1230,18 @@ included); missing `unset` still OK. Focused virtio login smoke covers
 set/list/reject-assign/reject-unset + prior greens (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## shell wait — landed
+
+Thin shell polish (no new `/bin` dent; Tab lists `wait`). Inventory: `unset`
+already lists names and respects readonly — left alone. Deferred kernel gaps
+unchanged.
+
+`wait` waits for all active jobs; `wait PID` / `wait %N` for one. Blocking
+`wait4` until exit; stopped jobs get `SIGCONT` first. Returns last child's
+status (127 if unknown). Focused virtio login smoke covers
+`true&wait`/`false&wait`/`wait %1` + prior greens (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1237,5 +1249,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other small `/bin`/shell bites (skip large
+   deferred. Next thin polish: `command` (run without alias/function), more
+   printf/test edges, or other small `/bin`/shell bites (skip large
    `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
