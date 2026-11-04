@@ -2,14 +2,16 @@
  * Forms:
  *   cal MONTH YEAR
  *   cal YEAR
- * No bare `cal`: CLOCK_REALTIME is boot-relative (no RTC), so the current
- * month is not meaningful unless MONTH/YEAR are given. Week starts Sunday.
- * Year form prints twelve months stacked (compact argv; no wall clock).
+ *   cal -y YEAR
+ * No bare `cal` / bare `cal -y`: CLOCK_REALTIME is boot-relative (no RTC),
+ * so the current month/year is not meaningful unless YEAR is given.
+ * Week starts Sunday. Year form prints twelve months stacked.
  */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
+extern int strcmp(const char *a, const char *b);
 
 static const char *mon_names[12] = {
     "January", "February", "March", "April", "May", "June",
@@ -53,9 +55,8 @@ static int dim(int y, int m) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: cal MONTH YEAR | cal YEAR\n", 34);
+    u_write(2, "usage: cal [-y] MONTH YEAR | cal [-y] YEAR\n", 45);
 }
-
 
 /* Center "Name YYYY" in a 20-column header (GNU/BSD cal width). */
 static void print_header(int month, int year) {
@@ -134,28 +135,63 @@ static void print_month(int month, int year) {
     }
 }
 
+static void print_year(int year) {
+    int m;
+    for (m = 1; m <= 12; m++) {
+        if (m > 1) u_write(1, "\n", 1);
+        print_month(m, year);
+    }
+}
+
 int main(int argc, char **argv) {
     int month;
     int year;
-    int m;
+    int ai = 1;
+    int year_mode = 0;
 
-    if (argc == 2) {
-        if (!parse_u(argv[1], &year) || year < 1 || year > 9999) {
+    while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
+        const char *a = argv[ai];
+        if (strcmp(a, "--") == 0) {
+            ai++;
+            break;
+        }
+        if (strcmp(a, "-y") == 0) {
+            year_mode = 1;
+            ai++;
+            continue;
+        }
+        usage();
+        return 1;
+    }
+
+    if (year_mode) {
+        /* cal -y YEAR  (bare cal -y needs RTC — refuse) */
+        if (ai + 1 != argc) {
             usage();
             return 1;
         }
-        for (m = 1; m <= 12; m++) {
-            if (m > 1) u_write(1, "\n", 1);
-            print_month(m, year);
+        if (!parse_u(argv[ai], &year) || year < 1 || year > 9999) {
+            usage();
+            return 1;
         }
+        print_year(year);
         return 0;
     }
-    if (argc == 3) {
-        if (!parse_u(argv[1], &month) || month < 1 || month > 12) {
+
+    if (argc - ai == 1) {
+        if (!parse_u(argv[ai], &year) || year < 1 || year > 9999) {
             usage();
             return 1;
         }
-        if (!parse_u(argv[2], &year) || year < 1 || year > 9999) {
+        print_year(year);
+        return 0;
+    }
+    if (argc - ai == 2) {
+        if (!parse_u(argv[ai], &month) || month < 1 || month > 12) {
+            usage();
+            return 1;
+        }
+        if (!parse_u(argv[ai + 1], &year) || year < 1 || year > 9999) {
             usage();
             return 1;
         }

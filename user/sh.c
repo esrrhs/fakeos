@@ -1142,7 +1142,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname, sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -1721,18 +1721,74 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         printf("%d\n", (int)u_getppid());
         rc = 0;
     } else if (eq(tokens[0], "uname")) {
+        /* uname [-asnrvm] — glued short opts; default sysname; POSIX field order. */
         char uts[390];
         long i;
-        for (i = 0; i < 390; i++) uts[i] = 0;
-        if (u_uname(uts) < 0) {
-            puts("sh: uname failed");
+        int ti = 1;
+        int want_s = 0;
+        int want_n = 0;
+        int want_r = 0;
+        int want_v = 0;
+        int want_m = 0;
+        int any = 0;
+        int bad = 0;
+        int first = 1;
+        while (tokens[ti] != 0 && tokens[ti][0] == '-' && tokens[ti][1] != 0) {
+            const char *o = tokens[ti] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'a') {
+                    want_s = want_n = want_r = want_v = want_m = 1;
+                    any = 1;
+                } else if (o[j] == 's') { want_s = 1; any = 1; }
+                else if (o[j] == 'n') { want_n = 1; any = 1; }
+                else if (o[j] == 'r') { want_r = 1; any = 1; }
+                else if (o[j] == 'v') { want_v = 1; any = 1; }
+                else if (o[j] == 'm') { want_m = 1; any = 1; }
+                else { bad = 1; break; }
+            }
+            if (bad) break;
+            ti++;
+        }
+        if (bad || tokens[ti] != 0) {
+            puts("usage: uname [-asnrvm]");
             rc = 1;
-        } else if (tokens[1] != 0 && eq(tokens[1], "-a")) {
-            printf("%s %s %s %s %s\n", uts, uts + 65, uts + 130, uts + 195, uts + 260);
-            rc = 0;
         } else {
-            puts(uts);
-            rc = 0;
+            if (!any) want_s = 1;
+            for (i = 0; i < 390; i++) uts[i] = 0;
+            if (u_uname(uts) < 0) {
+                puts("sh: uname failed");
+                rc = 1;
+            } else {
+                if (want_s) {
+                    if (!first) printf(" ");
+                    printf("%s", uts);
+                    first = 0;
+                }
+                if (want_n) {
+                    if (!first) printf(" ");
+                    printf("%s", uts + 65);
+                    first = 0;
+                }
+                if (want_r) {
+                    if (!first) printf(" ");
+                    printf("%s", uts + 130);
+                    first = 0;
+                }
+                if (want_v) {
+                    if (!first) printf(" ");
+                    printf("%s", uts + 195);
+                    first = 0;
+                }
+                if (want_m) {
+                    if (!first) printf(" ");
+                    printf("%s", uts + 260);
+                    first = 0;
+                }
+                printf("\n");
+                rc = 0;
+            }
         }
     } else if (eq(tokens[0], "sleep")) {
         long sec;
