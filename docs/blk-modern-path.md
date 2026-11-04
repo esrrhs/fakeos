@@ -13,7 +13,7 @@ the in-tree drivers already speak.
 | **AHCI (SATA)** | `make qemu-ahci` / `-device ahci` + `ide-hd` | `drivers/ahci.c` | Single port, multi-slot CL; DMA R/W/FLUSH; async NCQ + bio queue (depth 4 HW / 8 bios) when CAP.SNCQ; sync blk API + `blk_async_rw` end_io; MSI/MSI-X or INTx vector 42 + `sched_sleep`; ABAR relocated into boot HHDM when QEMU maps it high |
 | ATA PIO | IDE disk | `drivers/ata.c` | Identify + LBA28 PIO; fallback when virtio/AHCI absent |
 | VirtIO-net (legacy) | `virtio-net-pci,disable-modern=on` | `drivers/virtio_net.c` | MSI/MSI-X or INTx; DHCP/TCP/UDP |
-| **VirtIO-net (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_net.c` | Same cap map as blk; multi-vector MSI-X RX=40/TX=43 (per-queue); single MSI/MSI-X or INTx fallback; TX `sched_sleep` when multi |
+| **VirtIO-net (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_net.c` | Same cap map as blk; multi-vector MSI-X RX=40/TX=43 (per-queue); single MSI/MSI-X or INTx fallback; TX `io_wait`+`sched_yield` (no chan-sleep; TCG-safe like blk) |
 
 `drivers/blk.c` preference: **virtio-blk → AHCI → ATA**. Ext2 rides on that
 block layer (journal-lite descriptor/revoke ring + 8-slot meta-copy + revoke-aware replay + file data-path blk_async bounce via blk_async batch, multi-bg, triple-indirect).
@@ -28,8 +28,9 @@ block layer (journal-lite descriptor/revoke ring + 8-slot meta-copy + revoke-awa
 - **MSI / MSI-X**: `pci_msi_enable` / `pci_msix_enable_one` / `pci_msix_enable_n`.
   Modern virtio-net prefers multi-vector MSI-X (RX vector 40 entry 0, TX vector
   43 entry 1) via `pci_msix_enable_n`; falls back to single MSI then MSI-X then
-  INTx. Blk vector 41; AHCI 42. Blk/AHCI/TX `sched_sleep` on used-ring IRQ when
-  the scheduler is live (spin fallback otherwise).
+  INTx. Blk vector 41; AHCI 42. AHCI still `sched_sleep`s on completion with
+  poll fallback. VirtIO-blk and VirtIO-net TX wait with `io_wait`+`sched_yield`
+  (no chan-sleep) so QEMU/TCG retires host AIO.
 - **AHCI IRQ**: MSI/MSI-X (preferred) or INTx on vector 42; `sched_sleep` on completion with poll fallback.
 - **VirtIO-net multi-vector MSI-X**: modern path programs queue 0→entry0 (RX/40),
   queue 1→entry1 (TX/43); `virtio_net_msix_selftest` briefly `sti`s and checks TX
@@ -56,12 +57,20 @@ need that poll, so AHCI reached login.
 chan-sleep). Init `file_test` uses Ramfs `/tmp/...` so VFS smoke does not
 depend on Ext2 routing for unclaimed paths.
 
+## VirtIO-net TX TCG wait — fixed
+
+Same class as the blk login stall: multi-vector MSI-X TX used `sched_sleep` once
+the scheduler was live. Under TCG that stops VCPU poll so host AIO/TX completion
+never lands. TX now waits with `io_wait` + `sched_yield`; vector-43
+`sched_wakeup` remains a harmless fast path if the IRQ arrives mid-spin.
+Modern VERSION_1 hdr stays 12 bytes.
+
 ## Suggested next steps
 
-1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-2. mmap-posix gaps (MAP_FIXED / mprotect / more POSIX) when a smokeable bite appears.
+1. mmap-posix gaps (MAP_FIXED for file maps / mprotect / richer POSIX) — prefer
+   when a coherent smokeable slice appears.
+2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 3. Full jbd-style revoke/descriptor interaction beyond the lite ring (still not full jbd).
-4. VirtIO-net TX wait has a similar sleep pattern; revisit if TCG TX stalls show up.
 
 Until then, Makefile default keeps `disable-modern=on` for blk and net; use
 `make qemu-modern` to exercise the MMIO + MSI-X path.

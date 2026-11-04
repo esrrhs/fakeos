@@ -25,7 +25,7 @@ extern void ioapic_route_irq_level(u32 irq, u32 vector);
 extern void io_wait(void);
 extern void cpu_cli(void);
 extern void cpu_sti(void);
-extern void sched_sleep(u64 chan);
+extern void sched_yield(void);
 extern void sched_wakeup(u64 chan);
 extern u32 sched_is_active(void);
 
@@ -37,7 +37,9 @@ extern u32 sched_is_active(void);
  * the modern path maps common/notify/ISR/device cfg and programs both RX/TX
  * queues. Modern prefers multi-vector MSI-X (RX vector 40 / TX vector 43) so
  * each queue has its own table entry; single-vector MSI/MSI-X or INTx remain
- * fallbacks (RX on 40, TX polled). Idle net_poll is still a backup drain.
+ * fallbacks (RX on 40). TX completion always pumps io_wait + sched_yield (not
+ * chan-sleep) so QEMU/TCG retires host AIO — same TCG stall class as VirtIO-blk.
+ * Idle net_poll is still a backup drain.
  * ------------------------------------------------------------------------- */
 
 static const u64 HHDM_BASE = 0xFFFF800000000000ULL;
@@ -393,6 +395,11 @@ u32 virtio_net_tx(const void *frame, u32 len) {
     (void)isr_read();
     queue_notify(1);
 
+    /* Wait for used-ring advance. Always pump io_wait so QEMU/TCG retires
+     * host AIO. Chan-sleep once the scheduler is live deadlocks under TCG the
+     * same way VirtIO-blk did: MSI never arrives without VCPU poll. Yield
+     * cooperatively when sched is up; MSI wakeup remains a fast path if the
+     * IRQ lands mid-spin. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vn.tx.used_phys + 2);
@@ -400,10 +407,11 @@ u32 virtio_net_tx(const void *frame, u32 len) {
             break;
         }
         spins++;
-        if (vn.msix_multi && sched_is_active() && (spins & 63) == 0) {
-            sched_sleep(VNET_TX_WAIT_CHAN);
-        } else if ((spins & 255) == 0) {
+        if ((spins & 255) == 0) {
             io_wait();
+        }
+        if (sched_is_active() && (spins & 63) == 0) {
+            sched_yield();
         }
         if (spins > 2000000) {
             kprintf("[VNET] tx timeout\n");
@@ -493,7 +501,8 @@ u32 virtio_net_irq(void) {
     }
 }
 
-/* TX queue MSI-X (vector 43): wake TX waiters. */
+/* TX queue MSI-X (vector 43): bump counter + wake any leftover TX waiters.
+ * Completion no longer chan-sleeps (io_wait+yield), but wakeup is harmless. */
 u32 virtio_net_tx_irq(void) {
     if (!vn.present || !vn.msix_multi) {
         return 0;
