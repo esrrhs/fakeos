@@ -1,6 +1,8 @@
 /* fakeos userland - fold: wrap lines to WIDTH columns (thin POSIX subset).
- * Forms: fold [-w WIDTH] [-s] [FILE...]
+ * Forms: fold [-bs] [-w WIDTH] [FILE...]
  * Default WIDTH 80. -s breaks at the last blank before WIDTH when possible.
+ * -b counts bytes not columns (tab/backspace/\r are one byte each).
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -15,9 +17,10 @@ enum { OUT_MAX = 512 };
 
 static int width = 80;
 static int break_spaces; /* -s */
+static int opt_b; /* -b: count bytes not columns */
 
 static void usage(void) {
-    u_write(2, "usage: fold [-w WIDTH] [-s] [FILE...]\n", 38);
+    u_write(2, "usage: fold [-bs] [-w WIDTH] [FILE...]\n", 39);
 }
 
 static int is_digits(const char *s) {
@@ -47,22 +50,24 @@ static void fold_char(char c, char *out, int *olen, int *col) {
         *col = 0;
         return;
     }
-    if (c == '\b') {
-        if (*col > 0) (*col)--;
-        if (*olen > 0) (*olen)--;
-        return;
-    }
-    if (c == '\r') {
-        flush_buf(out, olen);
-        u_write(1, "\r", 1);
-        *col = 0;
-        return;
-    }
-    if (c == '\t') {
-        int spaces = 8 - (*col % 8);
-        int k;
-        for (k = 0; k < spaces; k++) fold_char(' ', out, olen, col);
-        return;
+    if (!opt_b) {
+        if (c == '\b') {
+            if (*col > 0) (*col)--;
+            if (*olen > 0) (*olen)--;
+            return;
+        }
+        if (c == '\r') {
+            flush_buf(out, olen);
+            u_write(1, "\r", 1);
+            *col = 0;
+            return;
+        }
+        if (c == '\t') {
+            int spaces = 8 - (*col % 8);
+            int k;
+            for (k = 0; k < spaces; k++) fold_char(' ', out, olen, col);
+            return;
+        }
     }
 
     if (*col >= width) {
@@ -121,6 +126,10 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
 
+    width = 80;
+    break_spaces = 0;
+    opt_b = 0;
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
             i++;
@@ -135,14 +144,25 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-s") == 0) {
             break_spaces = 1;
             i++;
+        } else if (strcmp(argv[i], "-b") == 0) {
+            opt_b = 1;
+            i++;
         } else if (argv[i][1] == 'w' && argv[i][2] != 0 && is_digits(argv[i] + 2)) {
             width = (int)strtol_dec(argv[i] + 2);
             if (width < 1) width = 1;
             if (width > OUT_MAX - 1) width = OUT_MAX - 1;
             i++;
         } else {
-            usage();
-            return 1;
+            /* glued short opts: -bs / -sb */
+            int j;
+            int ok = 1;
+            for (j = 1; argv[i][j]; j++) {
+                if (argv[i][j] == 'b') opt_b = 1;
+                else if (argv[i][j] == 's') break_spaces = 1;
+                else { ok = 0; break; }
+            }
+            if (!ok || argv[i][1] == 0) { usage(); return 1; }
+            i++;
         }
     }
 
