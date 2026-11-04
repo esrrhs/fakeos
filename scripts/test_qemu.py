@@ -444,6 +444,8 @@ def main():
         "[FS] published /bin/unexpand (",
         "[FS] published /bin/comm (",
         "[FS] published /bin/join (",
+        "[FS] published /bin/split (",
+        "[FS] published /bin/csplit (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

@@ -424,14 +424,24 @@ leading tabs only between columns that are printed; one `-` stdin allowed.
 smokes). Focused virtio login smoke covers `comm`/`-12`/`-13`, `join`/`-t:`/
 `-12`, plus prior interactive greens (smp 1/2).
 
+## /bin/split + /bin/csplit — landed
+
+File-splitting pair. `split [-l LINES|-lLINES] [-a N|-aN] [FILE [PREFIX]]`
+writes PREFIX+alphabetic suffix pieces (default 1000 lines, PREFIX `x`,
+suffix length 2 → `xaa`/`xab`/…); `-`/omitted FILE is stdin. `csplit
+[-f PREFIX|-fPREFIX] [-n DIGITS|-nDIGITS] FILE LINE...` splits before each
+1-based ascending LINE into PREFIX+zero-padded pieces (default `xx00`…),
+printing each created path; numeric LINE args only (no regex). Glued forms
+keep argv under `EXEC_MAX_ARGC=8`. Focused virtio login smoke covers
+`split -l2`/`-a1`, `csplit -f`/`-n`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin utils still missing (`which`/`type` external,
-   `dirname` already present; consider `split`/`csplit`, `fmt`, external
-   `/bin/which`) — prefer small coherent pairs.
-   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
-   bite-sized fix.
+4. More daily-driver gaps: thin utils still missing (`fmt`, external
+   `/bin/which` shell-mirror; `dirname` already present) — prefer small
+   coherent chunks. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
+   unless a clear bite-sized fix.
