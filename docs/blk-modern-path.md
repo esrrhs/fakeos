@@ -448,6 +448,17 @@ CMD (exit 0 iff all resolve); does not know shell builtins — the shell builtin
 Focused virtio login smoke covers `fmt`/`-w`/`-wN`, `/bin/which`, shell
 `which` builtin still, plus prior interactive greens (smp 1/2).
 
+## /bin/cksum + /bin/sum — landed
+
+Checksum pair. `cksum [FILE...]` prints POSIX CRC and byte length (poly
+`0x04C11DB7`, length folded as little-endian bytes, final complement) as
+`CRC LENGTH [FILE]`; stdin/`-` omit the name. `sum [-r|-s] [FILE...]`
+defaults to BSD (`-r`) 16-bit rotating checksum with 1024-byte blocks;
+`-s` is System V (byte-sum folded to 16 bits, 512-byte blocks). Compact
+argv-friendly; no glued forms needed. Focused virtio login smoke covers
+`printf|cksum`, file `cksum`, `sum`/`-r`/`-s`, plus prior interactive
+greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -456,5 +467,5 @@ Focused virtio login smoke covers `fmt`/`-w`/`-wN`, `/bin/which`, shell
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX utils after quick inventory
    (e.g. `head`/`tail` already present; consider `pr`, `column`, `strings`,
-   `cksum`/`md5sum` thin stubs) — prefer small coherent chunks. Avoid deep
+   `md5sum`/`sha1sum` thin stubs) — prefer small coherent chunks. Avoid deep
    jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.

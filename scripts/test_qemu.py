@@ -448,6 +448,8 @@ def main():
         "[FS] published /bin/csplit (",
         "[FS] published /bin/fmt (",
         "[FS] published /bin/which (",
+        "[FS] published /bin/cksum (",
+        "[FS] published /bin/sum (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
