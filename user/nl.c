@@ -1,7 +1,8 @@
 /* fakeos userland - nl: number lines (thin POSIX subset).
- * Forms: nl [-b a|t] [-v START] [-i INCR] [-w WIDTH] [-s SEP] [FILE...]
- * Default: -b t (non-empty), -v 1, -i 1, -w 6, -s tab. stdin if no FILE.
- * Glued -ba/-bt/-vN/-iN/-wN/-sSEP keep argv under EXEC_MAX_ARGC=8.
+ * Forms: nl [-b a|t] [-v START] [-i INCR] [-n ln|rn|rz] [-w WIDTH] [-s SEP] [FILE...]
+ * Default: -b t (non-empty), -v 1, -i 1, -n rn, -w 6, -s tab. stdin if no FILE.
+ * -n: ln left-pad spaces after digits; rn right spaces (default); rz right zeros.
+ * Glued -ba/-bt/-vN/-iN/-nln/-nrn/-nrz/-wN/-sSEP keep argv under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -18,11 +19,12 @@ enum { LINE_MAX = 512 };
 static int body_all;      /* -b a: number all; else -b t non-empty */
 static long start_num = 1;
 static long incr = 1;     /* -i: number increment */
+static int num_fmt;       /* 0=rn (default), 1=ln, 2=rz */
 static int width = 6;
 static const char *sep = "\t";
 
 static void usage(void) {
-    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-w N] [-s SEP] [FILE...]\n", 59);
+    u_write(2, "usage: nl [-b a|t] [-v N] [-i N] [-n ln|rn|rz] [-w N] [-s SEP] [FILE...]\n", 73);
 }
 
 static int is_digits(const char *s) {
@@ -34,11 +36,20 @@ static int is_digits(const char *s) {
     return 1;
 }
 
+static int set_num_fmt(const char *s) {
+    if (strcmp(s, "rn") == 0) { num_fmt = 0; return 0; }
+    if (strcmp(s, "ln") == 0) { num_fmt = 1; return 0; }
+    if (strcmp(s, "rz") == 0) { num_fmt = 2; return 0; }
+    return 1;
+}
+
 static void emit_num(long num) {
     char tmp[16];
     int i = 0;
     int j;
+    int digs;
     long v = num;
+    char pad;
     if (v < 0) v = 0;
     if (v == 0) {
         tmp[i++] = '0';
@@ -48,10 +59,22 @@ static void emit_num(long num) {
             v /= 10;
         }
     }
-    for (j = 0; j < width - i; j++) u_write(1, " ", 1);
-    while (i > 0) {
-        i--;
-        u_write(1, &tmp[i], 1);
+    digs = i;
+    pad = (num_fmt == 2) ? '0' : ' ';
+    if (num_fmt == 1) {
+        /* ln: digits then trailing spaces */
+        while (i > 0) {
+            i--;
+            u_write(1, &tmp[i], 1);
+        }
+        for (j = 0; j < width - digs; j++) u_write(1, " ", 1);
+    } else {
+        /* rn / rz: pad then digits */
+        for (j = 0; j < width - digs; j++) u_write(1, &pad, 1);
+        while (i > 0) {
+            i--;
+            u_write(1, &tmp[i], 1);
+        }
     }
     u_write(1, sep, strlen(sep));
 }
@@ -136,6 +159,12 @@ int main(int argc, char **argv) {
         } else if (a[1] == 'i' && a[2] != 0 && is_digits(a + 2)) {
             incr = strtol_dec(a + 2);
             if (incr < 1) incr = 1;
+            i++;
+        } else if (strcmp(a, "-n") == 0) {
+            if (i + 1 >= argc || set_num_fmt(argv[i + 1]) != 0) { usage(); return 1; }
+            i += 2;
+        } else if (a[1] == 'n' && a[2] != 0) {
+            if (set_num_fmt(a + 2) != 0) { usage(); return 1; }
             i++;
         } else if (strcmp(a, "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }

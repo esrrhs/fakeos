@@ -386,7 +386,7 @@ plus prior interactive greens (smp 1/2).
 
 ## /bin/nl + /bin/fold — landed
 
-Thin text-pipeline pair. `nl [-b a|t|-ba|-bt] [-v START|-vN] [-i INCR|-iN] [-w WIDTH|-wN] [-s SEP|-sSEP] [FILE...]`
+Thin text-pipeline pair. `nl [-b a|t|-ba|-bt] [-v START|-vN] [-i INCR|-iN] [-n ln|rn|rz|-nln|-nrn|-nrz] [-w WIDTH|-wN] [-s SEP|-sSEP] [FILE...]`
 numbers body lines (default `-b t` non-empty, `-v 1`, `-w 6`, tab sep).
 Compact glued forms keep argv under `EXEC_MAX_ARGC=8`.
 `fold [-w WIDTH] [-s] [FILE...]` wraps to WIDTH columns (default 80; `-s`
@@ -1975,6 +1975,14 @@ Keeps `-b`/`-v`/`-w`/`-s`. No new `/bin` dent. Focused virtio login smoke
 covers `nl -i` + prior greens including cut -z (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## nl -n — landed
+
+`/bin/nl -n ln|rn|rz` (glued `-nln`/`-nrn`/`-nrz`) selects number format:
+`ln` left-justified with trailing spaces, `rn` right spaces (default), `rz`
+right zeros. Keeps `-b`/`-v`/`-i`/`-w`/`-s`. No new `/bin` dent. Focused
+virtio login smoke covers `nl -n` + prior greens including nl -i (smp 1/2).
+Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1983,5 +1991,5 @@ dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `nl -n` format / `-p`; `cp -p` waits on utimensat; `set --` deferred;
-   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   `nl -p`; `cp -p` waits on utimensat; `set --` deferred; skip large shell).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
