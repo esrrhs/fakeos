@@ -1,7 +1,9 @@
 /* fakeos userland - od: thin octal/hex dump (POSIX-ish subset).
- * Forms: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT|-NCOUNT] [-j SKIP|-jSKIP] [FILE...]
+ * Forms: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1] [-N COUNT|-NCOUNT]
+ *        [-j SKIP|-jSKIP] [FILE...]
  * Default: -A o -t x1, 16 bytes per line. stdin if no FILE.
  * -j skips SKIP input bytes before dumping (seek when possible, else read-discard).
+ * Duplicate full-width lines are collapsed to a single "*" (disable with -v).
  */
 package user;
 
@@ -23,16 +25,19 @@ enum {
     ADDR_DEC = 3,
     TYPE_X1 = 0,
     TYPE_O1 = 1,
-    TYPE_C = 2
+    TYPE_C = 2,
+    TYPE_U1 = 3,
+    TYPE_D1 = 4
 };
 
 static int addr_mode = ADDR_OCT;
 static int type_mode = TYPE_X1;
 static long max_bytes = -1; /* -1 = unlimited */
 static long skip_bytes = 0;
+static int show_all = 0; /* -v: do not collapse duplicate lines */
 
 static void usage(void) {
-    u_write(2, "usage: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [-j SKIP] [FILE...]\n", 66);
+    u_write(2, "usage: od [-v] [-A n|o|x|d] [-t x1|o1|c|u1|d1] [-N COUNT] [-j SKIP] [FILE...]\n", 78);
 }
 
 static int is_digits(const char *s) {
@@ -104,6 +109,50 @@ static void emit_oct3(unsigned char b) {
     u_write(1, tmp, 3);
 }
 
+/* Unsigned decimal byte, width 3, space-padded (GNU-ish). */
+static void emit_u1(unsigned char b) {
+    char tmp[3];
+    unsigned v = b;
+    tmp[2] = (char)('0' + (v % 10));
+    v /= 10;
+    tmp[1] = (char)('0' + (v % 10));
+    v /= 10;
+    tmp[0] = (char)('0' + (v % 10));
+    if (tmp[0] == '0') {
+        tmp[0] = ' ';
+        if (tmp[1] == '0') tmp[1] = ' ';
+    }
+    u_write(1, tmp, 3);
+}
+
+/* Signed decimal byte, width 4, space-padded (GNU-ish). */
+static void emit_d1(unsigned char b) {
+    char tmp[4];
+    int v = (int)(signed char)b;
+    int neg = 0;
+    int absv;
+    int i;
+    if (v < 0) {
+        neg = 1;
+        absv = -v;
+    } else {
+        absv = v;
+    }
+    for (i = 3; i >= 0; i--) tmp[i] = ' ';
+    i = 3;
+    if (absv == 0) {
+        tmp[i] = '0';
+    } else {
+        while (absv > 0 && i >= 0) {
+            tmp[i] = (char)('0' + (absv % 10));
+            absv /= 10;
+            i--;
+        }
+        if (neg && i >= 0) tmp[i] = '-';
+    }
+    u_write(1, tmp, 4);
+}
+
 static void emit_c(unsigned char b) {
     if (b == '\\') {
         u_write(1, "\\\\", 2);
@@ -126,7 +175,17 @@ static void emit_c(unsigned char b) {
 static void emit_byte(unsigned char b) {
     if (type_mode == TYPE_X1) emit_hex2(b);
     else if (type_mode == TYPE_O1) emit_oct3(b);
+    else if (type_mode == TYPE_U1) emit_u1(b);
+    else if (type_mode == TYPE_D1) emit_d1(b);
     else emit_c(b);
+}
+
+static int same_bytes(const unsigned char *a, const unsigned char *b, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
 }
 
 static int apply_skip(long fd) {
@@ -150,11 +209,13 @@ static int apply_skip(long fd) {
 
 static int od_fd(long fd) {
     unsigned char buf[WIDTH];
+    unsigned char prev[WIDTH];
     unsigned long off = 0;
     long left = max_bytes;
     long n;
     int i;
-    int have = 0;
+    int have_prev = 0;
+    int suppressing = 0;
 
     if (apply_skip(fd) != 0) return 1;
     if (skip_bytes > 0) off = (unsigned long)skip_bytes;
@@ -166,13 +227,36 @@ static int od_fd(long fd) {
         n = u_read(fd, buf, (unsigned long)want);
         if (n < 0) return 1;
         if (n == 0) break;
-        have = 1;
+
+        /* Duplicate full-width line collapse (GNU od default; -v disables). */
+        if (!show_all && have_prev && n == WIDTH &&
+            same_bytes(buf, prev, WIDTH)) {
+            if (!suppressing) {
+                putc1('*');
+                putc1('\n');
+                suppressing = 1;
+            }
+            off += (unsigned long)n;
+            if (left > 0) left -= n;
+            if (n < want) break;
+            continue;
+        }
+
+        suppressing = 0;
         emit_addr(off);
         for (i = 0; i < (int)n; i++) {
             if (i > 0) putc1(' ');
             emit_byte(buf[i]);
         }
         putc1('\n');
+
+        if (n == WIDTH) {
+            for (i = 0; i < WIDTH; i++) prev[i] = buf[i];
+            have_prev = 1;
+        } else {
+            have_prev = 0;
+        }
+
         off += (unsigned long)n;
         if (left > 0) left -= n;
         if (n < want) break;
@@ -185,6 +269,15 @@ static int od_fd(long fd) {
     return 0;
 }
 
+static int parse_type(const char *s) {
+    if (strcmp(s, "x1") == 0) { type_mode = TYPE_X1; return 0; }
+    if (strcmp(s, "o1") == 0) { type_mode = TYPE_O1; return 0; }
+    if (strcmp(s, "c") == 0) { type_mode = TYPE_C; return 0; }
+    if (strcmp(s, "u1") == 0) { type_mode = TYPE_U1; return 0; }
+    if (strcmp(s, "d1") == 0) { type_mode = TYPE_D1; return 0; }
+    return -1;
+}
+
 int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
@@ -195,7 +288,10 @@ int main(int argc, char **argv) {
             i++;
             break;
         }
-        if (strcmp(argv[i], "-A") == 0) {
+        if (strcmp(argv[i], "-v") == 0) {
+            show_all = 1;
+            i++;
+        } else if (strcmp(argv[i], "-A") == 0) {
             if (i + 1 >= argc) {
                 usage();
                 return 1;
@@ -210,14 +306,7 @@ int main(int argc, char **argv) {
             }
             i += 2;
         } else if (strcmp(argv[i], "-t") == 0) {
-            if (i + 1 >= argc) {
-                usage();
-                return 1;
-            }
-            if (strcmp(argv[i + 1], "x1") == 0) type_mode = TYPE_X1;
-            else if (strcmp(argv[i + 1], "o1") == 0) type_mode = TYPE_O1;
-            else if (strcmp(argv[i + 1], "c") == 0) type_mode = TYPE_C;
-            else {
+            if (i + 1 >= argc || parse_type(argv[i + 1]) != 0) {
                 usage();
                 return 1;
             }
@@ -249,6 +338,32 @@ int main(int argc, char **argv) {
             i++;
         } else if (strcmp(argv[i], "-tc") == 0) {
             type_mode = TYPE_C;
+            i++;
+        } else if (strcmp(argv[i], "-tu1") == 0) {
+            type_mode = TYPE_U1;
+            i++;
+        } else if (strcmp(argv[i], "-td1") == 0) {
+            type_mode = TYPE_D1;
+            i++;
+        } else if (strcmp(argv[i], "-vtx1") == 0) {
+            show_all = 1;
+            type_mode = TYPE_X1;
+            i++;
+        } else if (strcmp(argv[i], "-vto1") == 0) {
+            show_all = 1;
+            type_mode = TYPE_O1;
+            i++;
+        } else if (strcmp(argv[i], "-vtc") == 0) {
+            show_all = 1;
+            type_mode = TYPE_C;
+            i++;
+        } else if (strcmp(argv[i], "-vtu1") == 0) {
+            show_all = 1;
+            type_mode = TYPE_U1;
+            i++;
+        } else if (strcmp(argv[i], "-vtd1") == 0) {
+            show_all = 1;
+            type_mode = TYPE_D1;
             i++;
         } else if (argv[i][0] == '-' && argv[i][1] == 'N' && argv[i][2] != 0 &&
                    is_digits(argv[i] + 2)) {
