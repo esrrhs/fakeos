@@ -1,7 +1,9 @@
-/* fakeos userland - cut: select bytes/fields from lines (thin POSIX subset).
- * Forms: cut -b|-c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]
+/* fakeos userland - cut: select bytes/fields from records (thin POSIX subset).
+ * Forms: cut -b|-c LIST [-z] [FILE...] | cut -f LIST [-d DELIM] [-sz] [FILE...]
  * -b byte ranges (alias of -c here; no multibyte). -c character ranges.
  * LIST: N | N- | -M | N-M | comma-separated (1-based, inclusive).
+ * -z NUL-terminated records (input+output; GNU-ish). Glued -sz/-zs/-bLIST etc.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -28,9 +30,10 @@ static int nsels;
 static int mode_c;      /* 1 = -b/-c, 0 = -f */
 static char delim = '\t';
 static int suppress;    /* -s: skip lines without delim when -f */
+static int opt_z;       /* -z: NUL records */
 
 static void usage(void) {
-    u_write(2, "usage: cut -b|-c LIST [FILE...] | cut -f LIST [-d DELIM] [-s] [FILE...]\n", 72);
+    u_write(2, "usage: cut -b|-c LIST [-z] [FILE...] | cut -f LIST [-d DELIM] [-sz] [FILE...]\n", 78);
 }
 
 static int parse_uint(const char *s, int *endp, int *out) {
@@ -118,7 +121,8 @@ static void emit_chars(const char *line, int len) {
     for (i = 0; i < len; i++) {
         if (selected(i + 1)) u_write(1, &line[i], 1);
     }
-    u_write(1, "\n", 1);
+    if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+    else u_write(1, "\n", 1);
 }
 
 static void emit_fields(const char *line, int len) {
@@ -138,7 +142,8 @@ static void emit_fields(const char *line, int len) {
     if (!has_delim) {
         /* POSIX: whole line when no delim and not -s */
         u_write(1, line, (unsigned long)len);
-        u_write(1, "\n", 1);
+        if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+        else u_write(1, "\n", 1);
         return;
     }
 
@@ -155,7 +160,8 @@ static void emit_fields(const char *line, int len) {
         if (i >= len) break;
         i++; /* skip delim */
     }
-    u_write(1, "\n", 1);
+    if (opt_z) { char nul = 0; u_write(1, &nul, 1); }
+    else u_write(1, "\n", 1);
 }
 
 static int cut_fd(long fd) {
@@ -168,7 +174,7 @@ static int cut_fd(long fd) {
     while ((n = u_read(fd, buf, sizeof(buf))) > 0) {
         for (i = 0; i < (int)n; i++) {
             char c = buf[i];
-            if (c == '\n') {
+            if (opt_z ? (c == 0) : (c == '\n')) {
                 line[li] = 0;
                 if (mode_c) emit_chars(line, li);
                 else emit_fields(line, li);
@@ -225,6 +231,21 @@ int main(int argc, char **argv) {
             i += 2;
         } else if (strcmp(argv[i], "-s") == 0) {
             suppress = 1;
+            i++;
+        } else if (strcmp(argv[i], "-z") == 0) {
+            opt_z = 1;
+            i++;
+        } else if (argv[i][1] == 's' || argv[i][1] == 'z') {
+            /* glued -sz / -zs / -s / -z clusters without list */
+            int j = 1;
+            int saw = 0;
+            while (argv[i][j]) {
+                if (argv[i][j] == 's') { suppress = 1; saw = 1; j++; continue; }
+                if (argv[i][j] == 'z') { opt_z = 1; saw = 1; j++; continue; }
+                usage();
+                return 1;
+            }
+            if (!saw) { usage(); return 1; }
             i++;
         } else if ((argv[i][1] == 'b' || argv[i][1] == 'c') && argv[i][2] != 0) {
             /* -bLIST / -cLIST */

@@ -1960,6 +1960,14 @@ pairs with `rev -z` / `head -z` / `paste -z`). Default remains newline
 records. No new `/bin` dent. Focused virtio login smoke covers `tac -z` +
 prior greens including rev -z (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## cut -z — landed
+
+`/bin/cut -z` (also glued `-sz`/`-zs`) uses NUL-terminated records for input
+and output (GNU-ish; pairs with `tac -z` / `rev -z` / `head -z`). Keeps
+`-b`/`-c`/`-f`/`-d`/`-s`. No new `/bin` dent. Focused virtio login smoke
+covers `cut -z` + prior greens including tac -z (smp 1/2). Ramfs `/bin`
+dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1968,5 +1976,5 @@ prior greens including rev -z (smp 1/2). Ramfs `/bin` dents ~114/128.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `cut -z` / `nl` polish; `cp -p` waits on utimensat; `set --` deferred;
-   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   `nl` polish; `cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
