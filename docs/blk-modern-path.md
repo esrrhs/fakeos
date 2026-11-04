@@ -1789,6 +1789,13 @@ is ignored. Keeps `-s`/`-w`. No new `/bin` dent. Focused virtio login smoke
 covers `seq -f` + prior greens including strings -t (smp 1/2). Ramfs `/bin`
 dents ~114/128.
 
+## fmt -s — landed
+
+`/bin/fmt -s` is split-only: wrap long lines but do not refill across
+newlines (GNU-ish). Keeps `-w`/`-wN`/historic `-WIDTH`; glued `-swN`. No new
+`/bin` dent. Focused virtio login smoke covers `fmt -s` + prior greens
+including seq -f (smp 1/2). Ramfs `/bin` dents ~114/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1796,6 +1803,6 @@ dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: `fmt` polish / other util flags on existing
-   `/bin` (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `fmt -u` / other util flags on existing `/bin`
+   (`cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.

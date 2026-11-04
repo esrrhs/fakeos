@@ -1,8 +1,9 @@
 /* fakeos userland - fmt: simple paragraph fill (thin POSIX subset).
- * Forms: fmt [-w WIDTH|-wWIDTH] [FILE...]
+ * Forms: fmt [-s] [-w WIDTH|-wWIDTH] [FILE...]
  * Default WIDTH 75. Joins whitespace-separated words into lines of at most
  * WIDTH columns; a single newline is just a word separator, blank lines
- * separate paragraphs. Words longer than WIDTH stand alone on a line.
+ * separate paragraphs. -s split-only: do not refill across newlines (each
+ * input line wraps alone). Words longer than WIDTH stand alone on a line.
  * Glued -wN keeps argv under EXEC_MAX_ARGC=8.
  */
 package user;
@@ -17,9 +18,10 @@ extern long strtol_dec(const char *s);
 enum { WIDTH_DEFAULT = 75, WORD_MAX = 256, OUT_MAX = 512 };
 
 static int width = WIDTH_DEFAULT;
+static int opt_s; /* -s: split-only, no refill */
 
 static void usage(void) {
-    u_write(2, "usage: fmt [-w WIDTH] [FILE...]\n", 32);
+    u_write(2, "usage: fmt [-s] [-w WIDTH] [FILE...]\n", 37);
 }
 
 static int is_digits(const char *s) {
@@ -77,6 +79,12 @@ static int fmt_fd(long fd) {
                         col = 0;
                     }
                     u_write(1, "\n", 1);
+                } else if (opt_s) {
+                    /* split-only: end the output line; do not join next */
+                    if (col > 0) {
+                        u_write(1, "\n", 1);
+                        col = 0;
+                    }
                 }
                 last_was_nl = 1;
                 continue;
@@ -108,12 +116,18 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
 
+    width = WIDTH_DEFAULT;
+    opt_s = 0;
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
             i++;
             break;
         }
-        if (strcmp(argv[i], "-w") == 0) {
+        if (strcmp(argv[i], "-s") == 0) {
+            opt_s = 1;
+            i++;
+        } else if (strcmp(argv[i], "-w") == 0) {
             if (i + 1 >= argc || !is_digits(argv[i + 1])) { usage(); return 1; }
             width = (int)strtol_dec(argv[i + 1]);
             if (width < 1) width = 1;
@@ -121,6 +135,13 @@ int main(int argc, char **argv) {
             i += 2;
         } else if (argv[i][1] == 'w' && argv[i][2] != 0 && is_digits(argv[i] + 2)) {
             width = (int)strtol_dec(argv[i] + 2);
+            if (width < 1) width = 1;
+            if (width > OUT_MAX - 1) width = OUT_MAX - 1;
+            i++;
+        } else if (argv[i][1] == 's' && argv[i][2] == 'w' &&
+                   argv[i][3] != 0 && is_digits(argv[i] + 3)) {
+            opt_s = 1;
+            width = (int)strtol_dec(argv[i] + 3);
             if (width < 1) width = 1;
             if (width > OUT_MAX - 1) width = OUT_MAX - 1;
             i++;
