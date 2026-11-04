@@ -1,10 +1,11 @@
 /* fakeos userland - xargs: build argv from stdin and exec (thin).
- * Forms: xargs [-0] [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]
+ * Forms: xargs [-0] [-t] [-n N] [-r] [-I REPLACE] [COMMAND [ARGS...]]
  * Default: whitespace-split stdin words; default COMMAND prints args.
  * -0: NUL-separated input (find -print0 style); whitespace stays inside items.
+ * -t: print the command line to stderr before each run (GNU).
  * -I REPLACE: line-oriented (or NUL records with -0); substitute REPLACE in
  * initial ARGS per record (one exec per record; empty records skipped).
- * Batches honor EXEC_MAX_ARGC=8.
+ * Batches honor EXEC_MAX_ARGC=8. Glued -0rt accepted.
  */
 package user;
 
@@ -22,11 +23,13 @@ extern void printf(const char *fmt, ...);
 
 enum {
     MAX_ARGC = 8,
-    ARG_SLOT = 128,
+    ARG_SLOT = 128
 };
 
+static int opt_t; /* -t: trace command to stderr */
+
 static void usage(void) {
-    u_write(2, "usage: xargs [-0] [-n N] [-r] [-I R] [COMMAND [ARGS...]]\n", 57);
+    u_write(2, "usage: xargs [-0t] [-n N] [-r] [-I R] [COMMAND [ARGS...]]\n", 58);
 }
 
 static int is_ws(char c) {
@@ -57,6 +60,16 @@ static int resolve_cmd(const char *cmd, char *pathbuf) {
     strcpy(pathbuf, "/bin/");
     strcpy(pathbuf + 5, cmd);
     return 0;
+}
+
+static void emit_trace(char **argv, int argc) {
+    int i;
+    if (!opt_t || argc <= 0) return;
+    for (i = 0; i < argc; i++) {
+        if (i > 0) u_write(2, " ", 1);
+        u_write(2, argv[i], strlen(argv[i]));
+    }
+    u_write(2, "\n", 1);
 }
 
 static void emit_default(char **argv, int argc) {
@@ -111,6 +124,7 @@ static int run_batch(char **argv, int argc, int have_cmd, char *pathbuf) {
     char *envp[1];
     envp[0] = 0;
     if (argc <= 0) return 0;
+    emit_trace(argv, argc);
     if (!have_cmd) {
         emit_default(argv, argc);
         return 0;
@@ -152,6 +166,10 @@ static int run_replace(char templates[][ARG_SLOT], int base, int have_cmd,
         return run_batch(av, base, have_cmd, pathbuf);
     }
     /* No COMMAND: print the input line (thin default). */
+    if (opt_t) {
+        u_write(2, line, strlen(line));
+        u_write(2, "\n", 1);
+    }
     u_write(1, line, strlen(line));
     u_write(1, "\n", 1);
     return 0;
@@ -181,6 +199,7 @@ int main(int argc, char **argv) {
     char replstr[ARG_SLOT];
 
     replstr[0] = 0;
+    opt_t = 0;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
         if (strcmp(argv[ai], "--") == 0) {
@@ -189,6 +208,11 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[ai], "-0") == 0) {
             null_sep = 1;
+            ai++;
+            continue;
+        }
+        if (strcmp(argv[ai], "-t") == 0) {
+            opt_t = 1;
             ai++;
             continue;
         }
@@ -236,6 +260,24 @@ int main(int argc, char **argv) {
             use_replace = 1;
             ai++;
             continue;
+        }
+        /* Glued -0/-r/-t only (no value-taking flags). */
+        {
+            int j;
+            int ok = 1;
+            for (j = 1; argv[ai][j]; j++) {
+                if (argv[ai][j] == '0') null_sep = 1;
+                else if (argv[ai][j] == 'r') no_run_empty = 1;
+                else if (argv[ai][j] == 't') opt_t = 1;
+                else {
+                    ok = 0;
+                    break;
+                }
+            }
+            if (ok && argv[ai][1] != 0) {
+                ai++;
+                continue;
+            }
         }
         usage();
         return 1;
