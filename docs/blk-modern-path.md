@@ -365,13 +365,20 @@ via `sync(2)`. Focused virtio login smoke covers `/bin/chmod` + `ls -l`,
 `/bin/uname`/`-a`, `/bin/env` (PATH/FAKECC_PKG), `/bin/sync`, plus prior
 interactive greens (smp 1/2).
 
+## /bin/readlink + /bin/realpath + /bin/printenv — landed
+
+Thin external shell mirrors: `readlink PATH` via `readlink(2)`, `realpath PATH`
+(physical resolve matching the shell builtin walk), and `/bin/printenv` as an
+alias of `/bin/env` (same ELF published twice). Focused virtio login smoke
+covers `/bin/readlink`, `/bin/realpath`, `/bin/printenv`, `xargs /bin/readlink`,
+plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining shell mirrors (`readlink`, `realpath`,
-   `printenv` alias) or other thin utils (`stat`, `date`, `mktemp`,
+4. More daily-driver gaps: thin utils (`stat`, `date`, `mktemp`,
    `nl`/`fold`/`rev`/`paste`). Avoid deep jbd / Ext2-redirect duplex races /
    CFS nesting unless a clear bite-sized fix.
