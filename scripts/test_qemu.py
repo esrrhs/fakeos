@@ -376,6 +376,10 @@ def main():
         "[U][PASS] huge write length rejected",
         "[U][PASS] orphan reparented to pid 1",
         "[U][PASS] kill SIGKILL + wait status",
+        "[U][PASS] SIGTERM handler + sigreturn",
+        "[U][PASS] SIGSTOP/CONT + WUNTRACED/WCONTINUED",
+        "[U][PASS] pipe read EINTR + handler",
+        "[U][PASS] pipe SA_RESTART keeps read",
         # interactive shell session
         "fakeos login:",
         "Welcome root",
@@ -397,7 +401,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: cross-CPU RQ steal + AP timer/TSS/IST + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!",
+        "[SUCCESS] fakeos: signals IRQ/IPI frames + stop/cont + pipe EINTR/SA_RESTART + cross-CPU steal + pthread + Ext2 rename + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

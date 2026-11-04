@@ -745,10 +745,11 @@ enum {
 };
 
 extern long u_rt_sigreturn(void);
+extern void u_sig_restorer(void);
 
-/* Kernel redirects handler return here; issues rt_sigreturn. */
+/* Compat symbol: prefer u_sig_restorer as sa_restorer (no nested call). */
 void __sig_restorer(void) {
-    u_rt_sigreturn();
+    u_sig_restorer();
     for (;;) {
     }
 }
@@ -771,7 +772,7 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
         if (tmp.sa_handler != (void *)SIG_DFL_V &&
             tmp.sa_handler != (void *)SIG_IGN_V &&
             tmp.sa_restorer == 0) {
-            tmp.sa_restorer = (void *)__sig_restorer;
+            tmp.sa_restorer = (void *)u_sig_restorer;
         }
         ap = &tmp;
     }
@@ -796,7 +797,7 @@ void *signal(int sig, void *handler) {
     struct sigaction old;
     act.sa_handler = handler;
     act.sa_flags = 0;
-    act.sa_restorer = (void *)__sig_restorer;
+    act.sa_restorer = (void *)u_sig_restorer;
     act.sa_mask = 0;
     if (sigaction(sig, &act, &old) != 0) {
         return (void *)(long)-1;

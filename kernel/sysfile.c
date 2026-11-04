@@ -357,6 +357,9 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
                 want = IO_CHUNK;
             }
             n = pipe_read(fh, kbuf, want);
+            if (n == (u64)(-4)) {
+                return done != 0 ? done : (u64)(-4); /* EINTR */
+            }
             if (n == (u64)(-1)) {
                 return done != 0 ? done : (u64)(-1);
             }
@@ -462,6 +465,9 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
                 }
             }
             n = pipe_write(fh, kbuf, want);
+            if (n == (u64)(-4)) {
+                return done != 0 ? done : (u64)(-4); /* EINTR */
+            }
             if (n == (u64)(-1)) {
                 return done != 0 ? done : (u64)(-1);
             }

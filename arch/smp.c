@@ -333,6 +333,14 @@ u32 smp_start_aps(void) {
 }
 
 
+
+u32 smp_cpu_apic_id(u32 cpu) {
+    if (cpu >= MAX_CPUS || cpu >= ncpus) {
+        return 0xFFFFFFFFu;
+    }
+    return cpus[cpu].apic_id;
+}
+
 u32 smp_cpu_online(u32 cpu) {
     if (cpu >= MAX_CPUS) {
         return 0;

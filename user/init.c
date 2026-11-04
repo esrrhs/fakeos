@@ -22,6 +22,9 @@ extern long u_getdents(long fd, void *buf, unsigned long len);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_kill(long pid, long sig);
+extern long u_pipe(int *pipefd);
+extern void *signal(int sig, void *handler);
+extern int sigaction(int sig, void *act, void *oldact);
 extern int shm_open(const char *name, int oflag, unsigned int mode);
 extern int shm_unlink(const char *name);
 extern int ftruncate(int fd, long length);
@@ -309,10 +312,28 @@ static void wrap_len_test(void) {
  * the grandchild must be reparented to pid 1, whose wait4(-1) then reaps it
  * with the original exit code 77. */
 
+/* ---- signals polish: kill, handler (IRQ frame), stop/cont, pipe EINTR ---- */
+enum {
+    SIGTERM_U = 15,
+    SIGSTOP_U = 19,
+    SIGCONT_U = 18,
+    WNOHANG_U = 1,
+    WUNTRACED_U = 2,
+    WCONTINUED_U = 8,
+    SA_RESTART_U = 0x10000000
+};
+
+static volatile int g_sig_flag;
+
+static void on_sigterm_flag(int sig) {
+    (void)sig;
+    g_sig_flag = 1;
+}
+
 /* kill(SIGKILL) a looping child; parent must reap it.
  * Use WNOHANG + bounded yields so a broken kernel cannot wedge init
  * before login (seen on ldfake-linked images with PMM mismatch). */
-static void signal_test(void) {
+static void signal_kill_test(void) {
     long child = u_fork();
     long status = 0;
     long reaped = 0;
@@ -340,6 +361,242 @@ static void signal_test(void) {
     } else {
         printf("[U][FAIL] kill/wait status=%d reaped=%d\n", (int)(status >> 8), (int)reaped);
     }
+}
+
+/* Custom SIGTERM handler delivered from timer/IPI trap frame while child
+ * spins in user space (no syscall). */
+static void signal_handler_test(void) {
+    long child;
+    long status = 0;
+    long reaped = 0;
+    int spins;
+    child = u_fork();
+    if (child == 0) {
+        g_sig_flag = 0;
+        if (signal(SIGTERM_U, (void *)on_sigterm_flag) == (void *)(long)-1) {
+            puts("[U][FAIL] signal(SIGTERM) install");
+            u_exit(1);
+        }
+        for (spins = 0; spins < 2000000; spins++) {
+            if (g_sig_flag) {
+                u_exit(0);
+            }
+            if ((spins & 63) == 0) {
+                u_yield();
+            }
+        }
+        puts("[U][FAIL] SIGTERM handler never ran");
+        u_exit(2);
+    }
+    for (spins = 0; spins < 200; spins++) {
+        u_yield();
+    }
+    if (u_kill(child, SIGTERM_U) != 0) {
+        puts("[U][FAIL] kill(SIGTERM) for handler");
+        return;
+    }
+    for (spins = 0; spins < 100000; spins++) {
+        reaped = u_wait4(child, &status, WNOHANG_U, 0);
+        if (reaped == child) {
+            break;
+        }
+        if ((spins & 63) == 0) {
+            u_yield();
+        }
+    }
+    if (reaped == child && (status >> 8) == 0) {
+        puts("[U][PASS] SIGTERM handler + sigreturn");
+    } else {
+        printf("[U][FAIL] SIGTERM handler status=%d reaped=%d\n",
+               (int)(status >> 8), (int)reaped);
+    }
+}
+
+/* SIGSTOP / wait WUNTRACED / SIGCONT / wait WCONTINUED / SIGKILL. */
+static void signal_stop_cont_test(void) {
+    long child;
+    long status = 0;
+    long reaped = 0;
+    int spins;
+    child = u_fork();
+    if (child == 0) {
+        for (;;) {
+            u_yield();
+        }
+    }
+    for (spins = 0; spins < 50; spins++) {
+        u_yield();
+    }
+    if (u_kill(child, SIGSTOP_U) != 0) {
+        puts("[U][FAIL] kill(SIGSTOP)");
+        u_kill(child, 9);
+        return;
+    }
+    for (spins = 0; spins < 100000; spins++) {
+        reaped = u_wait4(child, &status, WNOHANG_U | WUNTRACED_U, 0);
+        if (reaped == child) {
+            break;
+        }
+        if ((spins & 63) == 0) {
+            u_yield();
+        }
+    }
+    if (reaped != child || (status & 0xff) != 0x7f
+        || ((status >> 8) & 0xff) != SIGSTOP_U) {
+        printf("[U][FAIL] WUNTRACED status=%d reaped=%d\n",
+               (int)status, (int)reaped);
+        u_kill(child, 9);
+        u_wait4(child, &status, 0, 0);
+        return;
+    }
+    if (u_kill(child, SIGCONT_U) != 0) {
+        puts("[U][FAIL] kill(SIGCONT)");
+        u_kill(child, 9);
+        return;
+    }
+    reaped = 0;
+    status = 0;
+    for (spins = 0; spins < 100000; spins++) {
+        reaped = u_wait4(child, &status, WNOHANG_U | WCONTINUED_U, 0);
+        if (reaped == child) {
+            break;
+        }
+        if ((spins & 63) == 0) {
+            u_yield();
+        }
+    }
+    if (reaped != child || (status & 0xffff) != 0xffff) {
+        printf("[U][FAIL] WCONTINUED status=%d reaped=%d\n",
+               (int)status, (int)reaped);
+        u_kill(child, 9);
+        u_wait4(child, &status, 0, 0);
+        return;
+    }
+    u_kill(child, 9);
+    u_wait4(child, &status, 0, 0);
+    puts("[U][PASS] SIGSTOP/CONT + WUNTRACED/WCONTINUED");
+}
+
+/* Blocking pipe read interrupted by SIGTERM without SA_RESTART -> EINTR. */
+static void signal_pipe_eintr_test(void) {
+    int fds[2];
+    long child;
+    long status = 0;
+    long reaped;
+    int spins;
+    char b;
+    if (u_pipe(fds) < 0) {
+        puts("[U][FAIL] pipe for EINTR");
+        return;
+    }
+    child = u_fork();
+    if (child == 0) {
+        long n;
+        u_close(fds[1]);
+        g_sig_flag = 0;
+        if (signal(SIGTERM_U, (void *)on_sigterm_flag) == (void *)(long)-1) {
+            u_exit(1);
+        }
+        n = u_read(fds[0], &b, 1);
+        /* After sigreturn, rax is restored to EINTR (-4). */
+        if (n == -4 && g_sig_flag) {
+            u_exit(0);
+        }
+        printf("[U][FAIL] pipe EINTR n=%d flag=%d\n", (int)n, g_sig_flag);
+        u_exit(2);
+    }
+    u_close(fds[0]);
+    for (spins = 0; spins < 300; spins++) {
+        u_yield();
+    }
+    if (u_kill(child, SIGTERM_U) != 0) {
+        puts("[U][FAIL] kill for pipe EINTR");
+        u_close(fds[1]);
+        return;
+    }
+    reaped = u_wait4(child, &status, 0, 0);
+    u_close(fds[1]);
+    if (reaped == child && (status >> 8) == 0) {
+        puts("[U][PASS] pipe read EINTR + handler");
+    } else {
+        printf("[U][FAIL] pipe EINTR status=%d reaped=%d\n",
+               (int)(status >> 8), (int)reaped);
+    }
+}
+
+/* SA_RESTART: signal while blocked on pipe keeps the read; byte still arrives. */
+static void signal_pipe_restart_test(void) {
+    int fds[2];
+    long child;
+    long status = 0;
+    long reaped;
+    int spins;
+    struct {
+        void *sa_handler;
+        unsigned long sa_flags;
+        void *sa_restorer;
+        unsigned long sa_mask;
+    } act;
+    if (u_pipe(fds) < 0) {
+        puts("[U][FAIL] pipe for SA_RESTART");
+        return;
+    }
+    child = u_fork();
+    if (child == 0) {
+        char b;
+        long n;
+        u_close(fds[1]);
+        g_sig_flag = 0;
+        act.sa_handler = (void *)on_sigterm_flag;
+        act.sa_flags = SA_RESTART_U;
+        act.sa_restorer = 0;
+        act.sa_mask = 0;
+        if (sigaction(SIGTERM_U, &act, 0) != 0) {
+            u_exit(1);
+        }
+        n = u_read(fds[0], &b, 1);
+        if (n == 1 && b == 'R' && g_sig_flag) {
+            u_exit(0);
+        }
+        printf("[U][FAIL] SA_RESTART n=%d b=%d flag=%d\n",
+               (int)n, (int)b, g_sig_flag);
+        u_exit(2);
+    }
+    u_close(fds[0]);
+    for (spins = 0; spins < 300; spins++) {
+        u_yield();
+    }
+    if (u_kill(child, SIGTERM_U) != 0) {
+        puts("[U][FAIL] kill for SA_RESTART");
+        u_close(fds[1]);
+        return;
+    }
+    /* Give the child time to observe the signal and re-sleep, then complete. */
+    for (spins = 0; spins < 200; spins++) {
+        u_yield();
+    }
+    {
+        char wb = 'R';
+        if (u_write(fds[1], &wb, 1) != 1) {
+            puts("[U][FAIL] write for SA_RESTART");
+        }
+    }
+    reaped = u_wait4(child, &status, 0, 0);
+    u_close(fds[1]);
+    if (reaped == child && (status >> 8) == 0) {
+        puts("[U][PASS] pipe SA_RESTART keeps read");
+    } else {
+        printf("[U][FAIL] SA_RESTART status=%d reaped=%d\n",
+               (int)(status >> 8), (int)reaped);
+    }
+}
+
+static void signal_test(void) {
+    signal_kill_test();
+    signal_handler_test();
+    signal_stop_cont_test();
+    signal_pipe_eintr_test();
+    signal_pipe_restart_test();
 }
 
 static void orphan_test(void) {
@@ -748,6 +1005,9 @@ int main(int argc, char **argv) {
     mutex_test();
     pthread_create_test();
 
+    /* Signals early too: same TCG hang window that forces pthread early. */
+    signal_test();
+
     file_test();
     heap_test();
     mmap_test();
@@ -756,7 +1016,6 @@ int main(int argc, char **argv) {
     bad_exec_test();
     wrap_len_test();
     orphan_test();
-    signal_test();
 
     /* Prefer persistent Ext2 home (/home aliases /mnt/home) when mounted. */
     u_mkdir("/mnt/home");

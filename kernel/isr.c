@@ -18,7 +18,8 @@ extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
 extern void kbd_irq(void);
 extern void net_poll(void);
-extern void sched_check_signals(void);
+extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp,
+                                      u64 *f_rdi, u64 *f_rax);
 extern void net_tcp_timer(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
@@ -140,8 +141,21 @@ void isr_dispatch(struct trap_frame *f) {
         }
         net_tcp_timer();
         sched_tick();
+        /* After switch returns to this CPU's interrupted thread, deliver
+         * custom handlers using the live trap frame (not default-only). */
         if ((f->cs & 3) == 3) {
-            sched_check_signals();
+            sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
+                                      &f->rax);
+        }
+        return;
+    }
+
+    /* Vector 34: reschedule / signal-kick IPI (from sched_signal_send). */
+    if (v == 34) {
+        arch.lapic_send_eoi();
+        if ((f->cs & 3) == 3) {
+            sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
+                                      &f->rax);
         }
         return;
     }
@@ -151,7 +165,8 @@ void isr_dispatch(struct trap_frame *f) {
         drivers.kbd_irq();
         arch.lapic_send_eoi();
         if ((f->cs & 3) == 3) {
-            sched_check_signals();
+            sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
+                                      &f->rax);
         }
         return;
     }
@@ -162,7 +177,8 @@ void isr_dispatch(struct trap_frame *f) {
         tty_on_uart_byte();
         arch.lapic_send_eoi();
         if ((f->cs & 3) == 3) {
-            sched_check_signals();
+            sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
+                                      &f->rax);
         }
         return;
     }

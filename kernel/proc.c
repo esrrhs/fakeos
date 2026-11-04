@@ -44,8 +44,10 @@ extern u32 sched_current_pid(void);
 extern u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 flags, u64 *old_out, u64 *old_flags_out);
 extern u32 sched_should_eintr(void);
 extern u32 sched_sig_get_flags(u32 sig, u64 *flags_out);
-extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
-extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
+extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                           u64 *f_rax);
+extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                                      u64 *f_rax);
 extern u32 sched_sig_get(u32 sig, u64 *handler_out);
 extern u32 sched_current_ppid(void);
 extern u64 sched_current_as_h(void);

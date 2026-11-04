@@ -56,6 +56,7 @@ global u_poll
 global u_ioctl
 global u_rt_sigaction
 global u_rt_sigreturn
+global u_sig_restorer
 global u_ftruncate
 global u_futex
 global u_gettid
@@ -273,6 +274,16 @@ u_rt_sigaction:
     mov     eax, 13
     syscall
     ret
+
+
+; Signal trampoline: installed as sa_restorer. After the handler `ret`s here,
+; RSP points at sigframe[1]; do rt_sigreturn with no nested call so the kernel
+; can find the frame at RSP-8.
+align 16
+u_sig_restorer:
+    mov     eax, 15
+    syscall
+    ud2
 
 ; long u_rt_sigreturn(void) -- Linux nr 15
 align 16

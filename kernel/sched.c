@@ -106,7 +106,10 @@ struct kmutex {
 };
 
 static struct tcb threads[MAX_THREADS];
-enum { SCHED_MAX_CPUS = 8 };
+enum {
+    SCHED_MAX_CPUS = 8,
+    SCHED_IPI_VECTOR = 34   /* fixed IPI: reschedule / signal kick */
+};
 static u32 cpu_current[SCHED_MAX_CPUS];
 static volatile u32 idle_slot[SCHED_MAX_CPUS];
 static u32 idle_mark[MAX_THREADS];   /* 1 => per-CPU idle TCB (not CFS-picked) */
@@ -133,6 +136,8 @@ extern u32 smp_cpuid(void);
 extern u32 smp_cpu_count(void);
 extern u32 smp_cpu_online(u32 cpu);
 extern u64 smp_cpu_stack_top(u32 cpu);
+extern u32 smp_cpu_apic_id(u32 cpu);
+extern void lapic_send_ipi(u32 apic_id, u32 icr_low);
 extern void idt_load(void);
 extern void gdt_flush(void);
 extern void gdt_load_cpu_tss(u32 cpu);
@@ -1490,6 +1495,15 @@ u32 sched_signal_send(u32 pid, u32 sig) {
             if (sig == SIGKILL_N && threads[i].state == TCB_STOPPED) {
                 threads[i].state = TCB_RUNNABLE;
             }
+            /* Running on a remote CPU: IPI so stop/handler/kill is prompt. */
+            if (sig != 0 && threads[i].on_cpu != SCHED_CPU_NONE
+                && threads[i].on_cpu != sched_cpu_index()) {
+                u32 apic = smp_cpu_apic_id(threads[i].on_cpu);
+                if (apic != 0xFFFFFFFFu) {
+                    /* Fixed delivery, vector SCHED_IPI_VECTOR. */
+                    lapic_send_ipi(apic, (u32)SCHED_IPI_VECTOR);
+                }
+            }
         }
     }
     return found;
@@ -1703,19 +1717,22 @@ u32 sched_continued_exists(u32 ppid, u32 want_pid) {
  *   [3] saved user RSP (pre-frame)
  *   [4] saved RDI
  *   [5] signo
+ *   [6] saved RAX (syscall retval or interrupted user RAX)
  * Handler is entered with RDI=signo; returning through restorer runs
- * rt_sigreturn which restores RIP/RFLAGS/RSP/RDI. */
-enum { SIGFRAME_QWORDS = 6 };
+ * rt_sigreturn which restores RIP/RFLAGS/RSP/RDI/RAX. */
+enum { SIGFRAME_QWORDS = 7 };
 
 static u32 sig_deliver_frame(u32 sig, u64 *frame_rip, u64 *frame_rflags,
-                             u64 *frame_rsp, u64 *frame_rdi) {
+                             u64 *frame_rsp, u64 *frame_rdi, u64 *frame_rax) {
     u64 handler = threads[sched_cur()].sig_handler[sig];
     u64 restorer = threads[sched_cur()].sig_restorer[sig];
     u64 as = threads[sched_cur()].as_h;
     u64 usp;
     u64 *sf;
-    u32 i;
     if (handler <= 1 || restorer == 0 || as == 0) {
+        return 0;
+    }
+    if (frame_rip == 0 || frame_rflags == 0 || frame_rsp == 0 || frame_rdi == 0) {
         return 0;
     }
     usp = *frame_rsp;
@@ -1733,7 +1750,7 @@ static u32 sig_deliver_frame(u32 sig, u64 *frame_rip, u64 *frame_rflags,
     sf[3] = *frame_rsp;
     sf[4] = *frame_rdi;
     sf[5] = (u64)sig;
-    for (i = 0; i < 1; i++) { (void)i; }
+    sf[6] = frame_rax ? *frame_rax : 0;
     *frame_rip = handler;
     *frame_rdi = (u64)sig;
     *frame_rsp = usp;
@@ -1742,8 +1759,9 @@ static u32 sig_deliver_frame(u32 sig, u64 *frame_rip, u64 *frame_rflags,
 }
 
 /* Deliver pending signals. When `f_rip` is non-NULL we may redirect the
- * interrupted syscall frame to a user handler; otherwise default actions. */
-void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi) {
+ * interrupted user/syscall frame to a handler; otherwise default actions. */
+void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                               u64 *f_rax) {
     u32 pend;
     u32 ign;
     u32 sig;
@@ -1776,7 +1794,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
         /* SIGTSTP/TTIN/TTOU: custom handler if framed; else default stop. */
         if (sig == SIGTSTP_N || sig == SIGTTIN_N || sig == SIGTTOU_N) {
             if (h > 1 && f_rip != 0) {
-                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi, f_rax)) {
                     return;
                 }
             }
@@ -1793,7 +1811,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
         /* SIGCONT: resume already done in signal_send; optional handler. */
         if (sig == SIGCONT_N) {
             if (h > 1 && f_rip != 0) {
-                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+                if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi, f_rax)) {
                     return;
                 }
             }
@@ -1803,7 +1821,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
         }
 
         if (h > 1 && f_rip != 0) {
-            if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi)) {
+            if (sig_deliver_frame(sig, f_rip, f_rflags, f_rsp, f_rdi, f_rax)) {
                 return; /* one at a time */
             }
         }
@@ -1818,11 +1836,13 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
 }
 
 void sched_check_signals(void) {
-    sched_check_signals_frame(0, 0, 0, 0);
+    sched_check_signals_frame(0, 0, 0, 0, 0);
 }
 
-/* Restore user context from the sigframe at sched_cur() user RSP (rt_sigreturn). */
-u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi) {
+/* Restore user context from the sigframe at sched_cur() user RSP (rt_sigreturn).
+ * On success writes restored RAX through f_rax (syscall visible return). */
+u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                    u64 *f_rax) {
     u64 as = threads[sched_cur()].as_h;
     u64 usp;
     u64 *sf;
@@ -1852,6 +1872,9 @@ u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi) {
     *f_rflags = sf[2];
     *f_rsp = sf[3];
     *f_rdi = sf[4];
+    if (f_rax) {
+        *f_rax = sf[6];
+    }
     return 1;
 }
 

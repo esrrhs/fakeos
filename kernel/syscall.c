@@ -89,8 +89,10 @@ extern u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms);
 extern u64 sys_ioctl(u64 fd, u64 req, u64 arg);
 extern u32 sched_signal_send(u32 pid, u32 sig);
 extern void sched_check_signals(void);
-extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
-extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi);
+extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                                      u64 *f_rax);
+extern u32 sched_sigreturn(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi,
+                           u64 *f_rax);
 
 /* uproc.c */
 extern void uproc_note_exit(u32 pid, u64 code);
@@ -500,10 +502,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
         return sys_rt_sigaction(f->rdi, f->rsi, f->rdx, f->r10);
     }
     if (f->rax == SC_RT_SIGRETURN) {
-        if (!sched_sigreturn(&f->rip, &f->rflags, &f->pad, &f->rdi)) {
+        u64 restored = 0;
+        if (!sched_sigreturn(&f->rip, &f->rflags, &f->pad, &f->rdi, &restored)) {
             return (u64)(-1);
         }
-        return 0;
+        /* Restored RAX is the interrupted syscall retval (or user RAX). */
+        return restored;
     }
     if (f->rax == SC_EXIT) {
         proc_terminate(f->rdi);
@@ -521,7 +525,7 @@ u64 syscall_dispatch(struct syscall_frame *f) {
     syscall_count++;
     r = syscall_dispatch_inner(f);
     /* Deliver custom handler frames or default-terminate fatal signals. */
-    sched_check_signals_frame(&f->rip, &f->rflags, &f->pad, &f->rdi);
+    sched_check_signals_frame(&f->rip, &f->rflags, &f->pad, &f->rdi, &r);
     return r;
 }
 

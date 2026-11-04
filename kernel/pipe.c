@@ -25,6 +25,7 @@ enum {
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
 extern void select_kick(void);
+extern u32 sched_should_eintr(void);
 
 struct pipe {
     u32 used;
@@ -220,6 +221,11 @@ u64 pipe_read(u32 fh, char *kbuf, u64 len) {
             }
             /* Mesa: sleep then re-check. Channel is the pipe object. */
             sched_sleep((u64)p);
+            /* Fatal / non-SA_RESTART custom handler -> EINTR (handler runs
+             * on syscall exit via sigframe, rax restored after sigreturn). */
+            if (sched_should_eintr()) {
+                return done != 0 ? done : (u64)(-4);
+            }
         }
         while (done < len && p->count > 0) {
             kbuf[done] = p->data[p->head];
@@ -260,6 +266,9 @@ u64 pipe_write(u32 fh, const char *kbuf, u64 len) {
                 return done != 0 ? done : (u64)(-1);   /* broken pipe */
             }
             sched_sleep((u64)p);
+            if (sched_should_eintr()) {
+                return done != 0 ? done : (u64)(-4);
+            }
             if (p->nreaders == 0) {
                 return done != 0 ? done : (u64)(-1);
             }
