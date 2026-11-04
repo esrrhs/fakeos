@@ -1,13 +1,14 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
- * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
+ * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read/alias/unalias/return/local, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
- * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
+ * Expand scans $? / $0..$9 / $# / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
  * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators).
  * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL).
- * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage). */
+ * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
+ * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; $1… (depth 4). */
 package user;
 
 typedef unsigned long u64;
@@ -94,6 +95,13 @@ enum {
     MAX_ALIAS = 16,
     ALIAS_NAME = 32,
     ALIAS_VAL = 96,
+    MAX_FUNC = 8,
+    FUNC_NAME = 32,
+    FUNC_BODY = 160,
+    MAX_POS = 8,
+    POS_VAL = 96,
+    MAX_FDEPTH = 4,
+    MAX_LOCAL = 16,
     WNOHANG = 1,
     WUNTRACED = 2,
     WCONTINUED = 8,
@@ -119,6 +127,9 @@ static int shell_opt_u; /* set -u nounset */
 static int expand_err;  /* set by expand when -u hits unbound */
 static int loop_depth;  /* for/while/until nesting (thin; no compound nesting) */
 static int loop_ctrl;   /* 0 none, 1 break, 2 continue */
+static int func_depth;  /* function call nesting */
+static int func_returning; /* return builtin fired */
+static long func_ret_rc;
 
 static void shell_claim_tty(void) {
     /* Prefer ioctl TIOCSPGRP when available; fall back to tcsetpgrp. */
@@ -1193,6 +1204,252 @@ static void alias_expand_argv(char **argv) {
     for (i = 0; i <= n; i++) argv[i] = newav[i];
 }
 
+/* Thin shell functions: name () { body; } / name() { body; }. */
+struct sh_func {
+    int used;
+    char name[FUNC_NAME];
+    char body[FUNC_BODY];
+};
+
+static struct sh_func sh_funcs[MAX_FUNC];
+
+struct sh_posframe {
+    int argc; /* number of $1.. args */
+    char name[FUNC_NAME]; /* $0 */
+    char args[MAX_POS][POS_VAL];
+};
+
+static struct sh_posframe pos_stack[MAX_FDEPTH];
+
+struct sh_local {
+    int used;
+    int depth;
+    int had;
+    int was_exported;
+    char name[ENV_NAME];
+    char val[ENV_VAL];
+};
+
+static struct sh_local sh_locals[MAX_LOCAL];
+
+static void func_clear(void) {
+    int i;
+    for (i = 0; i < MAX_FUNC; i++) {
+        sh_funcs[i].used = 0;
+        sh_funcs[i].name[0] = 0;
+        sh_funcs[i].body[0] = 0;
+    }
+    for (i = 0; i < MAX_LOCAL; i++) {
+        sh_locals[i].used = 0;
+    }
+    func_depth = 0;
+    func_returning = 0;
+    func_ret_rc = 0;
+}
+
+static const char *func_lookup(const char *name) {
+    int i;
+    if (name == 0 || name[0] == 0) return 0;
+    for (i = 0; i < MAX_FUNC; i++) {
+        if (sh_funcs[i].used && eq(sh_funcs[i].name, name)) {
+            return sh_funcs[i].body;
+        }
+    }
+    return 0;
+}
+
+static int func_set(const char *name, const char *body) {
+    int i;
+    int free_slot = -1;
+    int nlen;
+    int blen;
+    if (name == 0 || name[0] == 0 || body == 0) return -1;
+    if (!env_name_ok(name)) return -1;
+    nlen = 0;
+    while (name[nlen] != 0) nlen++;
+    blen = 0;
+    while (body[blen] != 0) blen++;
+    if (nlen >= FUNC_NAME || blen >= FUNC_BODY) return -1;
+    for (i = 0; i < MAX_FUNC; i++) {
+        if (sh_funcs[i].used && eq(sh_funcs[i].name, name)) {
+            int k;
+            for (k = 0; k < blen; k++) sh_funcs[i].body[k] = body[k];
+            sh_funcs[i].body[blen] = 0;
+            return 0;
+        }
+        if (!sh_funcs[i].used && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) return -1;
+    {
+        int k;
+        for (k = 0; k < nlen; k++) sh_funcs[free_slot].name[k] = name[k];
+        sh_funcs[free_slot].name[nlen] = 0;
+        for (k = 0; k < blen; k++) sh_funcs[free_slot].body[k] = body[k];
+        sh_funcs[free_slot].body[blen] = 0;
+        sh_funcs[free_slot].used = 1;
+    }
+    return 0;
+}
+
+/* Join tokens[start..end) with spaces into dst. Returns 0 or -1. */
+static int join_tokens(char **tokens, int start, int end, char *dst, int dstsz) {
+    int oi = 0;
+    int i;
+    if (dst == 0 || dstsz < 2) return -1;
+    dst[0] = 0;
+    for (i = start; i < end; i++) {
+        int k;
+        if (tokens[i] == 0) break;
+        if (oi > 0) {
+            if (oi + 1 >= dstsz) return -1;
+            dst[oi++] = ' ';
+        }
+        for (k = 0; tokens[i][k] != 0; k++) {
+            if (oi + 1 >= dstsz) return -1;
+            dst[oi++] = tokens[i][k];
+        }
+    }
+    dst[oi] = 0;
+    return 0;
+}
+
+/* Parse name () { body } or name() { body }. Returns 1 on match. */
+static int try_parse_func_def(char **tokens, char *name_out, int namemax,
+                              char *body_out, int bodymax) {
+    char namebuf[FUNC_NAME];
+    int brace_i = -1;
+    int close_i = -1;
+    int i;
+    int nlen;
+    if (tokens == 0 || tokens[0] == 0 || name_out == 0 || body_out == 0) return 0;
+    /* Form A: NAME () { ... } */
+    if (tokens[1] != 0 && eq(tokens[1], "()") && tokens[2] != 0 && eq(tokens[2], "{")) {
+        nlen = 0;
+        while (tokens[0][nlen] != 0) nlen++;
+        if (nlen <= 0 || nlen >= namemax || nlen >= FUNC_NAME) return 0;
+        if (!env_name_ok(tokens[0])) return 0;
+        for (i = 0; i < nlen; i++) namebuf[i] = tokens[0][i];
+        namebuf[nlen] = 0;
+        brace_i = 2;
+    } else {
+        /* Form B: NAME() { ... } */
+        int L = 0;
+        while (tokens[0][L] != 0) L++;
+        if (L < 3 || tokens[0][L - 2] != '(' || tokens[0][L - 1] != ')') return 0;
+        if (tokens[1] == 0 || !eq(tokens[1], "{")) return 0;
+        nlen = L - 2;
+        if (nlen <= 0 || nlen >= namemax || nlen >= FUNC_NAME) return 0;
+        for (i = 0; i < nlen; i++) namebuf[i] = tokens[0][i];
+        namebuf[nlen] = 0;
+        if (!env_name_ok(namebuf)) return 0;
+        brace_i = 1;
+    }
+    /* First '}' closes (thin: no brace nesting). */
+    i = brace_i + 1;
+    while (tokens[i] != 0) {
+        if (eq(tokens[i], "}")) {
+            close_i = i;
+            break;
+        }
+        i++;
+    }
+    if (close_i < 0) return 0;
+    /* No trailing junk after '}' (optional lone ';'). */
+    if (tokens[close_i + 1] != 0) {
+        if (!(eq(tokens[close_i + 1], ";") && tokens[close_i + 2] == 0)) {
+            return 0;
+        }
+    }
+    if (join_tokens(tokens, brace_i + 1, close_i, body_out, bodymax) != 0) return 0;
+    for (i = 0; namebuf[i] != 0 && i + 1 < namemax; i++) name_out[i] = namebuf[i];
+    name_out[i] = 0;
+    return 1;
+}
+
+static const char *pos_get(int idx) {
+    /* idx 0 = $0 (name); 1.. = $1.. */
+    if (func_depth <= 0) return 0;
+    {
+        struct sh_posframe *fr = &pos_stack[func_depth - 1];
+        if (idx == 0) return fr->name;
+        if (idx < 1 || idx > fr->argc || idx > MAX_POS) return 0;
+        return fr->args[idx - 1];
+    }
+}
+
+static int pos_argc(void) {
+    if (func_depth <= 0) return 0;
+    return pos_stack[func_depth - 1].argc;
+}
+
+static void locals_restore_frame(int depth) {
+    int i;
+    for (i = MAX_LOCAL - 1; i >= 0; i--) {
+        if (!sh_locals[i].used || sh_locals[i].depth != depth) continue;
+        if (sh_locals[i].had) {
+            sh_setenv(sh_locals[i].name, sh_locals[i].val);
+            sh_mark_export(sh_locals[i].name, sh_locals[i].was_exported);
+        } else {
+            sh_unsetenv(sh_locals[i].name);
+        }
+        sh_locals[i].used = 0;
+        sh_locals[i].name[0] = 0;
+        sh_locals[i].val[0] = 0;
+    }
+}
+
+static int local_save(const char *name) {
+    int i;
+    int free_slot = -1;
+    const char *cur;
+    int nlen;
+    int vlen;
+    int existed;
+    int exp = 0;
+    if (func_depth <= 0) return -1;
+    if (!env_name_ok(name)) return -1;
+    /* Already saved at this depth? */
+    for (i = 0; i < MAX_LOCAL; i++) {
+        if (sh_locals[i].used && sh_locals[i].depth == func_depth
+            && eq(sh_locals[i].name, name)) {
+            return 0;
+        }
+        if (!sh_locals[i].used && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) return -1;
+    cur = sh_getenv(name);
+    existed = cur != 0;
+    nlen = 0;
+    while (name[nlen] != 0) nlen++;
+    if (nlen >= ENV_NAME) return -1;
+    for (i = 0; i < nlen; i++) sh_locals[free_slot].name[i] = name[i];
+    sh_locals[free_slot].name[nlen] = 0;
+    sh_locals[free_slot].had = existed ? 1 : 0;
+    sh_locals[free_slot].was_exported = 0;
+    sh_locals[free_slot].val[0] = 0;
+    if (existed) {
+        for (i = 0; i < MAX_ENV; i++) {
+            if (sh_envs[i].used && eq(sh_envs[i].name, name)) {
+                exp = sh_envs[i].exported;
+                break;
+            }
+        }
+        sh_locals[free_slot].was_exported = exp;
+        vlen = 0;
+        while (cur[vlen] != 0 && vlen + 1 < ENV_VAL) {
+            sh_locals[free_slot].val[vlen] = cur[vlen];
+            vlen++;
+        }
+        sh_locals[free_slot].val[vlen] = 0;
+    }
+    sh_locals[free_slot].depth = func_depth;
+    sh_locals[free_slot].used = 1;
+    return 0;
+}
+
+static long run_function(char **argv, long rc_in, char *in_path, char *out_path,
+                         int append);
+
 static int sh_setenv_local(const char *name, const char *val);
 
 /* Directory stack (bash-ish thin): dirstack[0] is cwd; pushd/popd/dirs; cd - uses OLDPWD. */
@@ -1601,6 +1858,29 @@ static void expand_token(const char *in, char *out, int outsz, long rc_in) {
             p += 2;
             continue;
         }
+        /* $# */
+        if (p[1] == '#') {
+            char num[24];
+            int nl = fmt_long_dec(num, 24, (long)pos_argc());
+            int k;
+            for (k = 0; k < nl && oi + 1 < outsz; k++) out[oi++] = num[k];
+            out[oi] = 0;
+            p += 2;
+            continue;
+        }
+        /* $0 .. $9 (single digit; thin) */
+        if (p[1] >= '0' && p[1] <= '9') {
+            const char *val = pos_get(p[1] - '0');
+            int k = 0;
+            if (val == 0) val = "";
+            while (val[k] != 0 && oi + 1 < outsz) {
+                out[oi++] = val[k];
+                k++;
+            }
+            out[oi] = 0;
+            p += 2;
+            continue;
+        }
         /* $NAME */
         if (arith_name_start(p[1])) {
             char name[ENV_NAME];
@@ -1663,7 +1943,8 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
         || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue")
         || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs")
-        || eq(cmd, "alias") || eq(cmd, "unalias");
+        || eq(cmd, "alias") || eq(cmd, "unalias")
+        || eq(cmd, "return") || eq(cmd, "local");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -2091,6 +2372,83 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         u_write(1, "\033[2J\033[H", 7);
         return 0;
     }
+    if (eq(tokens[0], "return")) {
+        long code = 0;
+        if (func_depth <= 0) {
+            puts("sh: return: not in a function");
+            return 1;
+        }
+        if (tokens[1] != 0) {
+            code = strtol_dec(tokens[1]);
+            if (tokens[2] != 0) {
+                puts("sh: return: too many arguments");
+                return 1;
+            }
+        }
+        func_returning = 1;
+        func_ret_rc = code;
+        return code;
+    }
+    if (eq(tokens[0], "local")) {
+        int ai = 1;
+        if (func_depth <= 0) {
+            puts("sh: local: can only be used in a function");
+            return 1;
+        }
+        if (tokens[1] == 0) {
+            puts("usage: local NAME[=VAL]...");
+            return 1;
+        }
+        for (; tokens[ai] != 0; ai++) {
+            char name[ENV_NAME];
+            const char *eqp = 0;
+            int n = 0;
+            int k;
+            for (k = 0; tokens[ai][k] != 0; k++) {
+                if (tokens[ai][k] == '=') {
+                    eqp = tokens[ai] + k;
+                    break;
+                }
+            }
+            if (eqp == 0) {
+                n = 0;
+                while (tokens[ai][n] != 0) n++;
+                if (n <= 0 || n >= ENV_NAME || !env_name_ok(tokens[ai])) {
+                    puts("sh: local: bad name");
+                    return 1;
+                }
+                if (local_save(tokens[ai]) != 0) {
+                    printf("sh: local: %s: failed\n", tokens[ai]);
+                    return 1;
+                }
+                if (sh_setenv_local(tokens[ai], "") != 0) {
+                    printf("sh: local: %s: failed\n", tokens[ai]);
+                    return 1;
+                }
+            } else {
+                n = (int)(eqp - tokens[ai]);
+                if (n <= 0 || n >= ENV_NAME) {
+                    puts("sh: local: bad name");
+                    return 1;
+                }
+                for (k = 0; k < n; k++) name[k] = tokens[ai][k];
+                name[n] = 0;
+                if (!env_name_ok(name)) {
+                    puts("sh: local: bad name");
+                    return 1;
+                }
+                if (local_save(name) != 0) {
+                    printf("sh: local: %s: failed\n", name);
+                    return 1;
+                }
+                if (sh_setenv_local(name, eqp + 1) != 0) {
+                    printf("sh: local: %s: failed\n", name);
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
     if (eq(tokens[0], "break")) {
         if (tokens[1] != 0) {
             puts("sh: break: too many arguments");
@@ -2116,9 +2474,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, alias, unalias, return, local, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $((arith)); name(){…;}; for/while/until/if/elif/case/esac; break/continue/return; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2375,6 +2733,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         } else if (alias_lookup(tokens[1]) != 0) {
             printf("%s: shell alias\n", tokens[1]);
             rc = 0;
+        } else if (func_lookup(tokens[1]) != 0) {
+            printf("%s: shell function\n", tokens[1]);
+            rc = 0;
         } else if (is_builtin(tokens[1])) {
             printf("%s: shell builtin\n", tokens[1]);
             rc = 0;
@@ -2411,6 +2772,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 aval = alias_lookup(tokens[ai]);
                 if (aval != 0) {
                     printf("%s is aliased to `%s'\n", tokens[ai], aval);
+                } else if (func_lookup(tokens[ai]) != 0) {
+                    printf("%s is a shell function\n", tokens[ai]);
                 } else if (is_builtin(tokens[ai])) {
                     printf("%s is a shell builtin\n", tokens[ai]);
                 } else {
@@ -2471,6 +2834,8 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     const char *aval = alias_lookup(tokens[ai]);
                     if (aval != 0) {
                         printf("alias %s='%s'\n", tokens[ai], aval);
+                    } else if (func_lookup(tokens[ai]) != 0) {
+                        puts(tokens[ai]);
                     } else if (is_builtin(tokens[ai])) {
                         puts(tokens[ai]);
                     } else {
@@ -3255,6 +3620,81 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
 }
 
 /* Child path: apply pipe ends + redirects, then exec or run builtin+exit. */
+static long run_seq(char **tokens, long rc_in);
+
+static long run_function(char **argv, long rc_in, char *in_path, char *out_path,
+                         int append) {
+    const char *body;
+    char bodycopy[FUNC_BODY];
+    char *tokens[MAX_TOK];
+    char *save;
+    char *t;
+    int nt = 0;
+    int i;
+    int saved_in = -1;
+    int saved_out = -1;
+    long rc = rc_in;
+    struct sh_posframe *fr;
+
+    if (argv == 0 || argv[0] == 0) return 1;
+    body = func_lookup(argv[0]);
+    if (body == 0) return 127;
+    if (func_depth >= MAX_FDEPTH) {
+        puts("sh: function nesting too deep");
+        return 1;
+    }
+    if (push_redirects(in_path, out_path, append, &saved_in, &saved_out) < 0) {
+        return 1;
+    }
+
+    fr = &pos_stack[func_depth];
+    {
+        int nlen = 0;
+        while (argv[0][nlen] != 0 && nlen + 1 < FUNC_NAME) {
+            fr->name[nlen] = argv[0][nlen];
+            nlen++;
+        }
+        fr->name[nlen] = 0;
+    }
+    fr->argc = 0;
+    for (i = 1; argv[i] != 0 && fr->argc < MAX_POS; i++) {
+        int k = 0;
+        while (argv[i][k] != 0 && k + 1 < POS_VAL) {
+            fr->args[fr->argc][k] = argv[i][k];
+            k++;
+        }
+        fr->args[fr->argc][k] = 0;
+        fr->argc++;
+    }
+    func_depth++;
+    func_returning = 0;
+
+    for (i = 0; body[i] != 0 && i + 1 < FUNC_BODY; i++) bodycopy[i] = body[i];
+    bodycopy[i] = 0;
+
+    strtok_sh_reset();
+    save = bodycopy;
+    while (nt < MAX_TOK - 1 && (t = strtok_sh(&save)) != 0) {
+        tokens[nt++] = t;
+    }
+    tokens[nt] = 0;
+
+    if (nt > 0) {
+        rc = run_seq(tokens, rc);
+    } else {
+        rc = 0;
+    }
+    if (func_returning) {
+        rc = func_ret_rc;
+        func_returning = 0;
+    }
+
+    locals_restore_frame(func_depth);
+    func_depth--;
+    pop_redirects(saved_in, saved_out);
+    return rc;
+}
+
 static void child_run_stage(char **argv, int stdin_fd, int stdout_fd,
                             long rc_in) {
     char *in_path;
@@ -3291,6 +3731,10 @@ static void child_run_stage(char **argv, int stdin_fd, int stdout_fd,
     alias_expand_argv(argv);
     if (argv[0] == 0) {
         u_exit(0);
+    }
+    if (func_lookup(argv[0]) != 0) {
+        long st = run_function(argv, rc_in, in_path, out_path, append);
+        u_exit(st);
     }
     if (is_builtin(argv[0])) {
         /* cd/exit in a pipeline child only affect the child. */
@@ -3364,6 +3808,9 @@ static long run_pipeline(char **tokens, long rc_in) {
         alias_expand_argv(stages[0]);
         if (stages[0][0] == 0) {
             return 0;
+        }
+        if (func_lookup(stages[0][0]) != 0) {
+            return run_function(stages[0], rc_in, in_path, out_path, append);
         }
         if (is_builtin(stages[0][0])) {
             return run_builtin(stages[0], rc_in, in_path, out_path, append);
@@ -3552,6 +3999,9 @@ static int run_loop_body(char **body, long *rcp) {
         *rcp = expand_and_run(body, *rcp);
     } else {
         *rcp = 0;
+    }
+    if (func_returning) {
+        return 1; /* treat like break out of loop; caller sees func_returning */
     }
     if (loop_ctrl == 1) {
         loop_ctrl = 0;
@@ -4238,6 +4688,31 @@ static long run_compound(char **tokens, long rc_in) {
     return 1;
 }
 
+
+/* True if tokens[i] starts a thin function def (NAME () { or NAME() {). */
+static int looks_like_func_def(char **tokens, int i) {
+    if (tokens[i] == 0) return 0;
+    if (tokens[i + 1] != 0 && eq(tokens[i + 1], "()")
+        && tokens[i + 2] != 0 && eq(tokens[i + 2], "{")) {
+        return env_name_ok(tokens[i]);
+    }
+    {
+        int L = 0;
+        while (tokens[i][L] != 0) L++;
+        if (L >= 3 && tokens[i][L - 2] == '(' && tokens[i][L - 1] == ')'
+            && tokens[i + 1] != 0 && eq(tokens[i + 1], "{")) {
+            char nb[FUNC_NAME];
+            int n = L - 2;
+            int k;
+            if (n <= 0 || n >= FUNC_NAME) return 0;
+            for (k = 0; k < n; k++) nb[k] = tokens[i][k];
+            nb[n] = 0;
+            return env_name_ok(nb);
+        }
+    }
+    return 0;
+}
+
 /* Split on ";" and run each &&/|| list. */
 static long run_seq(char **tokens, long rc_in) {
     int i = 0;
@@ -4268,29 +4743,78 @@ static long run_seq(char **tokens, long rc_in) {
         } else {
             char *exp[MAX_TOK];
             int ei;
-            while (tokens[i] != 0 && !eq(tokens[i], ";")) {
-                if (ns < MAX_TOK - 1) {
+            char fname[FUNC_NAME];
+            char fbody[FUNC_BODY];
+            /* Function defs may contain ";" in the body — keep through "}". */
+            if (looks_like_func_def(tokens, i)) {
+                int brace = -1;
+                int close = -1;
+                int j;
+                /* Copy through opening "{" first. */
+                while (tokens[i] != 0 && ns < MAX_TOK - 1) {
                     stage[ns++] = tokens[i];
+                    if (eq(tokens[i], "{")) {
+                        brace = ns - 1;
+                        i++;
+                        break;
+                    }
+                    i++;
                 }
-                i++;
-            }
-            stage[ns] = 0;
-            if (tokens[i] != 0 && eq(tokens[i], ";")) {
-                i++;
+                if (brace >= 0) {
+                    while (tokens[i] != 0 && ns < MAX_TOK - 1) {
+                        stage[ns++] = tokens[i];
+                        if (eq(tokens[i], "}")) {
+                            close = ns - 1;
+                            i++;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+                stage[ns] = 0;
+                if (tokens[i] != 0 && eq(tokens[i], ";")) {
+                    i++;
+                }
+                if (close < 0) {
+                    puts("sh: function: expected }");
+                    return 1;
+                }
+            } else {
+                while (tokens[i] != 0 && !eq(tokens[i], ";")) {
+                    if (ns < MAX_TOK - 1) {
+                        stage[ns++] = tokens[i];
+                    }
+                    i++;
+                }
+                stage[ns] = 0;
+                if (tokens[i] != 0 && eq(tokens[i], ";")) {
+                    i++;
+                }
             }
             if (ns == 0) {
                 continue;
             }
-            for (ei = 0; ei < ns; ei++) {
-                exp[ei] = stage[ei];
+            if (try_parse_func_def(stage, fname, FUNC_NAME, fbody, FUNC_BODY)) {
+                if (func_set(fname, fbody) != 0) {
+                    printf("sh: function %s: failed\n", fname);
+                    return 1;
+                }
+                rc = 0;
+            } else {
+                for (ei = 0; ei < ns; ei++) {
+                    exp[ei] = stage[ei];
+                }
+                exp[ns] = 0;
+                expand_err = 0;
+                expand_argv(exp, rc);
+                if (expand_err) {
+                    return 1;
+                }
+                rc = run_list(exp, rc);
             }
-            exp[ns] = 0;
-            expand_err = 0;
-            expand_argv(exp, rc);
-            if (expand_err) {
-                return 1;
-            }
-            rc = run_list(exp, rc);
+        }
+        if (func_returning) {
+            return func_ret_rc;
         }
         if (loop_ctrl != 0) {
             return rc;
@@ -4371,6 +4895,9 @@ static long run_list(char **tokens, long rc_in) {
         }
 
         rc = run_pipeline(stage, rc);
+        if (func_returning) {
+            return func_ret_rc;
+        }
         if (loop_ctrl != 0) {
             return rc;
         }
@@ -4435,9 +4962,10 @@ int main(int argc, char **argv) {
     sh_env_init();
     hash_clear();
     alias_clear();
+    func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/envp, set -e/-u, $((arith)), cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/functions/envp, set -e/-u, $((arith))/$0..$9/$#, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

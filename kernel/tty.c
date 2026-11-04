@@ -691,7 +691,7 @@ static void tab_scan_builtins(const char *pfx, u32 pfx_n) {
         "which", "chmod", "umask", "chown", "id", "sync", "clear",
         "history", "jobs", "fg", "bg", "kill", "exit", "help",
         "pushd", "popd", "dirs", "type", "command", "hash", "read",
-        "set", "break", "continue", "alias", "unalias", 0
+        "set", "break", "continue", "alias", "unalias", "return", "local", 0
     };
     u32 i;
     for (i = 0; builtins[i] != 0; i++) {

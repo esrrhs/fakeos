@@ -1126,7 +1126,7 @@ Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
 still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
 `df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
 SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; shell
-functions / `[[ ]]` still deferred.
+functions / `[[ ]]` were still deferred then.
 
 Alias table cap 16 (`ALIAS_NAME`/`ALIAS_VAL` 32/96): `alias` lists
 `NAME='VAL'`; `alias NAME=VAL` sets (quote the whole `NAME=multi word` arg
@@ -1136,6 +1136,23 @@ when VAL has spaces); `alias NAME` prints one; `unalias NAME...` /
 builtins. Focused virtio login smoke covers set/list/expand/unalias/`-a` /
 type + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 
+## shell functions/local — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work beyond Tab builtin names).
+Inventory: `/proc` still thin — skip `ps`/`uptime`/`free`. No `statfs`/
+`utimensat`/`mknod` — `df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect
+duplex / multi-nc SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc;
+`[[ ]]` still deferred.
+
+Function table cap 8 (`FUNC_NAME`/`FUNC_BODY` 32/160): `name () { body; }` or
+`name() { body; }` (first `}` closes; body re-tokenized on call). Cap depth 4.
+`return [N]` exits the current function; `local NAME[=VAL]...` saves/restores
+env entries for the frame. Positional `$0`..`$9` and `$#` expand inside
+functions. Lookup order after alias: function → builtin → PATH. `type` /
+`which` / `command -v` report functions; Tab lists `return`/`local`. Focused
+virtio login smoke covers define/call/`$1`/`$#`/`return`/`local`/type + prior
+greens (smp 1/2). Ramfs `/bin` dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1143,6 +1160,6 @@ type + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: thin shell functions/local, `hexdump`/`xxd`/
-   `file`, or other small `/bin`/shell bites (skip large `getopts` / here-doc).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   deferred. Next thin polish: `hexdump`/`xxd`/`file`, `[[ ]]`, or other
+   small `/bin`/shell bites (skip large `getopts` / here-doc). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.
