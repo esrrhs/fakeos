@@ -1,9 +1,11 @@
 /* fakeos userland - timeout: run COMMAND with a time limit (thin).
- * Forms: timeout [-s SIG|--signal SIG|--signal=SIG] SECONDS COMMAND [ARG...]
- * SECONDS is a non-negative decimal integer. Uses fork + nanosleep poll +
- * kill(sig) — no alarm(2). Default signal is SIGKILL (9). Exit 124 on
- * timeout; else child status. COMMAND without '/' is /bin/COMMAND.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * Forms: timeout [-s SIG] [-k DUR|--kill-after=DUR] SECONDS COMMAND [ARG...]
+ * SECONDS/DUR are non-negative decimal integers. Uses fork + nanosleep poll +
+ * kill(sig) — no alarm(2). Default signal is SIGKILL (9). -k DUR waits DUR
+ * seconds after the first signal, then sends SIGKILL if still running (GNU
+ * kill-after). Without -k, a short ~2s grace then SIGKILL if needed. Exit
+ * 124 on timeout; else child status. COMMAND without '/' is /bin/COMMAND.
+ * Compact argv for EXEC_MAX_ARGC=8 (glued -kN / -sN).
  */
 package user;
 
@@ -27,7 +29,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: timeout [-s SIG] SECONDS COMMAND [ARG...]\n", 49);
+    u_write(2, "usage: timeout [-s SIG] [-k DUR] SECONDS COMMAND [ARG...]\n", 58);
 }
 
 static int parse_secs(const char *s, long *out) {
@@ -90,10 +92,12 @@ static int status_exit(long status) {
     return 128 + (int)(status & 0x7f);
 }
 
-/* Parse leading -s/--signal; returns new argv index of SECONDS, or -1. */
-static int parse_opts(int argc, char **argv, long *sig_out) {
+/* Parse leading -s/--signal and -k/--kill-after.
+ * Returns argv index of SECONDS, or -1. kill_after_out: -1 = default short grace. */
+static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out) {
     int ai = 1;
     long sig = SIGKILL;
+    long kill_after = -1;
     while (ai < argc) {
         const char *a = argv[ai];
         if (a[0] != '-' || a[1] == 0) break;
@@ -106,8 +110,8 @@ static int parse_opts(int argc, char **argv, long *sig_out) {
             ai += 2;
             continue;
         }
-        if (a[1] == 's' && a[2] != 0 && a[1] != '-') {
-            /* glued -sN (not --...) */
+        if (a[1] == 's' && a[2] != 0) {
+            /* glued -sN */
             if (!parse_sig(a + 2, &sig)) return -1;
             ai++;
             continue;
@@ -124,10 +128,54 @@ static int parse_opts(int argc, char **argv, long *sig_out) {
             ai++;
             continue;
         }
+        if (strcmp(a, "-k") == 0) {
+            if (ai + 1 >= argc || !parse_secs(argv[ai + 1], &kill_after)) return -1;
+            ai += 2;
+            continue;
+        }
+        if (a[1] == 'k' && a[2] != 0) {
+            /* glued -kN */
+            if (!parse_secs(a + 2, &kill_after)) return -1;
+            ai++;
+            continue;
+        }
+        if (strcmp(a, "--kill-after") == 0) {
+            if (ai + 1 >= argc || !parse_secs(argv[ai + 1], &kill_after)) return -1;
+            ai += 2;
+            continue;
+        }
+        if (a[0] == '-' && a[1] == '-' && a[2] == 'k' && a[3] == 'i' &&
+            a[4] == 'l' && a[5] == 'l' && a[6] == '-' && a[7] == 'a' &&
+            a[8] == 'f' && a[9] == 't' && a[10] == 'e' && a[11] == 'r' &&
+            a[12] == '=') {
+            if (!parse_secs(a + 13, &kill_after)) return -1;
+            ai++;
+            continue;
+        }
         return -1;
     }
     *sig_out = sig;
+    *kill_after_out = kill_after;
     return ai;
+}
+
+static int wait_reap(long pid, long *status, long ticks) {
+    long ts[2];
+    long reaped;
+    long left = ticks;
+    while (left > 0) {
+        reaped = u_wait4(pid, status, WNOHANG, 0);
+        if (reaped == pid) return 1;
+        if (reaped < 0) return -1;
+        ts[0] = 0;
+        ts[1] = 50000000L;
+        u_nanosleep(ts, 0);
+        left--;
+    }
+    reaped = u_wait4(pid, status, WNOHANG, 0);
+    if (reaped == pid) return 1;
+    if (reaped < 0) return -1;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -139,12 +187,14 @@ int main(int argc, char **argv) {
     char *envp[1];
     long ts[2];
     long ticks_left;
-    int i;
+    long grace_ticks;
     int ai;
     long sig;
+    long kill_after;
     char **cmd_argv;
+    int wr;
 
-    ai = parse_opts(argc, argv, &sig);
+    ai = parse_opts(argc, argv, &sig, &kill_after);
     if (ai < 0 || ai + 1 >= argc) {
         usage();
         return 1;
@@ -193,21 +243,25 @@ int main(int argc, char **argv) {
     }
 
     u_kill(pid, sig);
-    for (i = 0; i < 40; i++) {
-        reaped = u_wait4(pid, &status, WNOHANG, 0);
-        if (reaped == pid) return EXIT_TIMEOUT;
-        ts[0] = 0;
-        ts[1] = 50000000L;
-        u_nanosleep(ts, 0);
+    if (kill_after >= 0) {
+        grace_ticks = kill_after * TICKS_PER_SEC;
+        if (grace_ticks == 0) grace_ticks = 1; /* one poll tick for -k0 */
+    } else {
+        grace_ticks = 40; /* ~2s default short grace */
+    }
+    wr = wait_reap(pid, &status, grace_ticks);
+    if (wr == 1) return EXIT_TIMEOUT;
+    if (wr < 0) {
+        u_write(2, "timeout: wait failed\n", 21);
+        return 1;
     }
     if (sig != SIGKILL) {
         u_kill(pid, SIGKILL);
-        for (i = 0; i < 40; i++) {
-            reaped = u_wait4(pid, &status, WNOHANG, 0);
-            if (reaped == pid) return EXIT_TIMEOUT;
-            ts[0] = 0;
-            ts[1] = 50000000L;
-            u_nanosleep(ts, 0);
+        wr = wait_reap(pid, &status, 40);
+        if (wr == 1) return EXIT_TIMEOUT;
+        if (wr < 0) {
+            u_write(2, "timeout: wait failed\n", 21);
+            return 1;
         }
     }
     u_wait4(pid, &status, 0, 0);

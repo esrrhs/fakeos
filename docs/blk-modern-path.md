@@ -2031,6 +2031,16 @@ width-6 signed decimal. Keeps `-t x2` and prior types. No new `/bin` dent.
 Focused virtio login smoke covers `-to2`/`-tu2`/`-td2` + prior greens
 including `-tx2` (smp 1/2). Ramfs `/bin` dents ~114/128.
 
+## timeout -k — landed
+
+`/bin/timeout -k DUR` (glued `-kDUR`, `--kill-after=DUR` / `--kill-after DUR`)
+waits DUR seconds after the first timeout signal, then sends SIGKILL if the
+child is still alive (GNU kill-after). Without `-k`, keeps the prior short
+~2s grace then SIGKILL when the first signal was not already SIGKILL. Glued
+`-kN`/`-sN` keep EXEC_MAX_ARGC=8. No new `/bin` dent. Focused virtio login
+smoke covers `-k1` + `-s15 -k1` timed-out sleep (exit 124) and success path
+plus prior greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2038,6 +2048,6 @@ including `-tx2` (smp 1/2). Ramfs `/bin` dents ~114/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   `timeout -k`; `cp -p` waits on utimensat; `set --` deferred; skip large
+   deferred. Next thin polish: other util flags on existing `/bin` (inspect
+   inventory; `cp -p` waits on utimensat; `set --` deferred; skip large
    shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
