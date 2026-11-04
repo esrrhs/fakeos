@@ -236,6 +236,7 @@ flowchart TD
 - [x] **/bin/readlink + /bin/realpath + /bin/printenv**：外部 `readlink PATH`、`realpath PATH`（物理解析，与 shell 内建对齐）、`printenv` 为 `/bin/env` 别名；供 `xargs` / 脚本 `exec` 路径。virtio login smoke（smp 1/2）。
 - [x] **/bin/date + /bin/stat**：外部 `date [+%s]`（`clock_gettime(REALTIME)` 启动相对秒）、`stat [-L] FILE...`（默认 `lstat`，`-L` 跟 `stat`）；供 `xargs` / 脚本 `exec` 路径。virtio login smoke（smp 1/2）。
 - [x] **/bin/nl + /bin/fold**：外部 `nl [-b a|t] [-v N] [-w N] [-s SEP]` 行号、`fold [-w WIDTH] [-s]` 折行；供管道/脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。

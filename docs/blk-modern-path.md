@@ -391,12 +391,26 @@ breaks at the last blank before WIDTH when possible). Focused virtio login
 smoke covers `seq | nl`, `nl -ba -v10 -w2 -s:`, `fold -w`, `fold -s`,
 pipeline `nl | fold`, plus prior interactive greens (smp 1/2).
 
+## /bin/mktemp + /bin/rev + /bin/paste — landed
+
+Thin script/text-pipeline trio. `mktemp [-d][-u|-du] [TEMPLATE]` creates a
+unique file (default) or directory (`-d`) under a template ending in `XXXXXX`
+(default `/tmp/tmp.XXXXXX`); `-u` dry-runs (create then unlink/rmdir). Uniqueness
+via `getpid` + retry with `O_CREAT|O_EXCL` / `mkdir`.
+`rev [FILE...]` reverses characters of each line.
+`paste [-s] [-d LIST|-dLIST] [FILE...]` merges lines (default tab delim; `-s`
+serial; max 6 files; one `-` stdin). Focused virtio login smoke covers
+`mktemp`/`-d`/`-u`, `printf|rev`, `paste`/`-s`/`-d:`, plus prior interactive
+greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin utils (`mktemp`, `rev`/`paste`).
+4. More daily-driver gaps: thin utils still missing (`which`/`type` external,
+   `dirname` already present; consider `split`/`csplit`, `expand`/`unexpand`,
+   `comm`, `join`, `fmt`) — prefer small coherent pairs.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.
