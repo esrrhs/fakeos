@@ -407,6 +407,8 @@ def main():
         "[FS] published /bin/true (",
         "[FS] published /bin/false (",
         "[FS] published /bin/seq (",
+        "[FS] published /bin/cut (",
+        "[FS] published /bin/tr (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
         "[FS] published /etc/hosts (",

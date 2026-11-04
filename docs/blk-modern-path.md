@@ -225,11 +225,19 @@ Thin coreutils: `true` exits 0, `false` exits 1; `seq [-s SEP] LAST` /
 OK; always trailing newline). Focused virtio login smoke covers the three
 plus login/`uname`/`ls -l`/`udptest`/`id` (smp 1/2).
 
+## /bin/cut + /bin/tr — landed
+
+Thin coreutils: `cut -c LIST` / `cut -f LIST [-d DELIM] [-s]` selects
+characters or fields (1-based `N`, `N-M`, `N-`, `-M`, comma lists); `tr SET1
+SET2` translates and `tr -d SET` deletes (`a-z` ranges; `\n`/`\t`/`\r`/`\0`/
+`\\` escapes). Focused virtio login smoke covers both plus login/`uname`/
+`ls -l`/`udptest`/`id` (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: `cut`/`tr`, hard `link(2)`, TTY Ctrl-L redraw, or
-   other thin coreutils / kernel POSIX after README scan.
+4. More daily-driver gaps: hard `link(2)`, TTY Ctrl-L redraw, or other thin
+   coreutils / kernel POSIX after README scan.
