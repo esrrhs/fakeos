@@ -2071,6 +2071,14 @@ pairs with existing `-path` / `-iname`). Same thin `*`/`?` glob. No new
 `/bin` dent. Focused virtio login smoke covers `-ipath` + prior greens
 (smp 1/2).
 
+## sed s///i — landed
+
+`/bin/sed` substitute accepts `i`/`I` after the closing delimiter to fold A-Z
+when matching the fixed-string pattern (GNU-ish). Combines with `g` in any
+order (`gi`/`ig`). Keeps existing `-n`/`-i` (in-place) and `s///g`. No new
+`/bin` dent. Focused virtio login smoke covers `s///i` + `s///gi` + prior
+greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2079,5 +2087,5 @@ pairs with existing `-path` / `-iname`). Same thin `*`/`?` glob. No new
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` (e.g.
-   sed `s///i` / `-e`; `cp -p` waits on utimensat; `set --` deferred; skip
-   large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   sed `-e`; `cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

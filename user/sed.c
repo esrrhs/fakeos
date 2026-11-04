@@ -1,15 +1,16 @@
 /* fakeos userland - sed: thin stream editor (s///g + d/p/q).
  * Forms: sed [-n] [-i] SCRIPT [FILE...]
  * SCRIPT: semicolon-separated commands (no addresses):
- *   s/PAT/REPL/[g]  fixed-string substitute (first match, or all with g)
+ *   s/PAT/REPL/[gi] fixed-string substitute (g=all; i/I=ignore case)
  *   d               delete line (suppress default print)
  *   p               print pattern space
  *   q               quit after this line
  * Delimiter after s may be any non-NUL (e.g. s#a#b#). PAT/REPL: literals plus
- * \\ \n \t escapes. -n suppresses default print. -i edits FILE in place via a
- * same-dir temp then rename(2) (no backup ext; refuses stdin/-). stdin if no
- * FILE (without -i); "-" stdin. Compact argv for EXEC_MAX_ARGC=8. No regex,
- * no addresses, no hold space.
+ * \\ \n \t escapes. Flags after closing delim: g, i/I (any order, e.g. gi).
+ * -n suppresses default print. -i edits FILE in place via a same-dir temp then
+ * rename(2) (no backup ext; refuses stdin/-). stdin if no FILE (without -i);
+ * "-" stdin. Compact argv for EXEC_MAX_ARGC=8. No regex, no addresses, no
+ * hold space.
  */
 package user;
 
@@ -68,8 +69,14 @@ static int take_esc(const char *s, int *si, char *outc) {
     return 1;
 }
 
-/* First index of needle[0..nlen) in hay[0..hlen), or -1. */
-static int find_sub(const char *hay, int hlen, const char *needle, int nlen) {
+static char fold_c(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+/* First index of needle[0..nlen) in hay[0..hlen), or -1. fold=1 ignores case. */
+static int find_sub(const char *hay, int hlen, const char *needle, int nlen,
+                    int fold) {
     int i;
     int j;
     if (nlen == 0) return 0;
@@ -77,7 +84,14 @@ static int find_sub(const char *hay, int hlen, const char *needle, int nlen) {
     for (i = 0; i + nlen <= hlen; i++) {
         int ok = 1;
         for (j = 0; j < nlen; j++) {
-            if (hay[i + j] != needle[j]) {
+            char a = hay[i + j];
+            char b = needle[j];
+            if (fold) {
+                if (fold_c(a) != fold_c(b)) {
+                    ok = 0;
+                    break;
+                }
+            } else if (a != b) {
                 ok = 0;
                 break;
             }
@@ -96,6 +110,7 @@ static int do_subst(char *line, int *linelen, const char *script, int off, int *
     int pn = 0;
     int rn = 0;
     int global = 0;
+    int ign = 0;
     int i = off;
     int oi;
     int li;
@@ -124,8 +139,9 @@ static int do_subst(char *line, int *linelen, const char *script, int off, int *
     }
     if (script[i] != delim) return -1;
     i++;
-    if (script[i] == 'g') {
-        global = 1;
+    while (script[i] == 'g' || script[i] == 'i' || script[i] == 'I') {
+        if (script[i] == 'g') global = 1;
+        else ign = 1;
         i++;
     }
     *newoff = i;
@@ -136,7 +152,7 @@ static int do_subst(char *line, int *linelen, const char *script, int off, int *
     li = 0;
     left = *linelen;
     while (li <= left) {
-        at = find_sub(line + li, left - li, pat, nlen);
+        at = find_sub(line + li, left - li, pat, nlen, ign);
         if (at < 0) {
             while (li < left) {
                 if (oi + 1 >= OUT_MAX) return -1;
