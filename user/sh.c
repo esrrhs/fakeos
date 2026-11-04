@@ -1,11 +1,12 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
+ * Builtins: echo [-neE] ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf],
  * readlink, realpath, env/export[-n]/unset/which/type/command -v/hash/read, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
  * pipelines, &&/||, ; sequences, & jobs. set -e errexit (skip mid &&/||); set -u nounset.
  * Expand scans $? / $NAME / $((+ - * / % () )) (bare NAME or $NAME inside arith).
- * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators). */
+ * Thin for/while/until/if/elif/case/esac + break/continue (per-iteration $ re-expand; ; or keyword separators).
+ * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL). */
 package user;
 
 typedef unsigned long u64;
@@ -87,6 +88,8 @@ enum {
     MAX_HASH = 16,
     HASH_NAME = 32,
     HASH_PATH = 96,
+    MAX_DIRS = 8,
+    DIR_PATH = 96,
     WNOHANG = 1,
     WUNTRACED = 2,
     WCONTINUED = 8,
@@ -1068,6 +1071,76 @@ static int hash_remember(const char *name, const char *path) {
     return 0;
 }
 
+static int sh_setenv_local(const char *name, const char *val);
+
+/* Directory stack (bash-ish thin): dirstack[0] is cwd; pushd/popd/dirs; cd - uses OLDPWD. */
+static char dirstack[MAX_DIRS][DIR_PATH];
+static int dirstack_n;
+
+static int dirs_copy_path(char *dst, int dstsz, const char *src) {
+    int i;
+    if (dst == 0 || dstsz <= 0 || src == 0) return -1;
+    for (i = 0; src[i] != 0 && i + 1 < dstsz; i++) dst[i] = src[i];
+    if (src[i] != 0) return -1;
+    dst[i] = 0;
+    return 0;
+}
+
+static int dirs_getcwd(char *buf, int bufsz) {
+    char tmp[128];
+    if (u_getcwd(tmp, sizeof(tmp)) == -1) return -1;
+    return dirs_copy_path(buf, bufsz, tmp);
+}
+
+static void dirs_print(void) {
+    int i;
+    for (i = 0; i < dirstack_n; i++) {
+        if (i > 0) u_write(1, " ", 1);
+        u_write(1, dirstack[i], strlen(dirstack[i]));
+    }
+    u_write(1, "\n", 1);
+}
+
+static void dirs_set_top(const char *path) {
+    if (dirstack_n <= 0) dirstack_n = 1;
+    if (dirs_copy_path(dirstack[0], DIR_PATH, path) != 0) {
+        /* Truncate rather than fail tracking (path longer than DIR_PATH). */
+        int i;
+        for (i = 0; path[i] != 0 && i + 1 < DIR_PATH; i++) dirstack[0][i] = path[i];
+        dirstack[0][i] = 0;
+    }
+}
+
+static void dirs_init(void) {
+    dirstack_n = 0;
+    if (dirs_getcwd(dirstack[0], DIR_PATH) == 0) {
+        dirstack_n = 1;
+    } else {
+        dirs_copy_path(dirstack[0], DIR_PATH, "/");
+        dirstack_n = 1;
+    }
+}
+
+/* chdir + OLDPWD + dirstack[0]. Returns 0 on success. */
+static int sh_chdir_update(const char *target) {
+    char old[DIR_PATH];
+    char neu[DIR_PATH];
+    if (target == 0 || target[0] == 0) return -1;
+    if (dirs_getcwd(old, DIR_PATH) != 0) {
+        old[0] = 0;
+    }
+    if (u_chdir(target) < 0) return -1;
+    if (dirs_getcwd(neu, DIR_PATH) != 0) {
+        /* chdir ok but getcwd failed — still record target best-effort. */
+        if (dirs_copy_path(neu, DIR_PATH, target) != 0) {
+            dirs_copy_path(neu, DIR_PATH, "/");
+        }
+    }
+    if (old[0] != 0) sh_setenv_local("OLDPWD", old);
+    dirs_set_top(neu);
+    return 0;
+}
+
 /* Read one line from fd 0 into buf (no trailing newline). Returns length, or -1 on EOF. */
 static int sh_read_line(char *buf, int bufsz) {
     int n = 0;
@@ -1466,7 +1539,8 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "hash") || eq(cmd, "read") ||
            eq(cmd, "chmod") || eq(cmd, "umask")
         || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
-        || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue");
+        || eq(cmd, "set") || eq(cmd, "break") || eq(cmd, "continue")
+        || eq(cmd, "pushd") || eq(cmd, "popd") || eq(cmd, "dirs");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -1553,20 +1627,140 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "cd")) {
         const char *target;
+        int from_old = 0;
         if (tokens[1] != 0) {
-            target = tokens[1];
+            if (eq(tokens[1], "-")) {
+                target = sh_getenv("OLDPWD");
+                if (target == 0 || target[0] == 0) {
+                    puts("sh: cd: OLDPWD not set");
+                    return 1;
+                }
+                from_old = 1;
+            } else {
+                target = tokens[1];
+            }
         } else {
             target = sh_getenv("HOME");
             if (target == 0 || target[0] == 0) target = "/home";
         }
-        if (u_chdir(target) < 0) {
+        if (sh_chdir_update(target) != 0) {
             /* Fall back to / when Ext2 home is offline. */
-            if (tokens[1] == 0 && u_chdir("/") == 0) {
+            if (tokens[1] == 0 && sh_chdir_update("/") == 0) {
                 return 0;
             }
             printf("sh: cd: %s: No such file or directory\n", target);
             return 1;
         }
+        if (from_old) {
+            /* bash prints new cwd for cd - */
+            puts(dirstack[0]);
+        }
+        return 0;
+    }
+    if (eq(tokens[0], "dirs")) {
+        /* dirs — print stack (cwd first). No flags. */
+        if (tokens[1] != 0) {
+            puts("sh: dirs: usage: dirs");
+            return 1;
+        }
+        if (dirstack_n <= 0) dirs_init();
+        dirs_print();
+        return 0;
+    }
+    if (eq(tokens[0], "pushd")) {
+        /* pushd DIR — push cwd, cd DIR, print stack.
+         * pushd      — swap top two (need >=2), print stack. */
+        char old[DIR_PATH];
+        int i;
+        if (dirstack_n <= 0) dirs_init();
+        if (tokens[1] == 0) {
+            char cur[DIR_PATH];
+            char other[DIR_PATH];
+            if (dirstack_n < 2) {
+                puts("sh: pushd: no other directory");
+                return 1;
+            }
+            if (dirs_getcwd(cur, DIR_PATH) != 0) {
+                puts("sh: pushd: getcwd failed");
+                return 1;
+            }
+            if (dirs_copy_path(other, DIR_PATH, dirstack[1]) != 0) return 1;
+            if (sh_chdir_update(other) != 0) {
+                printf("sh: pushd: %s: No such file or directory\n", other);
+                return 1;
+            }
+            /* [0] already new cwd; place previous physical cwd at [1]. */
+            dirs_copy_path(dirstack[1], DIR_PATH, cur);
+            dirs_print();
+            return 0;
+        }
+        if (tokens[2] != 0) {
+            puts("sh: pushd: usage: pushd [DIR]");
+            return 1;
+        }
+        if (dirstack_n >= MAX_DIRS) {
+            puts("sh: pushd: directory stack full");
+            return 1;
+        }
+        if (dirs_getcwd(old, DIR_PATH) != 0) {
+            puts("sh: pushd: getcwd failed");
+            return 1;
+        }
+        /* shift right to make room at [0]; keep old cwd as [1] after chdir */
+        for (i = dirstack_n; i > 0; i--) {
+            if (dirs_copy_path(dirstack[i], DIR_PATH, dirstack[i - 1]) != 0) {
+                puts("sh: pushd: stack copy failed");
+                return 1;
+            }
+        }
+        dirstack_n++;
+        if (sh_chdir_update(tokens[1]) != 0) {
+            /* undo shift */
+            for (i = 0; i < dirstack_n - 1; i++) {
+                dirs_copy_path(dirstack[i], DIR_PATH, dirstack[i + 1]);
+            }
+            dirstack_n--;
+            printf("sh: pushd: %s: No such file or directory\n", tokens[1]);
+            return 1;
+        }
+        /* Ensure [1] is the previous cwd (sh_chdir_update only touches [0]). */
+        dirs_copy_path(dirstack[1], DIR_PATH, old);
+        dirs_print();
+        return 0;
+    }
+    if (eq(tokens[0], "popd")) {
+        /* popd — drop cwd, cd to next on stack, print. */
+        char dropped[DIR_PATH];
+        int i;
+        if (tokens[1] != 0) {
+            puts("sh: popd: usage: popd");
+            return 1;
+        }
+        if (dirstack_n <= 0) dirs_init();
+        if (dirstack_n < 2) {
+            puts("sh: popd: directory stack empty");
+            return 1;
+        }
+        if (dirs_copy_path(dropped, DIR_PATH, dirstack[0]) != 0) return 1;
+        for (i = 0; i < dirstack_n - 1; i++) {
+            if (dirs_copy_path(dirstack[i], DIR_PATH, dirstack[i + 1]) != 0) return 1;
+        }
+        dirstack_n--;
+        {
+            char target[DIR_PATH];
+            if (dirs_copy_path(target, DIR_PATH, dirstack[0]) != 0) return 1;
+            if (sh_chdir_update(target) != 0) {
+                /* restore dropped on failure */
+                for (i = dirstack_n; i > 0; i--) {
+                    dirs_copy_path(dirstack[i], DIR_PATH, dirstack[i - 1]);
+                }
+                dirs_copy_path(dirstack[0], DIR_PATH, dropped);
+                dirstack_n++;
+                printf("sh: popd: %s: No such file or directory\n", target);
+                return 1;
+            }
+        }
+        dirs_print();
         return 0;
     }
     if (eq(tokens[0], "mkdir")) {
@@ -1712,9 +1906,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], cd[-], pushd, popd, dirs, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $((arith)); for/while/until/if/elif/case/esac; break/continue; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -4010,8 +4204,9 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hash_clear();
+    dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/envp, set -e/-u, $((arith)), chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/envp, set -e/-u, $((arith)), cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];

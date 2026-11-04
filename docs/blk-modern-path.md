@@ -1105,6 +1105,21 @@ hits, and auto-remembers successful PATH opens (cap 16). Focused virtio
 login smoke covers read one/REPLY/fields/`-r`/EOF + hash list/clear/miss/
 builtin/auto + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 
+## shell pushd/popd/dirs + cd - — landed
+
+Thin shell polish (no new `/bin` dent; no kernel work). Inventory: `/proc`
+still thin — skip `ps`/`uptime`/`free`. No `statfs`/`utimensat`/`mknod` —
+`df`, `touch -r|-d`, `mkfifo` deferred. Left Ext2-redirect duplex / multi-nc
+SMP races, CFS, deep jbd alone. Skip large `getopts` / here-doc; shell
+functions / alias / `[[ ]]` still deferred.
+
+Directory stack cap 8 (`dirstack[0]` = cwd): `pushd DIR` pushes then cds;
+bare `pushd` swaps top two; `popd` drops cwd and cds to next; `dirs` prints
+space-separated stack. `cd -` uses unexported `OLDPWD` (set on successful
+`cd`/`pushd`/`popd`) and prints the new cwd. Tab completion lists the new
+builtins. Focused virtio login smoke covers pushd/popd/dirs/swap/`cd -` +
+prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -1112,6 +1127,6 @@ builtin/auto + prior greens (smp 1/2). Ramfs `/bin` dents ~111/128.
 2. Deep jbd — avoid unless needed.
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: more small `/bin`/shell bites after fresh
-   inventory (skip large `getopts` / here-doc). Leave Ext2 duplex / multi-nc /
-   CFS / jbd alone.
+   deferred. Next thin polish: shell `alias`/`unalias`, thin functions/local,
+   `hexdump`/`xxd`/`file`, or other small `/bin`/shell bites (skip large
+   `getopts` / here-doc). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
