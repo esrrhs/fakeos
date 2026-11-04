@@ -168,6 +168,8 @@ extern char user_id_start;
 extern char user_id_end;
 extern char user_groups_start;
 extern char user_groups_end;
+extern char user_cal_start;
+extern char user_cal_end;
 extern char user_kbuild_start;
 extern char user_kbuild_end;
 extern char user_ldfake_start;
@@ -302,6 +304,7 @@ void rootfs_publish(void) {
     publish_one("/bin/whoami", (u64)(&user_whoami_start), (u64)(&user_whoami_end));
     publish_one("/bin/id", (u64)(&user_id_start), (u64)(&user_id_end));
     publish_one("/bin/groups", (u64)(&user_groups_start), (u64)(&user_groups_end));
+    publish_one("/bin/cal", (u64)(&user_cal_start), (u64)(&user_cal_end));
     publish_one("/bin/printenv", (u64)(&user_env_start), (u64)(&user_env_end));
     publish_one("/bin/kbuild", (u64)(&user_kbuild_start), (u64)(&user_kbuild_end));
     publish_one("/bin/ldfake", (u64)(&user_ldfake_start), (u64)(&user_ldfake_end));

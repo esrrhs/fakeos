@@ -527,6 +527,14 @@ duplicate egid). Focused virtio login smoke covers `/bin/id` (root + wheel
 supp), `groups` (`root wheel`), plus prior interactive greens (smp 1/2).
 Ramfs `/bin` dents 85/128.
 
+## /bin/cal — landed
+
+External thin calendar. Forms: `cal MONTH YEAR` and `cal YEAR` (twelve months
+stacked). Week starts Sunday; Gregorian. No bare `cal` — CLOCK_REALTIME is
+boot-relative (no RTC), so current month is not inferred. Focused virtio login
+smoke covers Nov 2026 / Mar 2024 / year 2024 markers plus prior interactive
+greens (smp 1/2). Ramfs `/bin` dents 86/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
@@ -534,7 +542,7 @@ Ramfs `/bin` dents 85/128.
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
 4. More daily-driver gaps: remaining thin POSIX after inventory (e.g.
-   `cal`/`install -d`; id/groups + factor/clear/tty/whoami + base64 +
-   checksum trio already present) — prefer small coherent chunks.
+   `install`/`install -d`; cal + id/groups + factor/clear/tty/whoami +
+   base64 + checksum trio already present) — prefer small coherent chunks.
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.

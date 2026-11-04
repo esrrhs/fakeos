@@ -463,6 +463,7 @@ def main():
         "[FS] published /bin/whoami (",
         "[FS] published /bin/id (",
         "[FS] published /bin/groups (",
+        "[FS] published /bin/cal (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",
