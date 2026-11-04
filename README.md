@@ -178,7 +178,7 @@ flowchart TD
 - [x] **shell history / `!!` + readline**：环形 32 条；`history`/`!!`；TTY CSI A/B 历史、Left/Right、Home/End、Ctrl-A/E/U。
 - [x] **auth crypt stub**：`/etc/passwd` 支持 `$fake$salt$hash`（FNV-1a）；libc `crypt`/`crypt_check`；默认 root 口令 `root`。
 - [x] **fakecc M5 tip pin 文档**：`docs/ldfake-order3-diagnosis.md` + Makefile/`m5_stage.sh` 明确要求 restage 钉在 `2c1f4525`。
-- [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags/mode 作恢复标记；脏挂载或 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc`/`rename` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
+- [x] **Ext2 journal-lite**：未用 SB 区 magic/gen/flags/mode/jblk 作恢复标记 + 独立 commit 块；脏挂载或无 COMMIT 的 `META_PENDING` 时按位图重计空闲；`create`/`write`/`mkdir`/`unlink`/`rmdir`/`trunc`/`rename` 包围 begin/commit；`sync`/`fsync` 清标记并写 `VALID_FS`（仍非完整 jbd）。
 - [x] **SIGTSTP / Ctrl-Z 作业停止**：`TCB_STOPPED` + `wait4(WUNTRACED)`；TTY ISIG 在 UART/PS2 输入路径拦截 Ctrl-C/Z（wait4 阻塞时也可投递）；shell `jobs`/`fg`/`bg` 续跑 `SIGCONT`。
 - [x] **fsync(2)**：nr 74；Ext2 fd 触发卷级 sync（与 journal-lite 标记配对）。
 - [x] **进程组 / 会话**：`setpgid`/`getpgid`/`setsid`/`getsid`；`kill(0/-pgid)` 广播；TTY Ctrl-C/Z 投递到前台 **pgid**；shell 管道共用一组以便整组停止；`wait4(WCONTINUED)`。
@@ -206,6 +206,7 @@ flowchart TD
 - [x] **Signals polish (SMP delivery)**：用户态 IRQ/IPI 路径经 trap frame 投递自定义 handler；`sched_signal_send` 对远端 `on_cpu` 发 vector-34 kick；sigframe 保存/恢复 RAX；pipe read/write 支持 EINTR 与 SA_RESTART 继续阻塞；自测 `[U][PASS] SIGTERM handler` / `SIGSTOP/CONT` / `pipe read EINTR` / `pipe SA_RESTART`。
 - [x] **IPI reschedule + load-aware balance**：`rq_select_cpu` 优先空闲/低负载 RQ；创建路径 `rq_enqueue_balanced`；wakeup 对空闲 home CPU 发 vector-34；ISR 在内核态 idle 上立即 `pick_next`。`-smp 2` 自测 `[PASS] IPI resched balance`。
 - [x] **Ext2 journal ordered/writeback durability**：`JL_MODE_ORDERED`（默认）在 `jl_commit` 前 `blk_flush`，保证数据先于清除 `META_PENDING`；`WRITEBACK` 跳过提交刷盘（`fsync`/`sync` 仍排空）；SB 持久化 mode；自测 crash-sim `[EXT2] [PASS] journal ordered durability recover`（大文件自测暂切 WRITEBACK 避免每 KiB FLUSH）。
+- [x] **Ext2 journal commit-block**：SB `jblk` 指向一块 OPEN/COMMIT 记录；`jl_commit` 写 `JL_J_COMMIT`（ORDERED 在 COMMIT 前后各 FLUSH）；挂载时若 `META_PENDING` 且 commit 块 gen 匹配则清标记而不 recount；自测 `[EXT2] [PASS] journal commit-block recover`（仍非完整 jbd）。
 - [x] **Ext2 ftruncate(2)**：grow（sparse）/shrink（保留前缀并释放尾块）/zero；自测 `[EXT2] [PASS] ftruncate grow/shrink/zero`。
 - [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。
