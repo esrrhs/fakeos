@@ -1,5 +1,6 @@
-/* fakeos userland - rm: unlink files; -r/-R recursive; -f ignore missing.
- * Glued -rf/-fr accepted. Directories still need -r even with -f.
+/* fakeos userland - rm: unlink files; -r/-R recursive; -f ignore missing;
+ * -v announce each removed path (GNU).
+ * Glued -rfv/-frv/-rv etc. accepted. Directories still need -r even with -f.
  */
 package user;
 
@@ -67,9 +68,9 @@ static void join_path(char *out, unsigned long cap, const char *dir,
     out[i] = 0;
 }
 
-static int rm_path(const char *path, int recursive, int force);
+static int rm_path(const char *path, int recursive, int force, int verbose);
 
-static int rm_dir_rec(const char *path) {
+static int rm_dir_rec(const char *path, int verbose) {
     char dent[DENT_BUF];
     char child[PATH_CAP];
     char names[MAX_NAMES][NAME_LEN];
@@ -112,11 +113,13 @@ static int rm_dir_rec(const char *path) {
 
     for (i = 0; i < nnames; i++) {
         join_path(child, PATH_CAP, path, names[i]);
-        if (rm_path(child, 1, 1) != 0) rc = 1;
+        if (rm_path(child, 1, 1, verbose) != 0) rc = 1;
     }
     if (u_rmdir(path) != 0) {
         printf("rm: %s: cannot remove directory\n", path);
         rc = 1;
+    } else if (verbose) {
+        printf("removed directory '%s'\n", path);
     }
     return rc;
 }
@@ -126,7 +129,7 @@ static int path_exists(const char *path) {
     return u_stat(path, st) == 0;
 }
 
-static int rm_path(const char *path, int recursive, int force) {
+static int rm_path(const char *path, int recursive, int force, int verbose) {
     if (!path_exists(path)) {
         if (force) return 0;
         printf("rm: %s: cannot remove\n", path);
@@ -137,12 +140,15 @@ static int rm_path(const char *path, int recursive, int force) {
             printf("rm: %s: is a directory\n", path);
             return 1;
         }
-        return rm_dir_rec(path);
+        return rm_dir_rec(path, verbose);
     }
     if (u_unlink(path) != 0) {
         if (force && !path_exists(path)) return 0;
         printf("rm: %s: cannot remove\n", path);
         return 1;
+    }
+    if (verbose) {
+        printf("removed '%s'\n", path);
     }
     return 0;
 }
@@ -152,6 +158,7 @@ int main(int argc, char **argv) {
     int ai = 1;
     int recursive = 0;
     int force = 0;
+    int verbose = 0;
     int rc = 0;
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
         const char *o = argv[ai] + 1;
@@ -165,8 +172,10 @@ int main(int argc, char **argv) {
                 recursive = 1;
             } else if (o[j] == 'f') {
                 force = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else {
-                u_write(2, "usage: rm [-rf] FILE...\n", 24);
+                u_write(2, "usage: rm [-rfv] FILE...\n", 25);
                 return 1;
             }
         }
@@ -174,11 +183,11 @@ int main(int argc, char **argv) {
     }
     if (ai >= argc) {
         if (force) return 0; /* GNU: rm -f with no operands succeeds */
-        u_write(2, "usage: rm [-rf] FILE...\n", 24);
+        u_write(2, "usage: rm [-rfv] FILE...\n", 25);
         return 1;
     }
     for (i = ai; i < argc; i++) {
-        if (rm_path(argv[i], recursive, force) != 0) rc = 1;
+        if (rm_path(argv[i], recursive, force, verbose) != 0) rc = 1;
     }
     return rc;
 }
