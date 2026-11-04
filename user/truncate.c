@@ -1,8 +1,10 @@
 /* fakeos userland - truncate: set file size via ftruncate(2) (thin).
- *   truncate -s SIZE FILE...
+ *   truncate [-c] -s SIZE FILE...
  * SIZE is a non-negative decimal integer; optional k/K (=1024), b/B (=512),
- * or M (=1024*1024) suffix (same as dd). Missing files are created (0644).
+ * or M (=1024*1024) suffix (same as dd). Missing files are created (0644)
+ * unless -c (GNU --no-create): then missing paths are skipped (exit 0).
  * Uses open(2) + ftruncate(2); Ext2/Ramfs already implement ftruncate.
+ * Compact argv for EXEC_MAX_ARGC=8 (-c before -s).
  */
 package user;
 
@@ -19,8 +21,10 @@ enum {
     MODE_0644 = 0x1A4
 };
 
+static int opt_c; /* -c: do not create missing files */
+
 static void usage(void) {
-    u_write(2, "usage: truncate -s SIZE FILE...\n", 31);
+    u_write(2, "usage: truncate [-c] -s SIZE FILE...\n", 37);
 }
 
 static int parse_size(const char *s, unsigned long *out) {
@@ -55,24 +59,45 @@ static int parse_size(const char *s, unsigned long *out) {
 
 int main(int argc, char **argv) {
     unsigned long size = 0;
-    int i;
+    int i = 1;
     int rc = 0;
+    long flags;
 
-    if (argc < 4) {
+    opt_c = 0;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (strcmp(argv[i], "-c") == 0) {
+            opt_c = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-s") == 0) {
+            break;
+        }
         usage();
         return 1;
     }
-    if (strcmp(argv[1], "-s") != 0) {
+    if (i + 2 >= argc || strcmp(argv[i], "-s") != 0) {
         usage();
         return 1;
     }
-    if (!parse_size(argv[2], &size)) {
+    if (!parse_size(argv[i + 1], &size)) {
         u_write(2, "truncate: invalid size\n", 23);
         return 1;
     }
-    for (i = 3; i < argc; i++) {
-        long fd = u_open(argv[i], O_WRONLY | O_CREAT, MODE_0644);
+    i += 2;
+    flags = O_WRONLY;
+    if (!opt_c) flags = flags | O_CREAT;
+    for (; i < argc; i++) {
+        long fd = u_open(argv[i], flags, MODE_0644);
         if (fd < 0) {
+            if (opt_c) {
+                /* GNU --no-create: missing is OK, leave size alone. */
+                continue;
+            }
             printf("truncate: %s: cannot open\n", argv[i]);
             rc = 1;
             continue;
