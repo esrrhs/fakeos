@@ -222,7 +222,8 @@ def main():
         "ls -l /bin",       # fstatat mode/size listing
         "ln -s /etc/motd /tmp/motdlink",  # symlink builtin
         "readlink /tmp/motdlink",         # readlink builtin
-        "ls -l /tmp",                     # show l type
+        "realpath /tmp/motdlink",         # physical resolve builtin
+        "ls -l /tmp",                     # show l type + -> target
         "mkdir /home",      # duplicate -> error, shell survives
         "nosuchcmd",        # exec failure -> 127 + not found
         "ls /mnt",          # Ext2 root listing (contains m6pass.txt)
@@ -408,6 +409,7 @@ def main():
         "[U][PASS] mprotect RO/RW",
         "[U][PASS] PROT_NONE + mmap addr hint",
         "[U][PASS] symlink/readlink",
+        "[U][PASS] getcwd physical",
         "[U][PASS] vfs getdents",
         "[U][PASS] execve rejects missing image",
         "[U][PASS] execve rejects non-ELF file",
@@ -477,6 +479,9 @@ def main():
         ("shell && list", "AND_OK\n" in norm and "AND2\n" in norm),
         # pid builtin reports that the shell kept pid 1 across execve
         ("shell keeps pid 1", "pid\n1\n" in norm),
+        ("realpath motdlink", "/etc/motd\n" in norm),
+        ("ls -l symlink arrow", "motdlink -> /etc/motd" in norm),
+        ("getcwd physical init", "[U][PASS] getcwd physical" in out),
         # ls /bin lists all five programs
         ("ls /bin lists init",     "\ninit\n" in norm),
         ("ls /bin lists sh",       "\nsh\n" in norm),
@@ -484,7 +489,8 @@ def main():
         ("ls /bin lists cat",      "\ncat\n" in norm),
         ("ls /bin lists ls",       "\nls\n" in norm),
         # prompt returns after every command
-        ("multiple shell prompts", norm.count("fakeos:~$") >= 14),
+        ("multiple shell prompts",
+         norm.count("fakeos:~$") + norm.count("fakeos:/") >= 14),
         ("userland ping replied", "reply from 10.0.2.2" in norm),
         ("userland udptest loopback", "UDP loopback OK" in norm),
     ]

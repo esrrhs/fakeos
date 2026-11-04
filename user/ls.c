@@ -1,6 +1,7 @@
 /* fakeos userland - ls: list one directory (default: current directory).
  * Parses the kernel's fixed 48-byte dirent records (name at offset 19).
- * Optional -l uses fstatat(dirfd, name) for mode/size (daily-driver). */
+ * Optional -l uses fstatat(dirfd, name) for mode/size; symlinks show
+ * `name -> target` via readlink (daily-driver). */
 package user;
 
 typedef unsigned long u64;
@@ -12,6 +13,7 @@ extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_getdents(long fd, void *buf, unsigned long len);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
+extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern void printf(const char *fmt, ...);
 
 /* Linux x86-64 struct stat field offsets (144 bytes). */
@@ -42,6 +44,35 @@ static unsigned long load_u64(const char *p) {
         v |= ((unsigned long)(unsigned char)p[i]) << (8 * i);
     }
     return v;
+}
+
+
+static void join_dir_name(char *out, unsigned long cap, const char *dir,
+                          const char *name) {
+    unsigned long i = 0;
+    unsigned long j = 0;
+    if (cap < 2) {
+        out[0] = 0;
+        return;
+    }
+    if (dir[0] == '.' && dir[1] == 0) {
+        while (name[j] != 0 && i + 1 < cap) {
+            out[i++] = name[j++];
+        }
+        out[i] = 0;
+        return;
+    }
+    while (dir[i] != 0 && i + 1 < cap) {
+        out[i] = dir[i];
+        i++;
+    }
+    if (i > 0 && out[i - 1] != '/' && i + 1 < cap) {
+        out[i++] = '/';
+    }
+    while (name[j] != 0 && i + 1 < cap) {
+        out[i++] = name[j++];
+    }
+    out[i] = 0;
 }
 
 static char mode_type_char(unsigned int mode) {
@@ -128,7 +159,21 @@ int main(int argc, char **argv) {
                 mode = load_u32(stbuf + ST_MODE);
                 size = load_u64(stbuf + ST_SIZE);
                 mode_string(mode, mstr);
-                if ((mode & S_IFMT) == S_IFDIR) {
+                if ((mode & S_IFMT) == S_IFLNK) {
+                    char full[96];
+                    char tgt[96];
+                    long rn;
+                    join_dir_name(full, sizeof(full), path, name);
+                    rn = u_readlink(full, tgt, sizeof(tgt) - 1);
+                    if (rn >= 0) {
+                        tgt[rn] = 0;
+                        printf("%s %u %s -> %s\n", mstr, (unsigned int)size,
+                               name, tgt);
+                    } else {
+                        printf("%s %u %s -> ?\n", mstr, (unsigned int)size,
+                               name);
+                    }
+                } else if ((mode & S_IFMT) == S_IFDIR) {
                     printf("%s %u %s/\n", mstr, (unsigned int)size, name);
                 } else {
                     printf("%s %u %s\n", mstr, (unsigned int)size, name);

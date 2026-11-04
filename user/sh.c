@@ -1,7 +1,7 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo ($? expansion), cd, pwd, mkdir, rmdir, ln -s, readlink,
- * exit [code], help, jobs, fg, bg. Redirects (> >> <), pipelines (|),
- * && / || lists, and & jobs. */
+ * realpath, exit [code], help, jobs, fg, bg. Prompt shows cwd (~ for home).
+ * Redirects (> >> <), pipelines (|), && / || lists, and & jobs. */
 package user;
 
 typedef unsigned long u64;
@@ -316,6 +316,242 @@ static void pop_redirects(int saved_in, int saved_out) {
     }
 }
 
+
+/* True if `s` starts with `pfx`. */
+static int startswith(const char *s, const char *pfx) {
+    unsigned long i = 0;
+    while (pfx[i] != 0) {
+        if (s[i] != pfx[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
+/* Lexical join of absolute `base` + relative `rel` into out (cap bytes). */
+static int path_join(char *out, unsigned long cap, const char *base,
+                     const char *rel) {
+    unsigned long i = 0;
+    unsigned long j = 0;
+    if (cap < 2) {
+        return 0;
+    }
+    if (rel[0] == '/') {
+        while (rel[j] != 0 && i + 1 < cap) {
+            out[i++] = rel[j++];
+        }
+        out[i] = 0;
+        return 1;
+    }
+    while (base[i] != 0 && i + 1 < cap) {
+        out[i] = base[i];
+        i++;
+    }
+    if (i == 1 && out[0] == '/') {
+        /* root */
+    } else if (i > 0 && out[i - 1] != '/' && i + 1 < cap) {
+        out[i++] = '/';
+    }
+    while (rel[j] != 0 && i + 1 < cap) {
+        out[i++] = rel[j++];
+    }
+    out[i] = 0;
+    return 1;
+}
+
+/* Userland physical resolve via readlink (mirrors kernel path_physical). */
+static int urealpath(const char *in, char *out, unsigned long cap) {
+    char work[128];
+    char prefix[128];
+    char tgt[128];
+    char rebuilt[128];
+    unsigned long loop;
+    unsigned long i;
+    unsigned long nlen;
+
+    if (in == 0 || out == 0 || cap < 2) {
+        return 0;
+    }
+    if (in[0] == '/') {
+        nlen = strlen(in);
+        if (nlen + 1 > sizeof(work)) {
+            return 0;
+        }
+        for (i = 0; i <= nlen; i++) {
+            work[i] = in[i];
+        }
+    } else {
+        char cwd[128];
+        if (u_getcwd(cwd, sizeof(cwd)) == -1) {
+            return 0;
+        }
+        if (!path_join(work, sizeof(work), cwd, in)) {
+            return 0;
+        }
+    }
+
+    for (loop = 0; loop < 8; loop++) {
+        int found = 0;
+        unsigned long wi = 0;
+        prefix[0] = '/';
+        prefix[1] = 0;
+        while (work[wi] != 0) {
+            unsigned long start;
+            unsigned long n;
+            long rn;
+            while (work[wi] == '/') {
+                wi++;
+            }
+            if (work[wi] == 0) {
+                break;
+            }
+            start = wi;
+            n = 0;
+            while (work[wi + n] != 0 && work[wi + n] != '/') {
+                n++;
+            }
+            if (n == 1 && work[start] == '.') {
+                wi += n;
+                continue;
+            }
+            if (n == 2 && work[start] == '.' && work[start + 1] == '.') {
+                /* pop last component of prefix */
+                unsigned long L = strlen(prefix);
+                if (L > 1) {
+                    L--;
+                    while (L > 0 && prefix[L] != '/') {
+                        L--;
+                    }
+                    if (L == 0) {
+                        prefix[0] = '/';
+                        prefix[1] = 0;
+                    } else {
+                        prefix[L] = 0;
+                    }
+                }
+                wi += n;
+                continue;
+            }
+            {
+                char comp[64];
+                char joined[128];
+                unsigned long c;
+                if (n >= sizeof(comp)) {
+                    return 0;
+                }
+                for (c = 0; c < n; c++) {
+                    comp[c] = work[start + c];
+                }
+                comp[n] = 0;
+                if (!path_join(joined, sizeof(joined), prefix, comp)) {
+                    return 0;
+                }
+                for (c = 0; joined[c] != 0; c++) {
+                    prefix[c] = joined[c];
+                }
+                prefix[c] = 0;
+            }
+            wi += n;
+            rn = u_readlink(prefix, tgt, sizeof(tgt) - 1);
+            if (rn >= 0) {
+                const char *rest;
+                tgt[rn] = 0;
+                if (tgt[0] == '/') {
+                    nlen = strlen(tgt);
+                    if (nlen + 1 > sizeof(rebuilt)) {
+                        return 0;
+                    }
+                    for (i = 0; i <= nlen; i++) {
+                        rebuilt[i] = tgt[i];
+                    }
+                } else {
+                    /* parent of prefix + relative tgt */
+                    unsigned long L = strlen(prefix);
+                    char parent[128];
+                    if (L > 1) {
+                        L--;
+                        while (L > 0 && prefix[L] != '/') {
+                            L--;
+                        }
+                        if (L == 0) {
+                            parent[0] = '/';
+                            parent[1] = 0;
+                        } else {
+                            unsigned long p;
+                            for (p = 0; p < L; p++) {
+                                parent[p] = prefix[p];
+                            }
+                            parent[L] = 0;
+                        }
+                    } else {
+                        parent[0] = '/';
+                        parent[1] = 0;
+                    }
+                    if (!path_join(rebuilt, sizeof(rebuilt), parent, tgt)) {
+                        return 0;
+                    }
+                }
+                rest = &work[wi];
+                while (rest[0] == '/') {
+                    rest++;
+                }
+                if (rest[0] != 0) {
+                    char combined[128];
+                    if (!path_join(combined, sizeof(combined), rebuilt, rest)) {
+                        return 0;
+                    }
+                    nlen = strlen(combined);
+                    for (i = 0; i <= nlen; i++) {
+                        rebuilt[i] = combined[i];
+                    }
+                }
+                nlen = strlen(rebuilt);
+                if (nlen + 1 > sizeof(work)) {
+                    return 0;
+                }
+                for (i = 0; i <= nlen; i++) {
+                    work[i] = rebuilt[i];
+                }
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            nlen = strlen(work);
+            if (nlen + 1 > cap) {
+                return 0;
+            }
+            for (i = 0; i <= nlen; i++) {
+                out[i] = work[i];
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void print_prompt(void) {
+    char cwd[128];
+    if (u_getcwd(cwd, sizeof(cwd)) == -1) {
+        u_write(1, "fakeos:$ ", 9);
+        return;
+    }
+    if (eq(cwd, "/home") || eq(cwd, "/mnt/home")) {
+        u_write(1, "fakeos:~$ ", 10);
+        return;
+    }
+    if (startswith(cwd, "/home/")) {
+        printf("fakeos:~/%s$ ", cwd + 6);
+        return;
+    }
+    if (startswith(cwd, "/mnt/home/")) {
+        printf("fakeos:~/%s$ ", cwd + 10);
+        return;
+    }
+    printf("fakeos:%s$ ", cwd);
+}
+
 static int is_builtin(const char *cmd) {
     return eq(cmd, "echo") || eq(cmd, "cd") || eq(cmd, "pwd") ||
            eq(cmd, "mkdir") || eq(cmd, "rmdir") || eq(cmd, "exit") ||
@@ -323,7 +559,7 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "uname") || eq(cmd, "sleep") || eq(cmd, "sync") ||
            eq(cmd, "clear") || eq(cmd, "history") || eq(cmd, "jobs") ||
            eq(cmd, "fg") || eq(cmd, "bg") || eq(cmd, "kill") ||
-           eq(cmd, "ln") || eq(cmd, "readlink");
+           eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath");
 }
 
 /* Default PATH directories (colon-separated). */
@@ -437,7 +673,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo, cd, mkdir, rmdir, pwd, pid, ppid, uname, sleep, ln, readlink, realpath, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login (PATH=/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history");
@@ -536,7 +772,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "pwd")) {
-        char buf[64];
+        char buf[128];
         if (u_getcwd(buf, sizeof(buf)) == -1) {
             puts("sh: pwd failed");
             rc = 1;
@@ -623,6 +859,18 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 puts(buf);
                 rc = 0;
             }
+        }
+    } else if (eq(tokens[0], "realpath")) {
+        char buf[128];
+        if (tokens[1] == 0) {
+            puts("sh: realpath: missing operand");
+            rc = 1;
+        } else if (!urealpath(tokens[1], buf, sizeof(buf))) {
+            puts("sh: realpath: failed");
+            rc = 1;
+        } else {
+            puts(buf);
+            rc = 0;
         }
     }
     pop_redirects(saved_in, saved_out);
@@ -980,15 +1228,7 @@ int main(int argc, char **argv) {
 
         reap_background();
 
-        {
-            char cwd[64];
-            if (u_getcwd(cwd, sizeof(cwd)) != -1
-                && (eq(cwd, "/home") || eq(cwd, "/mnt/home"))) {
-                u_write(1, "fakeos:~$ ", 10);
-            } else {
-                u_write(1, "fakeos:$ ", 9);
-            }
-        }
+        print_prompt();
 
         shell_claim_tty();
         n = u_read(0, line, sizeof(line) - 1);

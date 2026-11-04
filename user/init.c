@@ -27,6 +27,8 @@ extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_getdents(long fd, void *buf, unsigned long len);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
+extern long u_rmdir(const char *path);
+extern long u_getcwd(char *buf, unsigned long len);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
 extern long u_unlink(const char *path);
@@ -1817,6 +1819,85 @@ static void symlink_test(void) {
     puts("[U][PASS] symlink/readlink");
 }
 
+static void getcwd_test(void) {
+    char buf[128];
+    long n;
+
+    u_unlink("/tmp/gcwd_link");
+    u_rmdir("/tmp/gcwd_real");
+    if (u_mkdir("/tmp/gcwd_real") != 0) {
+        puts("[U][FAIL] getcwd mkdir");
+        return;
+    }
+    if (u_symlink("/tmp/gcwd_real", "/tmp/gcwd_link") != 0) {
+        puts("[U][FAIL] getcwd symlink");
+        return;
+    }
+    if (u_chdir("/tmp/gcwd_link") != 0) {
+        puts("[U][FAIL] getcwd chdir link");
+        return;
+    }
+    if (u_getcwd(buf, sizeof(buf)) == -1) {
+        puts("[U][FAIL] getcwd after link chdir");
+        return;
+    }
+    /* Physical: /tmp/gcwd_real (14 chars). */
+    n = 0;
+    while (buf[n] != 0) n++;
+    if (n != 14 || buf[0] != '/' || buf[5] != 'g' || buf[10] != 'r'
+        || buf[13] != 'l') {
+        puts("[U][FAIL] getcwd not physical");
+        return;
+    }
+    if (u_chdir("..") != 0) {
+        puts("[U][FAIL] getcwd cd ..");
+        return;
+    }
+    if (u_getcwd(buf, sizeof(buf)) == -1) {
+        puts("[U][FAIL] getcwd after ..");
+        return;
+    }
+    n = 0;
+    while (buf[n] != 0) n++;
+    if (n != 4 || buf[0] != '/' || buf[1] != 't' || buf[3] != 'p') {
+        puts("[U][FAIL] getcwd parent not /tmp");
+        return;
+    }
+    u_unlink("/tmp/gcwd_link");
+    u_rmdir("/tmp/gcwd_real");
+
+    /* Ext2 physical cwd when mounted. */
+    u_unlink("/mnt/gcwd_link");
+    u_rmdir("/mnt/gcwd_real");
+    if (u_mkdir("/mnt/gcwd_real") == 0) {
+        if (u_symlink("/mnt/gcwd_real", "/mnt/gcwd_link") != 0) {
+            puts("[U][FAIL] Ext2 getcwd symlink");
+            return;
+        }
+        if (u_chdir("/mnt/gcwd_link") != 0) {
+            puts("[U][FAIL] Ext2 getcwd chdir link");
+            return;
+        }
+        if (u_getcwd(buf, sizeof(buf)) == -1) {
+            puts("[U][FAIL] Ext2 getcwd");
+            return;
+        }
+        n = 0;
+        while (buf[n] != 0) n++;
+        if (n != 14 || buf[1] != 'm' || buf[5] != 'g' || buf[13] != 'l') {
+            puts("[U][FAIL] Ext2 getcwd not physical");
+            return;
+        }
+        puts("[U] Ext2 getcwd physical OK");
+        u_chdir("/mnt");
+        u_unlink("/mnt/gcwd_link");
+        u_rmdir("/mnt/gcwd_real");
+    }
+
+    puts("[U][PASS] getcwd physical");
+}
+
+
 int main(int argc, char **argv) {
     char *sh_argv[2];
     long pid = u_getpid();
@@ -1853,6 +1934,7 @@ int main(int argc, char **argv) {
     proc_self_test();
     stat_test();
     symlink_test();
+    getcwd_test();
     dirent_test();
     bad_exec_test();
     wrap_len_test();

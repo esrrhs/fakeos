@@ -20,7 +20,7 @@ typedef types.int32_t s32;
 
 enum {
     PATH_KMAX  = 128,
-    CWD_LEN    = 64,
+    CWD_LEN    = 128,
     IO_CHUNK   = 4096,
     DENT_CHUNK = 1920,             /* 40 x 48-byte dirent records */
     FD_BAD     = 0xFFFFFFFF,
@@ -33,7 +33,9 @@ enum {
 
     SEEK_SET = 0,
     SEEK_CUR = 1,
-    SEEK_END = 2
+    SEEK_END = 2,
+
+    SYMLOOP_MAX_CWD = 8          /* match fs SYMLOOP_MAX for physical cwd */
 };
 
 /* sched.c (same package) */
@@ -212,6 +214,130 @@ u32 copy_user_cstring(char *dst, u64 uva, u32 maxlen) {
         }
     }
     return 0;                        /* no NUL within maxlen */
+}
+
+
+/* Kernel readlink for an absolute path (Ramfs or Ext2). */
+static u64 k_readlink(const char *path, char *kbuf, u64 bufsiz) {
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted()) {
+            return (u64)(-1);
+        }
+        return fs.ext2_readlink(path, kbuf, bufsiz);
+    }
+    return fs.fs_readlink(path, kbuf, bufsiz);
+}
+
+/* Follow every symlink component of absolute `in` into `out` (physical path).
+ * Used by chdir so getcwd matches Linux physical cwd / cd .. semantics. */
+static u32 path_physical(const char *in, char *out, u32 cap) {
+    char work[PATH_KMAX];
+    char prefix[PATH_KMAX];
+    char tgt[PATH_KMAX];
+    char rebuilt[PATH_KMAX];
+    char combined[PATH_KMAX];
+    u32 loop;
+    u32 i;
+    u32 nlen;
+
+    if (in == 0 || out == 0 || cap < 2 || in[0] != '/') {
+        return 0;
+    }
+    nlen = kstr_len(in);
+    if (nlen + 1 > PATH_KMAX) {
+        return 0;
+    }
+    for (i = 0; i <= nlen; i++) {
+        work[i] = in[i];
+    }
+
+    for (loop = 0; loop < SYMLOOP_MAX_CWD; loop++) {
+        u32 found = 0;
+        u32 wi = 0;
+        prefix[0] = '/';
+        prefix[1] = 0;
+
+        while (work[wi] != 0) {
+            u32 start;
+            u32 n;
+            u64 rn;
+            while (work[wi] == '/') {
+                wi++;
+            }
+            if (work[wi] == 0) {
+                break;
+            }
+            start = wi;
+            n = 0;
+            while (work[wi + n] != 0 && work[wi + n] != '/') {
+                n++;
+                if (n >= PATH_KMAX) {
+                    return 0;
+                }
+            }
+            if (n == 1 && work[start] == '.') {
+                wi += n;
+                continue;
+            }
+            if (n == 2 && work[start] == '.' && work[start + 1] == '.') {
+                canon_pop(prefix);
+                wi += n;
+                continue;
+            }
+            if (!canon_push(prefix, &work[start], n, PATH_KMAX)) {
+                return 0;
+            }
+            wi += n;
+
+            rn = k_readlink(prefix, tgt, PATH_KMAX - 1);
+            if (rn != (u64)(-1)) {
+                u32 k;
+                const char *rest;
+                tgt[(u32)rn] = 0;
+                if (tgt[0] == '/') {
+                    if (!canon_path("/", tgt, rebuilt, PATH_KMAX)) {
+                        return 0;
+                    }
+                } else {
+                    canon_pop(prefix);
+                    if (!canon_path(prefix, tgt, rebuilt, PATH_KMAX)) {
+                        return 0;
+                    }
+                }
+                rest = &work[wi];
+                while (rest[0] == '/') {
+                    rest++;
+                }
+                if (rest[0] != 0) {
+                    if (!canon_path(rebuilt, rest, combined, PATH_KMAX)) {
+                        return 0;
+                    }
+                    for (k = 0; combined[k] != 0; k++) {
+                        rebuilt[k] = combined[k];
+                    }
+                    rebuilt[k] = 0;
+                }
+                for (k = 0; rebuilt[k] != 0; k++) {
+                    work[k] = rebuilt[k];
+                }
+                work[k] = 0;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            u32 k;
+            if (kstr_len(work) + 1 > cap) {
+                return 0;
+            }
+            for (k = 0; work[k] != 0; k++) {
+                out[k] = work[k];
+            }
+            out[k] = 0;
+            return 1;
+        }
+    }
+    return 0;                        /* ELOOP */
 }
 
 /* Copy a NUL-terminated path from user space and resolve it against the
@@ -623,6 +749,8 @@ u64 sys_rmdir(u64 upath) {
 
 u64 sys_chdir(u64 upath) {
     char path[PATH_KMAX];
+    char phys[PATH_KMAX];
+    const char *store;
     u32 ino;
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
@@ -644,10 +772,16 @@ u64 sys_chdir(u64 upath) {
             return (u64)(-1);
         }
     }
-    if (kstr_len(path) >= CWD_LEN) {
+    /* Store physical path so getcwd/cd .. match Linux (follow final links). */
+    if (path_physical(path, phys, PATH_KMAX)) {
+        store = phys;
+    } else {
+        store = path;                /* fallback: lexical (should be rare) */
+    }
+    if (kstr_len(store) >= CWD_LEN) {
         return (u64)(-1);            /* would silently truncate the cwd */
     }
-    sched_cwd_set(path);
+    sched_cwd_set(store);
     return 0;
 }
 

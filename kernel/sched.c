@@ -63,7 +63,7 @@ enum {
 
     FD_MAX       = 16,
     FD_EMPTY     = 0xFFFFFFFF,
-    CWD_LEN      = 64
+    CWD_LEN      = 128
 };
 
 struct tcb {

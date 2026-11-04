@@ -124,7 +124,7 @@ flowchart TD
 - [x] **串口 TTY 标准输入**：COM1 接收实现 canonical 行规程（256B 行缓冲、字符回显、`\r`/`\n` 兼容、退格编辑、缓冲满强制收行），无输入时 yield 让出；`read(0)` 阻塞至行结束，残余字节留待下次读取。QEMU 串口管道可直接注入命令，Shell 端到端回归无头自动化。
 - [x] **PS/2 键盘硬件驱动与按键中断**：IRQ1 set-1 扫描码经 I/O APIC→vector 33，与串口共享 TTY 行规程（见下方 daily-driver 条目）。
 - [x] **自研用户态 libc 与 crt0**：单一 `package user` 提供全部 syscall 汇编包装（注意第 4 参 RCX→R10 搬移）、mem/string 例程、mini_printf（%s/%d/%u/%x/%c）、brk bump + first-fit 的 malloc/free；crt0 从初始栈取 argc/argv 调 `main`，返回值即退出码。
-- [x] **交互式 /bin/sh 与用户程序**：提示符 `fakeos:~$`、空格分词、内建 `echo`（含 `$?`）/`cd`/`mkdir`/`pwd`/`help`/`exit [code]`；外部命令自动加 `/bin` 前缀，fork+execve+wait4 同步执行并传递退出状态；附带 `/bin/hello`（退出码 42）、`/bin/cat`、`/bin/ls`。启动序列为内核装载 pid 1 = /bin/init（完成阶段三/四全部用户态自测）后 `execve` 到 /bin/sh，`exit` 后内核打印里程碑 SUCCESS。
+- [x] **交互式 /bin/sh 与用户程序**：提示符 `fakeos:~$`（cwd；`~` 缩写 home）、空格分词、内建 `echo`（含 `$?`）/`cd`/`mkdir`/`pwd`/`help`/`exit [code]`；外部命令自动加 `/bin` 前缀，fork+execve+wait4 同步执行并传递退出状态；附带 `/bin/hello`（退出码 42）、`/bin/cat`、`/bin/ls`。启动序列为内核装载 pid 1 = /bin/init（完成阶段三/四全部用户态自测）后 `execve` 到 /bin/sh，`exit` 后内核打印里程碑 SUCCESS。
 
 ### 阶段五：fakecc 自举与生态全闭环（Milestone 5 · 已就绪）
 - [x] **文件系统与进程环境完备化**：补齐 `munmap`（VMA 拆分/截断与帧归还）、`unlink`、`chmod`、`gettid`、`exit_group`、`futex`（WAIT/WAKE；pthread_mutex 已用）等系统调用；Ramfs 扩容至 256 inode / 64 目录项 / 16 MiB 文件；发布 `/proc/self/environ`（`FAKECC_PKG=/src`）。
@@ -204,6 +204,7 @@ flowchart TD
 - [x] **/proc/self/{status,maps,cmdline}**：在已有 `environ` 旁增加动态节点（open 时快照）；`status`/`maps`/`cmdline`；自测 `[U][PASS] /proc/self status/maps/cmdline`
 - [x] **getppid/uname/nanosleep/clock_gettime**：Linux nr 110/63/35/228；utsname 6×65；100 Hz tick 时间（无 RTC 时 REALTIME≈MONOTONIC）；shell `ppid`/`uname`/`sleep`；自测 `[U][PASS] getppid/uname/nanosleep/clock_gettime`
 - [x] **symlink/readlink**：Linux nr 88/89；Ramfs+Ext2；`lstat`/`AT_SYMLINK_NOFOLLOW`；shell `ln -s`/`readlink`；`nice` 改 fakeos nr 503；自测 `[U][PASS] symlink/readlink`
+- [x] **getcwd physical + shell cwd prompt + ls -l ->**：`chdir` 存物理路径（`CWD_LEN=128`）；提示符显示 cwd（`~` 缩写 `/home`）；`realpath` builtin；`ls -l` 对符号链接显示 `name -> target`；自测 `[U][PASS] getcwd physical`
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
 - [x] **AHCI async NCQ**：每槽 bounce（depth 4）+ 单次传输内多 outstanding FPDMA；`ahci_selftest` 写读尾扇区；`make qemu-ahci` 见 `[AHCI] [PASS] async NCQ multi-outstanding`（块层 API 仍同步序列化）。
 - [x] **AHCI bio queue（跨调用方）**：共享 bio 队列（8）让多个同步调用方共用 NCQ 窗口；`ahci_selftest` 双 bio 重叠提交；`make qemu-ahci` 见 `[AHCI] [PASS] bio queue cross-caller`。

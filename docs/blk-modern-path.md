@@ -117,9 +117,17 @@ targets are remapped through `/mnt`/`/home` `persist_rel`. `lstat` /
 Shell builtins: `ln -s`, `readlink`. `ls -l` uses NOFOLLOW and shows `l`.
 Init smoke: `[U][PASS] symlink/readlink` (Ramfs + Ext2 when mounted).
 
+## getcwd physical + shell path prompt + ls -l -> — landed
+
+`chdir` stores a **physical** cwd (follow every symlink component; `CWD_LEN=128`
+matches `PATH_KMAX`). `getcwd`/`pwd`/`cd ..` then match Linux physical semantics.
+Shell prompt prints the cwd (`fakeos:~$` / `fakeos:~/sub$` / `fakeos:/path$`).
+Builtin `realpath`; `ls -l` shows `name -> target` via readlink. Init smoke:
+`[U][PASS] getcwd physical` (Ramfs + Ext2 when mounted).
+
 ## Suggested next steps
 
-1. getcwd polish / richer shell niceties — scan README daily-driver wants.
-2. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
-3. Deep jbd — avoid unless needed.
-4. Optional: `readlink` in `ls -l` arrow display / `realpath`.
+1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
+2. Deep jbd — avoid unless needed.
+3. Richer shell niceties if still thin (tab completion, `which`, env/`export`).
+4. Optional: timestamps / multi-column `ls` polish.
