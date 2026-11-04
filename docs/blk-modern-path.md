@@ -573,15 +573,27 @@ external mkdir/rm family. Focused virtio login smoke covers Ramfs+Ext2 empty
 rmdir, unlink file, refuse unlink-on-dir / rmdir-on-file, plus prior interactive
 greens (smp 1/2). Ramfs `/bin` dents 94/128.
 
+## /bin/tsort + /bin/pathchk — landed
+
+Thin POSIX pair for scripts/Make-ish graphs and pathname checks. `tsort
+[FILE...]` reads whitespace-separated predecessor/successor pairs (stdin if
+no FILE; odd trailing token is a lone node) and prints a topological order;
+cycles diagnose on stderr. `pathchk [-p] PATH...` rejects empty paths; default
+limits are PATH<=4095 / component<=255; `-p` uses portable charset
+`[A-Za-z0-9._-]` with `_POSIX_PATH_MAX=256` / `_POSIX_NAME_MAX=14` (no
+pathconf yet). Focused virtio login smoke covers tsort diamond + cycle,
+pathchk ok/`-p` reject, plus prior interactive greens (smp 1/2). Ramfs `/bin`
+dents 96/128.
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (rmdir/unlink +
-   tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
+4. More daily-driver gaps: remaining thin POSIX after inventory (tsort/pathchk +
+   rmdir/unlink + tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
    factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
-   small coherent chunks such as `tsort`/`pathchk`, `logname`/`nohup`, or
-   cp/mv polish. Avoid deep jbd / Ext2-redirect duplex races / CFS nesting
-   unless a clear bite-sized fix.
+   small coherent chunks such as `logname`/`nohup`, or cp/mv polish / `rmdir -p`.
+   Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
+   bite-sized fix.

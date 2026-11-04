@@ -472,6 +472,8 @@ def main():
         "[FS] published /bin/timeout (",
         "[FS] published /bin/rmdir (",
         "[FS] published /bin/unlink (",
+        "[FS] published /bin/tsort (",
+        "[FS] published /bin/pathchk (",
         "[FS] published /proc/cpuinfo (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
