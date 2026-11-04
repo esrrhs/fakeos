@@ -435,6 +435,8 @@ def main():
         "[FS] published /bin/realpath (",
         "[FS] published /bin/date (",
         "[FS] published /bin/stat (",
+        "[FS] published /bin/nl (",
+        "[FS] published /bin/fold (",
         "[FS] published /bin/printenv (",
         "[FS] published /etc/motd (",
         "[FS] published /etc/resolv.conf (",

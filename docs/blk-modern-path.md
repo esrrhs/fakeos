@@ -381,12 +381,22 @@ type/mode/ino/nlink/uid/gid/size/mtime via `lstat(2)` (default) or `stat(2)`
 with `-L`. Focused virtio login smoke covers `/bin/date`, `/bin/stat` on file
 and symlink (+ `-L`), `xargs /bin/stat`, plus prior interactive greens (smp 1/2).
 
+## /bin/nl + /bin/fold — landed
+
+Thin text-pipeline pair. `nl [-b a|t|-ba|-bt] [-v START|-vN] [-w WIDTH|-wN] [-s SEP|-sSEP] [FILE...]`
+numbers body lines (default `-b t` non-empty, `-v 1`, `-w 6`, tab sep).
+Compact glued forms keep argv under `EXEC_MAX_ARGC=8`.
+`fold [-w WIDTH] [-s] [FILE...]` wraps to WIDTH columns (default 80; `-s`
+breaks at the last blank before WIDTH when possible). Focused virtio login
+smoke covers `seq | nl`, `nl -ba -v10 -w2 -s:`, `fold -w`, `fold -s`,
+pipeline `nl | fold`, plus prior interactive greens (smp 1/2).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: thin utils (`mktemp`, `nl`/`fold`/`rev`/`paste`).
+4. More daily-driver gaps: thin utils (`mktemp`, `rev`/`paste`).
    Avoid deep jbd / Ext2-redirect duplex races / CFS nesting unless a clear
    bite-sized fix.
