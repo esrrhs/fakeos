@@ -1,8 +1,9 @@
-/* fakeos userland - UDP/TCP netcat.
- *   nc -u -l PORT          UDP listen
- *   nc -u HOST PORT        UDP send stdin lines
- *   nc -l PORT             TCP listen (one accept, echo payload to stdout)
- *   nc HOST PORT           TCP connect; stdin -> send, recv -> stdout
+/* fakeos userland - UDP/TCP netcat with select duplex + shutdown half-close.
+ *   nc -u -l PORT          UDP listen (reply to last peer; stdin EOF exits)
+ *   nc -u HOST PORT        UDP connected duplex
+ *   nc -l PORT             TCP listen (one accept, then duplex)
+ *   nc HOST PORT           TCP connect duplex
+ * On stream stdin EOF: shutdown(SHUT_WR) and keep reading until peer EOF.
  */
 package user;
 
@@ -15,6 +16,9 @@ extern long u_sendto(long fd, const void *buf, unsigned long len, long flags,
                      const void *addr, unsigned long alen);
 extern long u_recvfrom(long fd, void *buf, unsigned long len, long flags,
                        void *addr, unsigned int *alen);
+extern long u_shutdown(long fd, long how);
+extern long u_select(long nfds, void *readfds, void *writefds, void *exceptfds,
+                     void *timeout);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_close(long fd);
@@ -25,7 +29,11 @@ extern int resolve_host(const char *name, unsigned int *out);
 enum {
     AF_INET = 2,
     SOCK_STREAM = 1,
-    SOCK_DGRAM = 2
+    SOCK_DGRAM = 2,
+    SHUT_RD = 0,
+    SHUT_WR = 1,
+    SHUT_RDWR = 2,
+    EINTR_SEL = -4
 };
 
 static int parse_ipv4(const char *s, unsigned int *out) {
@@ -90,12 +98,170 @@ static void usage(void) {
     u_write(2, "usage: nc [-u] -l PORT | nc [-u] HOST PORT\n", 44);
 }
 
+static void fdset_zero(unsigned long *set) {
+    *set = 0;
+}
+
+static void fdset_set(unsigned long *set, int fd) {
+    *set |= (unsigned long)1 << fd;
+}
+
+static int fdset_isset(unsigned long set, int fd) {
+    return (set & ((unsigned long)1 << fd)) != 0;
+}
+
+/* Copy 16-byte sockaddr_in. */
+static void addr_copy(unsigned char *dst, const unsigned char *src) {
+    int i;
+    for (i = 0; i < 16; i++) dst[i] = src[i];
+}
+
+/* Connected stream/dgram relay. Stream: stdin EOF -> shutdown(WR), keep RX
+ * until peer EOF; peer EOF ends the session even if stdin is still open
+ * (do not park forever on a TTY). Dgram: stdin EOF ends the session. */
+static int relay_duplex(long sock, int is_stream) {
+    int stdin_open = 1;
+
+    while (1) {
+        unsigned long rfds;
+        long nready;
+        int nfds;
+
+        if (!is_stream && !stdin_open) return 0;
+
+        fdset_zero(&rfds);
+        nfds = 0;
+        if (stdin_open) {
+            fdset_set(&rfds, 0);
+            nfds = 1;
+        }
+        fdset_set(&rfds, (int)sock);
+        if ((int)sock + 1 > nfds) nfds = (int)sock + 1;
+
+        nready = u_select((long)nfds, &rfds, 0, 0, 0);
+        if (nready == EINTR_SEL) continue;
+        if (nready < 0) {
+            u_write(2, "nc: select failed\n", 18);
+            return 1;
+        }
+        if (nready == 0) continue;
+
+        if (stdin_open && fdset_isset(rfds, 0)) {
+            char buf[512];
+            long n = u_read(0, buf, 512);
+            if (n < 0) {
+                u_write(2, "nc: stdin read failed\n", 22);
+                return 1;
+            }
+            if (n == 0) {
+                if (is_stream) {
+                    u_shutdown(sock, SHUT_WR);
+                } else {
+                    return 0;
+                }
+                stdin_open = 0;
+            } else {
+                long w = u_sendto(sock, buf, (unsigned long)n, 0, 0, 0);
+                if (w != n) {
+                    u_write(2, "nc: send failed\n", 16);
+                    return 1;
+                }
+            }
+        }
+
+        if (fdset_isset(rfds, (int)sock)) {
+            char buf[512];
+            long n = u_recvfrom(sock, buf, 512, 0, 0, 0);
+            if (n < 0) {
+                u_write(2, "nc: recv failed\n", 16);
+                return 1;
+            }
+            if (n == 0) {
+                return 0; /* peer EOF / FIN: done */
+            }
+            if (u_write(1, buf, (unsigned long)n) < 0) {
+                u_write(2, "nc: write failed\n", 17);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* UDP listen: select on stdin + sock; reply to last peer; stdin EOF exits. */
+static int udp_listen_duplex(long s) {
+    int stdin_open = 1;
+    int have_peer = 0;
+    unsigned char peer[16];
+    unsigned int peerlen = 16;
+
+    while (stdin_open) {
+        unsigned long rfds;
+        long nready;
+        int nfds;
+
+        fdset_zero(&rfds);
+        fdset_set(&rfds, 0);
+        fdset_set(&rfds, (int)s);
+        nfds = (int)s + 1;
+        if (nfds < 1) nfds = 1;
+
+        nready = u_select((long)nfds, &rfds, 0, 0, 0);
+        if (nready == EINTR_SEL) continue;
+        if (nready < 0) {
+            u_write(2, "nc: select failed\n", 18);
+            return 1;
+        }
+
+        if (fdset_isset(rfds, (int)s)) {
+            char buf[512];
+            unsigned char from[16];
+            unsigned int fromlen = 16;
+            long n = u_recvfrom(s, buf, 512, 0, from, &fromlen);
+            if (n < 0) {
+                u_write(2, "nc: recvfrom failed\n", 20);
+                return 1;
+            }
+            if (n > 0) {
+                addr_copy(peer, from);
+                peerlen = fromlen;
+                have_peer = 1;
+                if (u_write(1, buf, (unsigned long)n) < 0) {
+                    u_write(2, "nc: write failed\n", 17);
+                    return 1;
+                }
+            }
+        }
+
+        if (fdset_isset(rfds, 0)) {
+            char buf[512];
+            long n = u_read(0, buf, 512);
+            if (n < 0) {
+                u_write(2, "nc: stdin read failed\n", 22);
+                return 1;
+            }
+            if (n == 0) {
+                stdin_open = 0;
+            } else if (have_peer) {
+                long w = u_sendto(s, buf, (unsigned long)n, 0, peer, peerlen);
+                if (w != n) {
+                    u_write(2, "nc: sendto failed\n", 18);
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static int tcp_listen_mode(unsigned int port) {
     long s;
     long c;
     unsigned char addr[16];
     unsigned char from[16];
     unsigned int fromlen = 16;
+    int rc;
+
     make_addr(addr, 0, (unsigned short)port);
     s = u_socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
@@ -104,36 +270,32 @@ static int tcp_listen_mode(unsigned int port) {
     }
     if (u_bind(s, addr, 16) != 0) {
         u_write(2, "nc: bind failed\n", 16);
+        u_close(s);
         return 1;
     }
     if (u_listen(s, 1) != 0) {
         u_write(2, "nc: listen failed\n", 18);
+        u_close(s);
         return 1;
     }
     printf("TCP listen on %u\n", port);
     c = u_accept(s, from, &fromlen);
     if (c < 0) {
         u_write(2, "nc: accept failed\n", 18);
+        u_close(s);
         return 1;
     }
     u_close(s);
-    for (;;) {
-        char buf[512];
-        long n = u_recvfrom(c, buf, 512, 0, 0, 0);
-        if (n < 0) {
-            u_write(2, "nc: recv failed\n", 16);
-            return 1;
-        }
-        if (n == 0) break;
-        u_write(1, buf, (unsigned long)n);
-    }
+    rc = relay_duplex(c, 1);
     u_close(c);
-    return 0;
+    return rc;
 }
 
 static int tcp_client_mode(unsigned int ip, unsigned int port) {
     long s;
     unsigned char addr[16];
+    int rc;
+
     make_addr(addr, ip, (unsigned short)port);
     s = u_socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
@@ -142,21 +304,12 @@ static int tcp_client_mode(unsigned int ip, unsigned int port) {
     }
     if (u_connect(s, addr, 16) != 0) {
         u_write(2, "nc: connect failed\n", 19);
+        u_close(s);
         return 1;
     }
-    for (;;) {
-        char line[256];
-        long n = u_read(0, line, 256);
-        long w;
-        if (n <= 0) break;
-        w = u_sendto(s, line, (unsigned long)n, 0, 0, 0);
-        if (w != n) {
-            u_write(2, "nc: send failed\n", 16);
-            return 1;
-        }
-    }
+    rc = relay_duplex(s, 1);
     u_close(s);
-    return 0;
+    return rc;
 }
 
 int main(int argc, char **argv) {
@@ -167,6 +320,7 @@ int main(int argc, char **argv) {
     unsigned char addr[16];
     unsigned int port;
     unsigned int ip;
+    int rc;
 
     while (i < argc) {
         if (strcmp(argv[i], "-u") == 0) {
@@ -203,46 +357,32 @@ int main(int argc, char **argv) {
     if (listen) {
         if (i >= argc || !parse_port(argv[i], &port)) {
             usage();
+            u_close(s);
             return 1;
         }
         make_addr(addr, 0, (unsigned short)port);
         if (u_bind(s, addr, 16) != 0) {
             u_write(2, "nc: bind failed\n", 16);
+            u_close(s);
             return 1;
         }
         printf("UDP listen on %u\n", port);
-        for (;;) {
-            char buf[512];
-            unsigned char from[16];
-            unsigned int fromlen = 16;
-            long n = u_recvfrom(s, buf, 512, 0, from, &fromlen);
-            if (n < 0) {
-                u_write(2, "nc: recvfrom failed\n", 20);
-                return 1;
-            }
-            if (n > 0) u_write(1, buf, (unsigned long)n);
-        }
+        rc = udp_listen_duplex(s);
+        u_close(s);
+        return rc;
     }
     if (i + 1 >= argc || !resolve_host(argv[i], &ip) || !parse_port(argv[i + 1], &port)) {
         usage();
+        u_close(s);
         return 1;
     }
     make_addr(addr, ip, (unsigned short)port);
     if (u_connect(s, addr, 16) != 0) {
         u_write(2, "nc: connect failed\n", 19);
+        u_close(s);
         return 1;
     }
-    for (;;) {
-        char line[256];
-        long n = u_read(0, line, 256);
-        long w;
-        if (n <= 0) break;
-        w = u_sendto(s, line, (unsigned long)n, 0, 0, 0);
-        if (w != n) {
-            u_write(2, "nc: sendto failed\n", 18);
-            return 1;
-        }
-    }
+    rc = relay_duplex(s, 0);
     u_close(s);
-    return 0;
+    return rc;
 }
