@@ -880,15 +880,29 @@ GNU-ish: maxdepth gates descent, mindepth gates emit; AND with existing
 `-name`/`-type`/`-print`). Focused virtio login smoke covers depth filters on
 Ramfs trees plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
 
+## shell set -e/-u — landed
+
+Thin shell option polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+Shell builtin `set [-eu]|[+eu]` (glued ok); bare `set` prints `$-`-style flags.
+`-e` exits after a finished command-list fails (mid `&&`/`||` short-circuit
+returns do not errexit). `-u` errors on whole-token `$NAME` unbound and skips
+the line (interactive: does not exit even with `-e`). Focused virtio login smoke covers nounset /
+errexit short-circuit / `set +e` survival plus prior greens (smp 1/2). Ramfs
+`/bin` dents ~106/128. Jobs/`fg`/`bg` already present — left alone.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`find -maxdepth` + `chmod -R` + …):
+3. More daily-driver gaps after inventory (`set -e/-u` + `find -maxdepth` + …):
    prefer small coherent chunks; thin `df` **only if** `statfs(2)` is added, or
    `touch -r`/`-d` if utimens arrive. Candidates: `ps`/`uptime`/`free` only if
    `/proc` grows; skip `mkfifo` until `mknod`; leave Ext2-redirect duplex /
-   multi-nc SMP races and CFS/jbd alone. Other thin polish: shell `set -e/-u`,
-   job/fg/bg polish, `test`/`expr` more ops, `dd conv=`/`sync=`, `grep -E`
-   thin, `od` gaps — dig carefully; many listed utils already covered.
+   multi-nc SMP races and CFS/jbd alone. Other thin polish: job/fg/bg polish
+   if gaps remain, `test`/`expr` more ops (`-ot`/`-nt`, `substr`/`index`),
+   `dd conv=`/`sync=`, `grep -E` thin, `od` gaps — dig carefully; many listed
+   utils already covered.

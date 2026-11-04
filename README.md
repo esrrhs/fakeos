@@ -165,7 +165,7 @@ flowchart TD
 - [x] **VirtIO-blk MSI-X/IRQ 完成**：vector 41；used-ring `io_wait`+`sched_yield`（TCG 安全；MSI wakeup 仍保留）。
 - [x] **IRQ 驱动 VirtIO-net**：PCI INTx → I/O APIC level → vector 40；`virtio_net_irq` ack ISR 后 `net_poll` 收包；idle 轮询仅作备份。
 - [x] **TCP 握手与流**：`listen`/`accept` + 三次握手；已连接 `send`/`recv`（sendto/recvfrom 与 read/write）；环回自测；`/bin/nc` TCP 模式（`nc -l PORT` / `nc HOST PORT`）。SYN/数据经 100Hz 定时器重传。
-- [x] **Shell `&&` / `||` / 作业**：命令列表短电路；尾 `&` 后台 + `jobs`/`fg`/`bg`（最多 4 作业，`%n` 选择，WNOHANG 回收提示）。
+- [x] **Shell `&&` / `||` / 作业**：命令列表短电路；尾 `&` 后台 + `jobs`/`fg`/`bg`（最多 4 作业，`%n` 选择，WNOHANG 回收提示）；`set -e`/`-u` 薄支持。
 - [x] **更丰富 VGA 文本**：控制台写回显至 VGA；CSI 解析（清屏/光标/颜色/行擦除），`clear` 对图形窗口生效。
 - [x] **简易行编辑器 `/bin/ed`**：`a/c/d/p/n/w/e/q` 子集，可写 Ext2 持久文件。
 - [x] **Ext2 default-root UX**：Ramfs 保留 `/` 列表与 `/bin` `/etc` `/tmp` `/proc` `/src` `/ref` `/asm` `/dev`；其余绝对路径（含 `/home`）落入 Ext2 卷（`/mnt` 仍为卷根别名）。
@@ -273,6 +273,7 @@ flowchart TD
 - [x] **base64 -w + split -b**：`base64 -w COLS`/`-wCOLS`（默认 76；`0` 禁用换行）；`split -b SIZE`/`-bSIZE` 按字节切分（可选 `k/K/m/M/b/B`；与 `-l` 后者生效）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **cal -y + uname -s/-n/-r/-m**：`cal -y YEAR`（无 RTC 故拒裸 `-y`；既有 `cal YEAR`/`MONTH YEAR` 不变）；`uname`/`sh` 增加 `-s`/`-n`/`-r`/`-v`/`-m`/`-a`（粘连短选项；多字段按 POSIX snrvm 序空格分隔；默认 sysname）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **chmod -R thin**：`/bin/chmod` 与 shell 内建支持 `chmod [-R|-r] MODE FILE...`（深度上限 16；`lstat`+`getdents` 后序；不进入符号链接目录）。无新 /bin dent。virtio login smoke（smp 1/2）。
+- [x] **Shell set -e/-u thin**：内建 `set [-eu]|[+eu]`（可粘连）；`set` 无参打印 `$-` 风格；`-e` 在命令列表末段失败时退出（`&&`/`||` 中段短路不触发）；`-u` 整 token `$NAME` 未绑定则报错并跳过该行（交互下即使兼 `-e` 也不退出）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **chown :GID + mkdir -m + install -t**：`chown`/`sh` 支持组专属 `:GID`（uid=(u32)-1；既有 `UID[:GID]` 不变）；`mkdir [-p] [-m MODE|-mMODE]` 创建后 chmod（`-p` 仅最终分量；shell-mirror）；`install -t DIR|-tDIR` GNU 目标目录形（可与 `-m` 组合；粘连保 EXEC_MAX_ARGC=8）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/ls -l polish**：`ls` 增加 `-a`/`-A`/`-d`、粘连短选项、多 PATH（多目录打印 `path:` 头）；默认隐藏 `.` 前缀名；`-a` 合成输出 `.`/`..`（getdents 无此项）；`-l` 增加 `nlink`（`mode nlink uid gid size mtime name`）。无新 /bin dent。virtio login smoke（smp 1/2）。

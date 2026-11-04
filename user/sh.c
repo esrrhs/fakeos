@@ -1,9 +1,9 @@
 /* fakeos userland - tiny interactive shell.
  * Builtins: echo [-neE] ($?/$VAR), cd, pwd[-LP], mkdir[-p], rmdir[-p], ln[-sf], readlink,
- * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
+ * realpath, env/export/unset/which, set [-eu]/[+eu], exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
- * pipelines, &&/||, & jobs. */
+ * pipelines, &&/||, & jobs. set -e errexit (skip mid &&/||); set -u nounset. */
 package user;
 
 typedef unsigned long u64;
@@ -101,6 +101,9 @@ struct job {
 
 static struct job jobs[MAX_JOBS];
 static long shell_pgid;
+static int shell_opt_e; /* set -e errexit */
+static int shell_opt_u; /* set -u nounset */
+static int expand_err;  /* set by expand when -u hits unbound */
 
 static void shell_claim_tty(void) {
     /* Prefer ioctl TIOCSPGRP when available; fall back to tcsetpgrp. */
@@ -1004,7 +1007,15 @@ static void expand_token(const char *in, char *out, int outsz, long rc_in) {
     }
     if (in[0] == '$' && in[1] != 0 && env_name_ok(in + 1)) {
         val = sh_getenv(in + 1);
-        if (val == 0) val = "";
+        if (val == 0) {
+            if (shell_opt_u) {
+                printf("sh: %s: unbound variable\n", in + 1);
+                expand_err = 1;
+                out[0] = 0;
+                return;
+            }
+            val = "";
+        }
         n = 0;
         while (val[n] != 0 && n + 1 < outsz) {
             out[n] = val[n];
@@ -1040,7 +1051,8 @@ static int is_builtin(const char *cmd) {
            eq(cmd, "ln") || eq(cmd, "readlink") || eq(cmd, "realpath") ||
            eq(cmd, "env") || eq(cmd, "export") || eq(cmd, "unset") ||
            eq(cmd, "which") || eq(cmd, "chmod") || eq(cmd, "umask")
-        || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid");
+        || eq(cmd, "chown") || eq(cmd, "id") || eq(cmd, "setuid") || eq(cmd, "seteuid")
+        || eq(cmd, "set");
 }
 
 /* Resolve argv[0] into path (may use buf). Tries PATH components. */
@@ -1248,9 +1260,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export, unset, which, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export NAME=val / unset NAME / which CMD; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
+        puts("env: export NAME=val / unset NAME / which CMD; set [-eu]|[+eu]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -1306,6 +1318,50 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
             return 0;
         }
+    }
+    if (eq(tokens[0], "set")) {
+        /* set             -> print $- style flags
+         * set -e / +e / -u / +u / glued -eu / +eu */
+        int ai = 1;
+        if (tokens[1] == 0) {
+            char buf[8];
+            int n = 0;
+            buf[n++] = '-';
+            if (shell_opt_e) buf[n++] = 'e';
+            if (shell_opt_u) buf[n++] = 'u';
+            if (n == 1) {
+                puts("-");
+            } else {
+                buf[n] = 0;
+                puts(buf);
+            }
+            return 0;
+        }
+        for (ai = 1; tokens[ai] != 0; ai++) {
+            const char *a = tokens[ai];
+            int on;
+            int j;
+            if (a[0] != '-' && a[0] != '+') {
+                puts("usage: set [-eu] [+eu]");
+                return 1;
+            }
+            if (a[1] == 0) {
+                puts("usage: set [-eu] [+eu]");
+                return 1;
+            }
+            on = (a[0] == '-');
+            for (j = 1; a[j] != 0; j++) {
+                if (a[j] == 'e') {
+                    shell_opt_e = on;
+                } else if (a[j] == 'u') {
+                    shell_opt_u = on;
+                } else {
+                    puts("usage: set [-eu] [+eu]");
+                    return 1;
+                }
+            }
+        }
+        return 0;
     }
     if (eq(tokens[0], "unset")) {
         int ai;
@@ -2311,6 +2367,11 @@ static long run_list(char **tokens, long rc_in) {
         }
         (void)status;
     }
+    /* Errexit: only after the list finishes. Mid &&/|| short-circuits return
+     * above without exiting (POSIX: non-last AND-OR commands ignore -e). */
+    if (shell_opt_e && rc != 0) {
+        u_exit(rc);
+    }
     return rc;
 }
 
@@ -2357,7 +2418,7 @@ int main(int argc, char **argv) {
 
     sh_env_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export/envp, set -e/-u, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
@@ -2410,7 +2471,14 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        expand_err = 0;
         expand_argv(tokens, rc);
+        if (expand_err) {
+            /* Interactive shell: abort the line with status 1; do not exit
+             * even when -e is also set (matches common interactive -u). */
+            rc = 1;
+            continue;
+        }
         rc = run_list(tokens, rc);
     }
 }
