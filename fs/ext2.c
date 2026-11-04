@@ -19,10 +19,11 @@ extern void kprintf(const char *fmt, ...);
  * SB/BGDT, s_state dirty-on-mount / clean-on-sync. Journal-lite: ordered/
  * writeback commit modes with recovery markers in unused SB space
  * (magic/gen/flags/mode/jblk); journal control block + ring slots hold
- * DESCRIPTOR / REVOKE / COMMIT records across multiple txns. Dirty or
- * incomplete META_PENDING mounts recount free bits; META_PENDING with a
- * matching COMMIT in the ring clears the marker without recount (SB idle
- * write lost after commit). ORDERED flushes data before COMMIT (not a
+ * DESCRIPTOR / REVOKE / COMMIT records across multiple txns. Commit also
+ * snapshots dirtied meta blocks into a small copy pool; META_PENDING with
+ * a matching COMMIT replays those copies onto home blocks before clearing
+ * the marker (SB idle write lost after commit). Dirty/incomplete mounts
+ * without COMMIT still recount. ORDERED flushes data before COMMIT (not a
  * full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
@@ -223,6 +224,12 @@ enum {
     JL_J_COMMIT = 2,
     JL_RING_MAX = 8,
     JL_MAX_TAGS = 32,
+    JL_MAX_COPIES = 4,              /* meta snapshot pool (full FS blocks) */
+    JL_CTRL_OFF_COPY_N = 48,        /* u16 allocated copy slots */
+    JL_CTRL_OFF_COPY_USED = 50,     /* u16 valid homes in this gen */
+    JL_CTRL_OFF_COPY_GEN = 52,      /* u32 gen of snapshot */
+    JL_CTRL_OFF_COPY_BLKS = 56,     /* u32[JL_MAX_COPIES] pool FS blocks */
+    JL_CTRL_OFF_COPY_HOMES = 72,    /* u32[JL_MAX_COPIES] home FS blocks */
     EXT2_VALID_FS = 1,
     EXT2_ERROR_FS = 2
 };
@@ -239,6 +246,10 @@ static u32 jl_desc_tags[JL_MAX_TAGS];
 static u32 jl_desc_n;
 static u32 jl_rev_tags[JL_MAX_TAGS];
 static u32 jl_rev_n;
+static u32 jl_copy_blks[JL_MAX_COPIES]; /* durable meta snapshot pool */
+static u32 jl_copy_homes[JL_MAX_COPIES];
+static u32 jl_copy_n;                  /* valid homes for jl_copy_gen */
+static u32 jl_copy_gen;
 
 static u32 alloc_block(void);
 
@@ -284,10 +295,13 @@ static u32 jl_is_journal_blk(u32 blk) {
     for (i = 0; i < jl_ring_len; i++) {
         if (jl_ring[i] == blk) return 1;
     }
+    for (i = 0; i < JL_MAX_COPIES; i++) {
+        if (jl_copy_blks[i] != 0 && jl_copy_blks[i] == blk) return 1;
+    }
     return 0;
 }
 
-/* Persist control block: magic/len/head/seq + slot map. */
+/* Persist control block: magic/len/head/seq + slot map + meta copy pool. */
 static u32 jl_write_ctrl(void) {
     u32 i;
     if (!jl_jblk_sane(jl_jblk)) return 0;
@@ -299,6 +313,13 @@ static u32 jl_write_ctrl(void) {
     for (i = 0; i < jl_ring_len && i < JL_RING_MAX; i++) {
         wr32(blk_buf + 16 + i * 4, jl_ring[i]);
     }
+    wr16(blk_buf + JL_CTRL_OFF_COPY_N, (u16)JL_MAX_COPIES);
+    wr16(blk_buf + JL_CTRL_OFF_COPY_USED, (u16)jl_copy_n);
+    wr32(blk_buf + JL_CTRL_OFF_COPY_GEN, jl_copy_gen);
+    for (i = 0; i < JL_MAX_COPIES; i++) {
+        wr32(blk_buf + JL_CTRL_OFF_COPY_BLKS + i * 4, jl_copy_blks[i]);
+        wr32(blk_buf + JL_CTRL_OFF_COPY_HOMES + i * 4, jl_copy_homes[i]);
+    }
     return bwrite(jl_jblk, blk_buf);
 }
 
@@ -306,6 +327,7 @@ static u32 jl_load_ctrl(void) {
     u32 i;
     u32 magic;
     u32 n;
+    u32 cn;
     if (!jl_jblk_sane(jl_jblk)) return 0;
     if (!bread(jl_jblk, blk_buf)) return 0;
     magic = rd32(blk_buf + 0);
@@ -319,6 +341,27 @@ static u32 jl_load_ctrl(void) {
     for (i = 0; i < jl_ring_len; i++) {
         jl_ring[i] = rd32(blk_buf + 16 + i * 4);
         if (!jl_jblk_sane(jl_ring[i])) return 0;
+    }
+    /* Copy pool may be absent on pre-copy images (zeros) — caller upgrades. */
+    cn = rd16(blk_buf + JL_CTRL_OFF_COPY_N);
+    jl_copy_n = 0;
+    jl_copy_gen = 0;
+    for (i = 0; i < JL_MAX_COPIES; i++) {
+        jl_copy_blks[i] = 0;
+        jl_copy_homes[i] = 0;
+    }
+    if (cn == JL_MAX_COPIES) {
+        u32 used = rd16(blk_buf + JL_CTRL_OFF_COPY_USED);
+        jl_copy_gen = rd32(blk_buf + JL_CTRL_OFF_COPY_GEN);
+        if (used > JL_MAX_COPIES) used = JL_MAX_COPIES;
+        for (i = 0; i < JL_MAX_COPIES; i++) {
+            jl_copy_blks[i] = rd32(blk_buf + JL_CTRL_OFF_COPY_BLKS + i * 4);
+            jl_copy_homes[i] = rd32(blk_buf + JL_CTRL_OFF_COPY_HOMES + i * 4);
+            if (jl_copy_blks[i] != 0 && !jl_jblk_sane(jl_copy_blks[i])) {
+                return 0;
+            }
+        }
+        jl_copy_n = used;
     }
     return 1;
 }
@@ -385,48 +428,132 @@ static void jl_revoke_add(u32 blk) {
     jl_rev_n++;
 }
 
-/* Allocate (once) journal control + ring slots; upgrade old single-block. */
+/* True if copy pool FS blocks are allocated and sane. */
+static u32 jl_copy_pool_ready(void) {
+    u32 i;
+    for (i = 0; i < JL_MAX_COPIES; i++) {
+        if (!jl_jblk_sane(jl_copy_blks[i])) return 0;
+    }
+    return 1;
+}
+
+/* Allocate (once) journal control + ring slots + meta copy pool. */
 static u32 jl_ensure_jblk(void) {
     u32 i;
     u32 b;
+    u32 need_ring = 1;
+    u32 need_copies = 1;
     if (jl_jblk_sane(jl_jblk) && jl_load_ctrl()) {
+        need_ring = 0;
+        if (jl_copy_pool_ready()) need_copies = 0;
+    }
+    if (!need_ring && !need_copies) {
         return 1;
     }
-    /* Fresh ring (or upgrade from pre-ring commit block). */
-    jl_ring_len = JL_RING_MAX;
-    jl_ring_head = 0;
-    jl_seq = 1;
-    for (i = 0; i < jl_ring_len; i++) jl_ring[i] = 0;
-    if (!jl_jblk_sane(jl_jblk)) {
-        b = alloc_block();
-        if (b == 0) {
-            kprintf("[EXT2] [FAIL] journal control block alloc\n");
-            return 0;
+    if (need_ring) {
+        /* Fresh ring (or upgrade from pre-ring commit block). */
+        jl_ring_len = JL_RING_MAX;
+        jl_ring_head = 0;
+        jl_seq = 1;
+        for (i = 0; i < jl_ring_len; i++) jl_ring[i] = 0;
+        if (!jl_jblk_sane(jl_jblk)) {
+            b = alloc_block();
+            if (b == 0) {
+                kprintf("[EXT2] [FAIL] journal control block alloc\n");
+                return 0;
+            }
+            jl_jblk = b;
         }
-        jl_jblk = b;
+        for (i = 0; i < jl_ring_len; i++) {
+            b = alloc_block();
+            if (b == 0) {
+                kprintf("[EXT2] [FAIL] journal ring slot %u alloc\n", (u64)i);
+                return 0;
+            }
+            jl_ring[i] = b;
+            /* Mark slot idle. */
+            {
+                u32 z;
+                for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
+                wr32(blk_buf + 0, JL_COMMIT_MAGIC);
+                wr32(blk_buf + 4, 0);
+                wr32(blk_buf + 8, 0);
+                wr16(blk_buf + 12, JL_J_IDLE);
+                if (!bwrite(b, blk_buf)) return 0;
+            }
+        }
+        jl_copy_n = 0;
+        jl_copy_gen = 0;
+        for (i = 0; i < JL_MAX_COPIES; i++) {
+            jl_copy_homes[i] = 0;
+            jl_copy_blks[i] = 0;
+        }
+        need_copies = 1;
     }
-    for (i = 0; i < jl_ring_len; i++) {
-        b = alloc_block();
-        if (b == 0) {
-            kprintf("[EXT2] [FAIL] journal ring slot %u alloc\n", (u64)i);
-            return 0;
+    if (need_copies) {
+        for (i = 0; i < JL_MAX_COPIES; i++) {
+            if (jl_jblk_sane(jl_copy_blks[i])) continue;
+            b = alloc_block();
+            if (b == 0) {
+                kprintf("[EXT2] [FAIL] journal copy pool %u alloc\n", (u64)i);
+                return 0;
+            }
+            jl_copy_blks[i] = b;
+            jl_copy_homes[i] = 0;
+            {
+                u32 z;
+                for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
+                if (!bwrite(b, blk_buf)) return 0;
+            }
         }
-        jl_ring[i] = b;
-        /* Mark slot idle. */
-        {
-            u32 z;
-            for (z = 0; z < sb.block_size; z++) blk_buf[z] = 0;
-            wr32(blk_buf + 0, JL_COMMIT_MAGIC);
-            wr32(blk_buf + 4, 0);
-            wr32(blk_buf + 8, 0);
-            wr16(blk_buf + 12, JL_J_IDLE);
-            if (!bwrite(b, blk_buf)) return 0;
-        }
+        if (jl_copy_n > JL_MAX_COPIES) jl_copy_n = 0;
     }
     if (!jl_write_ctrl()) return 0;
     if (!sb_write_counts(0xFFFF)) return 0;
-    kprintf("[EXT2] journal ring ctrl=%u slots=%u\n",
-            (u64)jl_jblk, (u64)jl_ring_len);
+    kprintf("[EXT2] journal ring ctrl=%u slots=%u copies=%u\n",
+            (u64)jl_jblk, (u64)jl_ring_len, (u64)JL_MAX_COPIES);
+    return 1;
+}
+
+/* Snapshot dirtied meta homes into the copy pool (full FS blocks). */
+static u32 jl_write_meta_copies(void) {
+    u32 i;
+    u32 slot;
+    if (!jl_copy_pool_ready()) return 0;
+    for (i = 0; i < JL_MAX_COPIES; i++) jl_copy_homes[i] = 0;
+    slot = 0;
+    for (i = 0; i < jl_desc_n && slot < JL_MAX_COPIES; i++) {
+        u32 home = jl_desc_tags[i];
+        if (home == 0 || jl_is_journal_blk(home)) continue;
+        if (!bread(home, blk_buf)) return 0;
+        if (!bwrite(jl_copy_blks[slot], blk_buf)) return 0;
+        jl_copy_homes[slot] = home;
+        slot++;
+    }
+    jl_copy_n = slot;
+    jl_copy_gen = jl_gen;
+    return jl_write_ctrl();
+}
+
+/* Replay copy-pool snapshots for want_gen onto their home blocks.
+ * Missing/empty pool is fine (pre-copy images) — treat as no-op success. */
+static u32 jl_replay_meta_copies(u32 want_gen) {
+    u32 i;
+    u32 n;
+    if (jl_copy_n == 0 || jl_copy_gen != want_gen) return 1;
+    if (!jl_copy_pool_ready()) return 1;
+    n = jl_copy_n;
+    if (n > JL_MAX_COPIES) n = JL_MAX_COPIES;
+    for (i = 0; i < n; i++) {
+        u32 home = jl_copy_homes[i];
+        if (home == 0) continue;
+        /* Homes are FS meta (BGDT/bitmap/inode), not journal slots —
+         * jl_jblk_sane rejects bg_block and must not be used here. */
+        if (home < sb.first_data_block || home >= sb.blocks_count) return 0;
+        if (jl_is_journal_blk(home)) return 0;
+        if (!bread(jl_copy_blks[i], blk_buf)) return 0;
+        if (!bwrite(home, blk_buf)) return 0;
+    }
     return 1;
 }
 
@@ -493,7 +620,8 @@ static u32 jl_ring_revoked(u32 blk) {
 }
 
 /* If META_PENDING and the ring carries matching COMMIT, the txn was
- * durable and only the SB idle write was lost — clear the marker. */
+ * durable and only the SB idle write was lost — replay meta copies (if
+ * any for this gen) then clear the marker. */
 static u32 jl_try_commit_recover(void) {
     if (jl_flags != JL_META_PENDING) return 0;
     if (jl_ring_len == 0) {
@@ -510,6 +638,11 @@ static u32 jl_try_commit_recover(void) {
         if (gen != jl_gen) return 0;
         if (state != JL_J_COMMIT) return 0;
     } else if (!jl_ring_find_commit(jl_gen)) {
+        return 0;
+    }
+    if (!jl_replay_meta_copies(jl_gen)) {
+        kprintf("[EXT2] [FAIL] journal meta-copy replay (gen=%u)\n",
+                (u64)jl_gen);
         return 0;
     }
     jl_flags = JL_IDLE;
@@ -530,9 +663,9 @@ static void jl_begin(void) {
     jl_write_flags(JL_META_PENDING);
 }
 
-/* Commit: ORDERED drains data; write DESCRIPTOR + optional REVOKE + COMMIT
- * into the ring; then clear META_PENDING. A second ORDERED flush makes the
- * commit durable before the SB idle marker. */
+/* Commit: ORDERED drains data; write DESCRIPTOR + meta copy snapshots +
+ * optional REVOKE + COMMIT into the ring/pool; then clear META_PENDING.
+ * A second ORDERED flush makes the commit durable before the SB idle. */
 static void jl_commit(void) {
     if (jl_mode == JL_MODE_ORDERED) {
         drivers.blk_flush();
@@ -540,6 +673,14 @@ static void jl_commit(void) {
     if (jl_ring_len != 0) {
         jl_ring_append(JL_DESC_MAGIC, jl_gen, (u16)jl_desc_n,
                        jl_desc_tags, jl_desc_n);
+        /* Full-block snapshots of dirtied meta (capped) for commit-recover. */
+        if (jl_desc_n != 0) {
+            jl_write_meta_copies();
+        } else {
+            jl_copy_n = 0;
+            jl_copy_gen = 0;
+            jl_write_ctrl();
+        }
         if (jl_rev_n != 0) {
             jl_ring_append(JL_REVOKE_MAGIC, jl_gen, (u16)jl_rev_n,
                            jl_rev_tags, jl_rev_n);
@@ -1524,7 +1665,7 @@ u32 ext2_mount(void) {
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen,
             (u64)jl_jblk, (u64)jl_ring_len);
-    kprintf("[EXT2] journal-lite %s + descriptor/revoke ring online (not a full journal)\n",
+    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy replay online (not a full journal)\n",
             jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback");
     return 1;
 }
@@ -2499,6 +2640,93 @@ void ext2_selftest(void) {
         ext2_sync();
         jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] journal descriptor/revoke + multi-txn ring\n");
+    }
+
+    /* Meta-copy replay: commit snapshots BGDT; corrupt home while SB still
+     * META_PENDING with matching COMMIT; recover must restore the copy. */
+    {
+        u32 saved_mode = jl_mode;
+        u32 g;
+        u32 i;
+        u8 expect[64];
+        u8 got[64];
+        u32 before_fb;
+        jl_set_mode(JL_MODE_ORDERED);
+        if (!jl_copy_pool_ready()) {
+            kprintf("[EXT2] [FAIL] journal copy pool missing\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        before_fb = sb.free_blocks;
+        jl_begin();
+        g = jl_gen;
+        jl_desc_add(sb.bg_block);
+        if (jl_desc_n == 0) {
+            kprintf("[EXT2] [FAIL] journal copy tag capture\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(sb.bg_block, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal copy bread home\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) expect[i] = blk_buf[i];
+        jl_commit();
+        if (jl_copy_gen != g || jl_copy_n == 0
+            || jl_copy_homes[0] != sb.bg_block) {
+            kprintf("[EXT2] [FAIL] journal copy snapshot gen=%u n=%u home=%u\n",
+                    (u64)jl_copy_gen, (u64)jl_copy_n, (u64)jl_copy_homes[0]);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        /* Crash window: COMMIT+copies durable, SB idle lost; home torn. */
+        jl_flags = JL_META_PENDING;
+        jl_gen = g;
+        if (!sb_write_counts(0xFFFF)) {
+            kprintf("[EXT2] [FAIL] journal copy pending stamp\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < sb.block_size; i++) blk_buf[i] = 0xA5;
+        if (!bwrite(sb.bg_block, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal copy corrupt home\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        drivers.blk_flush();
+        if (!jl_try_commit_recover()) {
+            kprintf("[EXT2] [FAIL] journal meta-copy recover\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_flags != JL_IDLE) {
+            kprintf("[EXT2] [FAIL] journal meta-copy recover idle\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (sb.free_blocks != before_fb) {
+            kprintf("[EXT2] [FAIL] journal meta-copy mutated free_blocks\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(sb.bg_block, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal meta-copy reread\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) got[i] = blk_buf[i];
+        for (i = 0; i < 64; i++) {
+            if (got[i] != expect[i]) {
+                kprintf("[EXT2] [FAIL] journal meta-copy mismatch @%u\n",
+                        (u64)i);
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal metadata-copy replay\n");
     }
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to

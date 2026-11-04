@@ -192,7 +192,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 journal descriptor/revoke ring + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
+    kprintf(" [SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 journal meta-copy replay + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");
