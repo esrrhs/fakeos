@@ -1,6 +1,7 @@
 /* fakeos userland - od: thin octal/hex dump (POSIX-ish subset).
- * Forms: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [FILE...]
+ * Forms: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT|-NCOUNT] [-j SKIP|-jSKIP] [FILE...]
  * Default: -A o -t x1, 16 bytes per line. stdin if no FILE.
+ * -j skips SKIP input bytes before dumping (seek when possible, else read-discard).
  */
 package user;
 
@@ -8,6 +9,7 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern long u_lseek(long fd, long off, long whence);
 extern int strcmp(const char *a, const char *b);
 extern long strtol_dec(const char *s);
 extern void printf(const char *fmt, ...);
@@ -27,9 +29,10 @@ enum {
 static int addr_mode = ADDR_OCT;
 static int type_mode = TYPE_X1;
 static long max_bytes = -1; /* -1 = unlimited */
+static long skip_bytes = 0;
 
 static void usage(void) {
-    u_write(2, "usage: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [FILE...]\n", 56);
+    u_write(2, "usage: od [-A n|o|x|d] [-t x1|o1|c] [-N COUNT] [-j SKIP] [FILE...]\n", 66);
 }
 
 static int is_digits(const char *s) {
@@ -126,6 +129,25 @@ static void emit_byte(unsigned char b) {
     else emit_c(b);
 }
 
+static int apply_skip(long fd) {
+    long left = skip_bytes;
+    unsigned char buf[WIDTH];
+    long n;
+    long off;
+    if (left <= 0) return 0;
+    off = u_lseek(fd, left, 1 /* SEEK_CUR */);
+    if (off >= 0) return 0;
+    /* Non-seekable: read and discard. */
+    while (left > 0) {
+        long want = WIDTH;
+        if (left < want) want = left;
+        n = u_read(fd, buf, (unsigned long)want);
+        if (n <= 0) return n < 0 ? 1 : 0;
+        left -= n;
+    }
+    return 0;
+}
+
 static int od_fd(long fd) {
     unsigned char buf[WIDTH];
     unsigned long off = 0;
@@ -133,6 +155,9 @@ static int od_fd(long fd) {
     long n;
     int i;
     int have = 0;
+
+    if (apply_skip(fd) != 0) return 1;
+    if (skip_bytes > 0) off = (unsigned long)skip_bytes;
 
     for (;;) {
         long want = WIDTH;
@@ -224,6 +249,21 @@ int main(int argc, char **argv) {
             i++;
         } else if (strcmp(argv[i], "-tc") == 0) {
             type_mode = TYPE_C;
+            i++;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'N' && argv[i][2] != 0 &&
+                   is_digits(argv[i] + 2)) {
+            max_bytes = strtol_dec(argv[i] + 2);
+            i++;
+        } else if (strcmp(argv[i], "-j") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            skip_bytes = strtol_dec(argv[i + 1]);
+            i += 2;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'j' && argv[i][2] != 0 &&
+                   is_digits(argv[i] + 2)) {
+            skip_bytes = strtol_dec(argv[i] + 2);
             i++;
         } else {
             usage();

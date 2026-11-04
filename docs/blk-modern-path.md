@@ -906,15 +906,30 @@ Focused virtio login smoke covers mtime order / missing-file / index / substr
 plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128. Jobs/`fg`/`bg`
 already present — left alone.
 
+## dd conv= + od -N/-j polish — landed
+
+Thin userland polish (no new `/bin` dent; no kernel work). Inventory: still
+no `statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/proc` is still only
+`cpuinfo` + `self/{status,maps,cmdline,environ}` — skip `ps`/`uptime`/`free`.
+`dd` gains `conv=LIST` (comma-separated): `notrunc` (omit `O_TRUNC` on `of=`),
+`sync` (pad short reads to `bs` with NUL before write), `fsync` (`fsync(2)` on
+`of=` before close; uses existing syscall). `od` gains glued `-NCOUNT` and
+`-j SKIP`/`-jSKIP` (prefer `lseek` SEEK_CUR, else read-discard; dump addresses
+start at skip). Focused virtio login smoke covers sync pad / notrunc vs trunc /
+fsync / `-N4` / `-j2` plus prior greens (smp 1/2). Ramfs `/bin` dents ~106/128.
+Jobs/`fg`/`bg` already present — left alone.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`test -ot/-nt` + `expr substr/index`
-   + `set -e/-u` + …): prefer small coherent chunks; thin `df` **only if**
+3. More daily-driver gaps after inventory (`dd conv=` + `od -N/-j` +
+   `test -ot/-nt` + …): prefer small coherent chunks; thin `df` **only if**
    `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive. Candidates:
    `ps`/`uptime`/`free` only if `/proc` grows; skip `mkfifo` until `mknod`;
    leave Ext2-redirect duplex / multi-nc SMP races and CFS/jbd alone. Other
-   thin polish: job/fg/bg polish if gaps remain, `dd conv=`/`sync=`, `grep -E`
-   thin, `od` polish gaps — dig carefully; many listed utils already covered.
+   thin polish: job/fg/bg polish if gaps remain, thin `grep -E`, further `od`
+   gaps (`-t u1`/`d1`, duplicate-line suppress) — dig carefully; many listed
+   utils already covered.

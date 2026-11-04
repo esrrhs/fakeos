@@ -1,8 +1,11 @@
 /* fakeos userland - dd: copy and convert a file (thin POSIX-ish subset).
- * Forms: dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N] [status=none]
+ * Forms: dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N]
+ *          [conv=LIST] [status=none]
  * Default: if/of = stdin/stdout, bs=512. N is decimal; optional k/K (=1024) or
  * b (=512) suffix. skip/seek are in input/output blocks. status=none quiets
  * the records summary on stderr.
+ * conv= comma-list: notrunc (keep of= size), sync (pad short reads to bs with
+ * NUL), fsync (fsync of= before close).
  */
 package user;
 
@@ -11,6 +14,7 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_lseek(long fd, long off, long whence);
+extern long u_fsync(long fd);
 extern int strcmp(const char *a, const char *b);
 extern int strncmp(const char *a, const char *b, unsigned long n);
 extern unsigned long strlen(const char *s);
@@ -27,7 +31,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N] [status=none]\n", 79);
+    u_write(2, "usage: dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N] [conv=LIST] [status=none]\n", 91);
 }
 
 static int parse_num(const char *s, unsigned long *out) {
@@ -53,6 +57,33 @@ static int parse_num(const char *s, unsigned long *out) {
     }
     if (s[i] != 0) return 0;
     *out = v;
+    return 1;
+}
+
+/* Parse comma-separated conv= tokens into flags. Returns 0 on unknown token. */
+static int parse_conv(const char *s, int *notrunc, int *pad_sync, int *do_fsync) {
+    char tok[32];
+    int ti;
+    int i = 0;
+    if (s == 0) return 0;
+    while (s[i] != 0) {
+        ti = 0;
+        while (s[i] != 0 && s[i] != ',' && ti < 31) {
+            tok[ti++] = s[i++];
+        }
+        tok[ti] = 0;
+        if (s[i] == ',') i++;
+        if (ti == 0) continue;
+        if (strcmp(tok, "notrunc") == 0) {
+            *notrunc = 1;
+        } else if (strcmp(tok, "sync") == 0) {
+            *pad_sync = 1;
+        } else if (strcmp(tok, "fsync") == 0) {
+            *do_fsync = 1;
+        } else {
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -96,6 +127,9 @@ int main(int argc, char **argv) {
     unsigned long skip = 0;
     unsigned long seek = 0;
     int quiet = 0;
+    int notrunc = 0;
+    int pad_sync = 0;
+    int do_fsync = 0;
     long in_fd = 0;
     long out_fd = 1;
     int close_in = 0;
@@ -110,6 +144,7 @@ int main(int argc, char **argv) {
     long n;
     long w;
     long off;
+    unsigned long write_len;
 
     for (i = 1; i < argc; i++) {
         if (eq_key(argv[i], "if=")) {
@@ -140,6 +175,11 @@ int main(int argc, char **argv) {
                 usage();
                 return 1;
             }
+        } else if (eq_key(argv[i], "conv=")) {
+            if (!parse_conv(argv[i] + 5, &notrunc, &pad_sync, &do_fsync)) {
+                usage();
+                return 1;
+            }
         } else if (eq_key(argv[i], "status=")) {
             if (strcmp(argv[i] + 7, "none") == 0 ||
                 strcmp(argv[i] + 7, "noxfer") == 0) {
@@ -164,7 +204,8 @@ int main(int argc, char **argv) {
     }
     if (out_path != 0 && strcmp(out_path, "-") != 0) {
         long flags = O_WRONLY | O_CREAT;
-        if (seek == 0) flags = flags | O_TRUNC;
+        /* Truncate only when seek=0 and notrunc is off (POSIX/GNU-ish). */
+        if (seek == 0 && !notrunc) flags = flags | O_TRUNC;
         out_fd = u_open(out_path, flags, MODE_0644);
         if (out_fd < 0) {
             printf("dd: %s: cannot create\n", out_path);
@@ -208,8 +249,14 @@ int main(int argc, char **argv) {
         if (n == 0) break;
         if ((unsigned long)n == bs) in_full++;
         else in_partial++;
-        w = u_write(out_fd, buf, (unsigned long)n);
-        if (w < 0 || w != n) {
+        write_len = (unsigned long)n;
+        if (pad_sync && write_len < bs) {
+            unsigned long z;
+            for (z = write_len; z < bs; z++) buf[z] = 0;
+            write_len = bs;
+        }
+        w = u_write(out_fd, buf, write_len);
+        if (w < 0 || (unsigned long)w != write_len) {
             u_write(2, "dd: write error\n", 16);
             if (close_in) u_close(in_fd);
             if (close_out) u_close(out_fd);
@@ -219,6 +266,18 @@ int main(int argc, char **argv) {
         if ((unsigned long)w == bs) out_full++;
         else out_partial++;
         copied++;
+        /* Short unpadded read implies EOF; stop like GNU dd. */
+        if ((unsigned long)n < bs) break;
+    }
+
+    if (do_fsync && close_out) {
+        if (u_fsync(out_fd) < 0) {
+            u_write(2, "dd: fsync error\n", 16);
+            if (close_in) u_close(in_fd);
+            if (close_out) u_close(out_fd);
+            if (!quiet) report(in_full, in_partial, out_full, out_partial);
+            return 1;
+        }
     }
 
     if (close_in) u_close(in_fd);
