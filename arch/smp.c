@@ -14,17 +14,20 @@ extern void pit_busy_wait_ms(u32 ms);
 extern void tlb_flush(void);
 extern void cpu_cli(void);
 extern void cpu_halt(void);
+extern void cpu_pause(void);
+extern u32 sched_ap_waiting(void);
+extern void sched_ap_enter(u32 cpu);
 extern u8 boot_pml4[];
 extern u8 boot_pdpt[];
 extern u8 ap_tramp_blob[];
 extern u8 ap_tramp_blob_end[];
 
 /* ---------------------------------------------------------------------------
- * SMP: MADT discovery + AP trampoline bring-up (parked APs, no sched yet).
+ * SMP: MADT discovery + AP trampoline bring-up (AP bring-up + sched release hook).
  *
  * smp_init runs before PMM, so AP stacks are static BSS. BSP restores
  * PML4[0] identity (boot_pdpt) so the SIPI trampoline at phys 0x8000 can
- * enter long mode, then APs jump to high-half ap_main and cli;hlt.
+ * enter long mode, then APs jump to high-half ap_main and spin until sched release.
  * Default QEMU (-smp 1) stays single-CPU; -smp 2+ brings APs online.
  * ------------------------------------------------------------------------- */
 
@@ -232,6 +235,12 @@ void ap_main(u32 cpu) {
         cpus[cpu].online = 1;
     }
     *tramp_u32(OFF_DONE) = 1;
+    /* Park until the BSP finishes sched_init/selftests and releases APs
+     * into per-CPU idle via sched_smp_start(). */
+    while (sched_ap_waiting()) {
+        cpu_pause();
+    }
+    sched_ap_enter(cpu);
     cpu_cli();
     for (;;) {
         cpu_halt();
@@ -315,9 +324,24 @@ u32 smp_start_aps(void) {
                     (u64)i, (u64)cpus[i].apic_id);
         }
     }
-    kprintf("[SMP] started %u AP(s); parked (no per-CPU sched yet)\n",
+    kprintf("[SMP] started %u AP(s); parked until sched release\n",
             (u64)started);
     return started;
+}
+
+
+u32 smp_cpu_online(u32 cpu) {
+    if (cpu >= MAX_CPUS) {
+        return 0;
+    }
+    return cpus[cpu].online;
+}
+
+u64 smp_cpu_stack_top(u32 cpu) {
+    if (cpu >= MAX_CPUS) {
+        return 0;
+    }
+    return cpus[cpu].stack_top;
 }
 
 void smp_init(void) {

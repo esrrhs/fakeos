@@ -197,9 +197,10 @@ flowchart TD
 - [x] **匿名 MAP_SHARED**：`mmap(MAP_SHARED|MAP_ANONYMOUS)` 真实帧（不用 zero 页），fork 保写，子写父见。
 - [x] **POSIX shm 路径**：`/dev/shm` + `ftruncate(2)` + libc `shm_open`/`shm_unlink`；文件 `MAP_SHARED` 跨 fork 可见；自测 `[U][PASS] POSIX shm_open/mmap/unlink`。
 - [x] **AHCI NCQ-lite**：多槽 CL + 条件 FPDMA（CAP.SNCQ）；块层仍同步/单 bounce；`make qemu-ahci` 可现 `[NCQ]`。
-- [x] **SMP MADT + AP park**：`arch/smp.c` MADT 发现 + `ap_tramp`；默认 `-smp 1` 不拉 AP；`-smp 2` 时 AP long-mode 后 `cli;hlt`（未入调度器）。
+- [x] **SMP MADT + AP park**：`arch/smp.c` MADT 发现 + `ap_tramp`；默认 `-smp 1` 不拉 AP；`-smp 2` 时 AP long-mode 后停泊，经 `sched_smp_start` 进入 per-CPU idle。
 - [x] **futex(2) basics**：`FUTEX_WAIT`/`FUTEX_WAKE`（+PRIVATE）；`sched_wakeup_n`；跨 fork `MAP_SHARED` 自测 `[U][PASS] futex WAIT/WAKE`。
-- [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后 `cli;hlt` 停泊（尚未加入调度器）。`make qemu-smp`（`-smp 2`）。
+- [x] **AP trampoline bring-up**：`ap_tramp` @ phys `0x8000`，MADT CPU 发现，静态 per-AP 栈；AP 进入 long mode 后停泊至 `sched_smp_start`。`make qemu-smp`（`-smp 2`）。
+- [x] **AP into scheduler (idle slice)**：per-CPU `current` + idle TCB + `sched_run_lock`；AP 加载内核 GDT/IDT、`lapic_ap_init`（timer masked）后进入调度器 idle（尚不偷任务/不接 AP tick；无 per-CPU TSS）。自测日志 `[SMP] AP%u entered scheduler`。
 - [x] **Ext2 ftruncate(2)**：grow（sparse）/shrink（保留前缀并释放尾块）/zero；自测 `[EXT2] [PASS] ftruncate grow/shrink/zero`。
 - [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。

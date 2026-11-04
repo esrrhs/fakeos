@@ -22,6 +22,7 @@ extern void pmm_selftest(void);
 extern void vmm_selftest(void);
 extern void slab_selftest(void);
 extern void sched_selftest(void);
+extern types.uint32_t sched_smp_start(void);
 extern void uproc_selftest(void);
 extern void vfs_selftest(void);
 extern void rootfs_publish(void);
@@ -163,6 +164,9 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // fork across real user address spaces and timer preemption at ring 3.
     uproc_selftest();
 
+    /* Release parked APs into per-CPU scheduler idle (no work stealing yet). */
+    sched_smp_start();
+
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");
 
@@ -182,7 +186,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("      [PASS] Hex Formatting : 0x%x (uppercase: 0x%X)\n", hex_val, hex_val);
 
     kprintf("\n================================================================================\n");
-    kprintf(" [SUCCESS] fakeos: pthread_exit/detach/reclaim + join/FS TLS + clone + Ext2 rename + futex + AP trampoline online!\n");
+    kprintf(" [SUCCESS] fakeos: AP sched idle + per-CPU current + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!\n");
     kprintf("           - 32-bit Protected Mode -> 64-bit Long Mode Transition: OK\n");
     kprintf("           - Higher-Half 4-Level Paging (PML4): OK\n");
     kprintf("           - fakecc C99 Freestanding Execution: OK\n");

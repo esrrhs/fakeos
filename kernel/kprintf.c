@@ -2,6 +2,14 @@ package kernel;
 import drivers;
 import types;
 
+typedef types.uint32_t u32;
+typedef types.uint64_t u64;
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+static volatile u32 kprintf_lock;
+
 static void print_char(char c) {
     drivers.uart_putc(c);
     drivers.vga_putc(c);
@@ -75,6 +83,9 @@ static void print_ptr(types.uint64_t val) {
 
 void kprintf(const char *fmt, ...) {
     va_list ap;
+    u64 flags;
+    flags = cpu_irq_save();
+    spin_lock(&kprintf_lock);
     va_start(ap, fmt);
 
     while (*fmt) {
@@ -116,4 +127,6 @@ void kprintf(const char *fmt, ...) {
     }
 
     va_end(ap);
+    spin_unlock(&kprintf_lock);
+    cpu_irq_restore(flags);
 }

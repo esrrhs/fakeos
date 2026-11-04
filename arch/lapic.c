@@ -52,6 +52,7 @@ static const u32 LAPIC_TIMER_MAXCOUNT = 0xFFFFFFFF;
 
 static volatile u32 *lapic_regs;
 static volatile u64 lapic_ticks;
+static u32 lapic_timer_period; /* BSP-calibrated INITCNT for 100 Hz */
 
 /* Oversized, page-aligned at runtime: the first 4 KiB-aligned window inside
  * this storage becomes the APIC page table (fakecc emits 16-byte-aligned
@@ -176,10 +177,42 @@ void lapic_init(void) {
     if (period100hz == 0) {
         period100hz = 1;
     }
+    lapic_timer_period = period100hz;
 
     /* ---- 4. Start periodic 100 Hz timer interrupts on vector 32 ---- */
     lapic_wr(LAPIC_REG_LVTT, LAPIC_LVT_PERIODIC | LAPIC_TIMER_VECTOR);
     lapic_wr(LAPIC_REG_INITCNT, period100hz);
+}
+
+/* Soft-enable this CPU's Local APIC and arm the periodic timer using the
+ * BSP-calibrated period. MMIO mapping is shared; no PIT recalibration. */
+void lapic_ap_init(void) {
+    u64 base_msr;
+    u32 period;
+
+    if (lapic_regs == 0) {
+        return;
+    }
+    base_msr = msr_read(IA32_APIC_BASE);
+    msr_write(IA32_APIC_BASE, base_msr | APIC_BASE_ENABLE);
+
+    lapic_wr(0x340, LAPIC_LVT_MASKED | 0xFF);
+    lapic_wr(0x350, LAPIC_LVT_MASKED | 0xFF);
+    lapic_wr(0x360, LAPIC_LVT_MASKED | 0xFF);
+    lapic_wr(0x370, LAPIC_LVT_MASKED | 0xFF);
+    lapic_wr(LAPIC_REG_SVR, 0x000001FF);
+    lapic_wr(0x280, 0);
+    (void)lapic_rd(0x280);
+
+    /* Arm divider + vector but leave LVTT masked until per-CPU TSS/IRQ
+     * stacks are ready; unmasked AP timer currently triple-faults. */
+    period = lapic_timer_period;
+    if (period == 0) {
+        period = 1;
+    }
+    lapic_wr(LAPIC_REG_DIVCONF, 0x03);
+    lapic_wr(LAPIC_REG_LVTT, LAPIC_LVT_MASKED | LAPIC_TIMER_VECTOR);
+    lapic_wr(LAPIC_REG_INITCNT, period);
 }
 
 /* Wait until ICR Delivery Status (bit 12) clears. */

@@ -301,6 +301,7 @@ def main():
         "[PASS] Exception #PF",
         "[PASS] APIC Timer Calibration",
         "[SMP] AP trampoline at phys",
+        "[SMP] sched: single-CPU, no AP attach",
         "[PASS] I/O APIC IRQ1 (kbd) -> 33, IRQ4 (COM1) -> 36 armed",
         "[EXT2] [PASS] create/write/read/sync /mnt/m6pass.txt",
         "[EXT2] [PASS] double-indirect /mnt/big.bin 270KiB",
@@ -396,7 +397,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: pthread_exit/detach/reclaim + join/FS TLS + clone + Ext2 rename + futex + AP trampoline online!",
+        "[SUCCESS] fakeos: AP sched idle + per-CPU current + pthread_exit/detach/join/FS TLS + clone + Ext2 rename + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
