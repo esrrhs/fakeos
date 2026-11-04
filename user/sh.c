@@ -9,7 +9,8 @@
  * Directory stack: pushd/popd/dirs + cd - via OLDPWD (cap 8; paths fit ENV_VAL).
  * Aliases: alias/unalias (cap 16; one-shot first-word expand per pipeline stage).
  * Functions: name () { …; } / name() { …; } (cap 8; body string); return; local; shift; $1…/$@/$* (depth 4).
- * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false). */
+ * Null cmds: : / true / false builtins (while :; shadows /bin/true|/bin/false).
+ * eval / source / . (thin; depth 4; EVAL_BUF 512). */
 package user;
 
 typedef unsigned long u64;
@@ -102,6 +103,8 @@ enum {
     MAX_POS = 8,
     POS_VAL = 96,
     MAX_FDEPTH = 4,
+    MAX_EVAL_DEPTH = 4,
+    EVAL_BUF = 512,
     MAX_LOCAL = 16,
     WNOHANG = 1,
     WUNTRACED = 2,
@@ -131,6 +134,7 @@ static int loop_ctrl;   /* 0 none, 1 break, 2 continue */
 static int func_depth;  /* function call nesting */
 static int func_returning; /* return builtin fired */
 static long func_ret_rc;
+static int eval_depth;  /* eval / source nesting */
 
 static void shell_claim_tty(void) {
     /* Prefer ioctl TIOCSPGRP when available; fall back to tcsetpgrp. */
@@ -1648,6 +1652,8 @@ static int local_save(const char *name) {
 
 static long run_function(char **argv, long rc_in, char *in_path, char *out_path,
                          int append);
+static long run_seq(char **tokens, long rc_in);
+static long run_eval_buf(char *buf, long rc_in);
 
 static int sh_setenv_local(const char *name, const char *val);
 
@@ -2158,6 +2164,7 @@ static int is_builtin(const char *cmd) {
         || eq(cmd, "alias") || eq(cmd, "unalias")
         || eq(cmd, "return") || eq(cmd, "local") || eq(cmd, "shift")
         || eq(cmd, ":") || eq(cmd, "true") || eq(cmd, "false")
+        || eq(cmd, "eval") || eq(cmd, "source") || eq(cmd, ".")
         || eq(cmd, "[[");
 }
 
@@ -2723,9 +2730,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], :/true/false, cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
+        puts("builtins: echo[-neE], :/true/false, eval, source/., cd[-], pushd, popd, dirs, alias, unalias, return, local, shift, [[ ]], mkdir[-pm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-n], unset, which, type, command -v, hash, read, set[-eu], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, break, continue, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
+        puts("env: export [-n] NAME[=val] / unset NAME / which|type|command -v|hash CMD / read [-r] NAME / alias|unalias / return / local / shift; :/true/false; eval; source/.; set [-eu]|[+eu]; cd [-]|DIR; pushd [DIR]; popd; dirs; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break/continue/return/shift; ; seq; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
         puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs; kill [-]PGID; history (/home/.sh_history)");
         return 0;
@@ -2948,6 +2955,77 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "[[")) {
         rc = eval_dbracket(tokens);
+        pop_redirects(saved_in, saved_out);
+        return rc;
+    }
+    if (eq(tokens[0], "eval")) {
+        char buf[EVAL_BUF];
+        int oi = 0;
+        int ai;
+        buf[0] = 0;
+        for (ai = 1; tokens[ai] != 0; ai++) {
+            int k = 0;
+            if (ai > 1 && oi + 1 < EVAL_BUF) buf[oi++] = ' ';
+            while (tokens[ai][k] != 0 && oi + 1 < EVAL_BUF) {
+                buf[oi++] = tokens[ai][k];
+                k++;
+            }
+            buf[oi] = 0;
+        }
+        rc = run_eval_buf(buf, rc_in);
+        pop_redirects(saved_in, saved_out);
+        return rc;
+    }
+    if (eq(tokens[0], "source") || eq(tokens[0], ".")) {
+        char pathbuf[96];
+        char filebuf[EVAL_BUF];
+        const char *path;
+        long fd;
+        long n;
+        long off = 0;
+        int i;
+        if (tokens[1] == 0) {
+            puts("sh: source: filename argument required");
+            pop_redirects(saved_in, saved_out);
+            return 1;
+        }
+        if (tokens[2] != 0) {
+            puts("sh: source: too many arguments");
+            pop_redirects(saved_in, saved_out);
+            return 1;
+        }
+        path = tokens[1];
+        {
+            int has_slash = 0;
+            for (i = 0; path[i] != 0; i++) {
+                if (path[i] == '/') { has_slash = 1; break; }
+            }
+            if (!has_slash) {
+                /* Thin PATH search (same shape as resolve_cmd). */
+                char *av[2];
+                av[0] = (char *)path;
+                av[1] = 0;
+                path = resolve_cmd(av, pathbuf);
+            }
+        }
+        fd = u_open(path, O_RDONLY, 0);
+        if (fd < 0) {
+            printf("sh: source: %s: cannot open\n", tokens[1]);
+            pop_redirects(saved_in, saved_out);
+            return 1;
+        }
+        while (off + 1 < EVAL_BUF) {
+            n = u_read(fd, filebuf + off, (unsigned long)(EVAL_BUF - 1 - off));
+            if (n <= 0) break;
+            off += n;
+        }
+        u_close(fd);
+        filebuf[off] = 0;
+        /* Newlines -> ';' so multi-line scripts tokenize as sequences. */
+        for (i = 0; filebuf[i] != 0; i++) {
+            if (filebuf[i] == '\n' || filebuf[i] == '\r') filebuf[i] = ';';
+        }
+        rc = run_eval_buf(filebuf, rc_in);
         pop_redirects(saved_in, saved_out);
         return rc;
     }
@@ -4983,6 +5061,41 @@ static int looks_like_func_def(char **tokens, int i) {
     return 0;
 }
 
+/* Tokenize buf and run_seq; shared by eval / source / . */
+static long run_eval_buf(char *buf, long rc_in) {
+    char *tokens[MAX_TOK];
+    char *save;
+    char *t;
+    int nt = 0;
+    long rc;
+    if (buf == 0) return 0;
+    if (eval_depth >= MAX_EVAL_DEPTH) {
+        puts("sh: eval: nesting too deep");
+        return 1;
+    }
+    /* Empty / blank -> status 0 (POSIX eval with no args). */
+    {
+        int i = 0;
+        while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n' || buf[i] == '\r'
+               || buf[i] == ';') i++;
+        if (buf[i] == 0) return 0;
+    }
+    eval_depth++;
+    strtok_sh_reset();
+    save = buf;
+    while (nt < MAX_TOK - 1 && (t = strtok_sh(&save)) != 0) {
+        tokens[nt++] = t;
+    }
+    tokens[nt] = 0;
+    if (nt == 0) {
+        eval_depth--;
+        return 0;
+    }
+    rc = run_seq(tokens, rc_in);
+    eval_depth--;
+    return rc;
+}
+
 /* Split on ";" and run each &&/|| list. */
 static long run_seq(char **tokens, long rc_in) {
     int i = 0;
@@ -5254,7 +5367,7 @@ int main(int argc, char **argv) {
     func_clear();
     dirs_init();
     hist_load();
-    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
+    puts("fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break/continue, [[ ]], :/true/false, eval/source/., jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-n]/type/command -v/hash/read/alias/unalias/return/local/shift/functions/envp, set -e/-u, $((arith))/$0..$9/$#/$@/$*, cd-/pushd/popd/dirs, chmod/umask/chown/id, PATH/quotes, kill; persist under /home");
 
     for (;;) {
         char *tokens[MAX_TOK];
