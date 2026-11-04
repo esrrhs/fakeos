@@ -566,12 +566,13 @@ plus prior interactive greens. Ramfs `/bin` dents 92/128.
 
 ## /bin/rmdir + /bin/unlink — landed
 
-Thin shell/POSIX mirrors for scripts/`xargs`. `rmdir DIR...` removes empty
-directories via `rmdir(2)` (no `-p` yet). `unlink FILE...` removes directory
-entries via `unlink(2)` (directories refused — use rmdir). Completes the
-external mkdir/rm family. Focused virtio login smoke covers Ramfs+Ext2 empty
-rmdir, unlink file, refuse unlink-on-dir / rmdir-on-file, plus prior interactive
-greens (smp 1/2). Ramfs `/bin` dents 94/128.
+Thin shell/POSIX mirrors for scripts/`xargs`. `rmdir [-p] DIR...` removes empty
+directories via `rmdir(2)`; `-p` also strips empty parent components (mkdir -p
+inverse; stops before `/`). Shell builtin `rmdir` matches (`DIR...` + `-p`).
+`unlink FILE...` removes directory entries via `unlink(2)` (directories refused
+— use rmdir). Completes the external mkdir/rm family. Focused virtio login smoke
+covers Ramfs+Ext2 empty rmdir, unlink file, refuse unlink-on-dir / rmdir-on-file,
+plus prior interactive greens (smp 1/2). Ramfs `/bin` dents 94/128.
 
 ## /bin/tsort + /bin/pathchk — landed
 
@@ -596,15 +597,28 @@ when stderr is a TTY, and redirects tty stdin from `/dev/null`. COMMAND without
 virtio login smoke covers logname, nohup→nohup.out, plus prior interactive
 greens (smp 1/2). Ramfs `/bin` dents 98/128.
 
+## /bin/cp + /bin/mv directory targets + rmdir -p — landed
+
+`cp`/`mv` now accept `SRC DST` and `SRC... DIRECTORY`: when the destination
+exists as a directory, each source lands at `DIR/basename(SRC)` (same join
+helpers as `/bin/install`). Multi-source requires a directory last operand.
+Still regular-file only (no `-r`). `/bin/rmdir -p` and shell `rmdir [-p]
+DIR...` remove empty parents after the leaf. Also raises Ramfs `MAX_INODES`
+256→512: after login, alloc was already up near inode ~252, so creating files
+inside new dirs failed under modest smoke load. Focused virtio login smoke
+covers cp/mv into dir + multi, rmdir -p nested, plus prior interactive greens
+(smp 1/2). Ramfs `/bin` dents unchanged (98/128; no new publishes).
+
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0) — low priority.
 2. Harden simultaneous Ext2-redirect duplex / multi-nc SMP races — if a clear
    coherent fix exists; otherwise leave known flakes.
 3. Deep jbd — avoid unless needed.
-4. More daily-driver gaps: remaining thin POSIX after inventory (logname/nohup +
-   tsort/pathchk + rmdir/unlink + tac/nproc/timeout + chown/chgrp + install +
-   cal + id/groups + factor/clear/tty/whoami + base64 + checksum trio already
-   present) — prefer small coherent chunks such as cp/mv polish / `rmdir -p`,
+4. More daily-driver gaps: remaining thin POSIX after inventory (cp/mv dir
+   targets + rmdir -p + logname/nohup + tsort/pathchk + rmdir/unlink +
+   tac/nproc/timeout + chown/chgrp + install + cal + id/groups +
+   factor/clear/tty/whoami + base64 + checksum trio already present) — prefer
+   small coherent chunks such as `cp -r` / `mv` dir trees, `head`/`tail` polish,
    or other thin POSIX still missing. Avoid deep jbd / Ext2-redirect duplex
    races / CFS nesting unless a clear bite-sized fix.

@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE] ($?/$VAR), cd, pwd, mkdir[-p], rmdir, ln[-s], readlink,
+ * Builtins: echo [-neE] ($?/$VAR), cd, pwd, mkdir[-p], rmdir[-p], ln[-s], readlink,
  * realpath, env/export/unset/which, exit [code], help, jobs, fg, bg.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -282,6 +282,36 @@ static int sh_mkdir_one(const char *path, int parents) {
         }
     }
     return 0;
+}
+
+/* Remove one empty directory; with -p, also strip empty parents
+ * (inverse of mkdir -p). Stops before removing "/". */
+static int sh_rmdir_one(const char *path, int parents) {
+    char buf[SH_PATH_CAP];
+    unsigned long n;
+    unsigned long i;
+    if (path == 0 || path[0] == 0) return -1;
+    if (!parents) {
+        return u_rmdir(path) < 0 ? -1 : 0;
+    }
+    n = strlen(path);
+    if (n >= SH_PATH_CAP) return -1;
+    strcpy(buf, path);
+    for (;;) {
+        if (u_rmdir(buf) < 0) return -1;
+        n = strlen(buf);
+        while (n > 1 && buf[n - 1] == '/') {
+            buf[n - 1] = 0;
+            n--;
+        }
+        if (n == 0 || (n == 1 && buf[0] == '/')) return 0;
+        i = n;
+        while (i > 0 && buf[i - 1] != '/') i--;
+        if (i == 0) return 0; /* bare component */
+        if (i == 1 && buf[0] == '/') return 0; /* parent is "/" */
+        buf[i - 1] = 0;
+        if (buf[0] == 0) return 0;
+    }
 }
 
 
@@ -1031,15 +1061,41 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return rc;
     }
     if (eq(tokens[0], "rmdir")) {
-        if (tokens[1] == 0) {
+        int parents = 0;
+        int ai = 1;
+        int rc = 0;
+        int saw = 0;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'p') {
+                    parents = 1;
+                } else {
+                    puts("usage: rmdir [-p] DIR...");
+                    return 1;
+                }
+            }
+            ai++;
+        }
+        if (tokens[ai] == 0) {
             puts("sh: rmdir: missing operand");
             return 1;
         }
-        if (u_rmdir(tokens[1]) < 0) {
-            printf("sh: rmdir: %s: cannot remove directory\n", tokens[1]);
+        while (tokens[ai] != 0) {
+            saw = 1;
+            if (sh_rmdir_one(tokens[ai], parents) < 0) {
+                printf("sh: rmdir: %s: cannot remove directory\n", tokens[ai]);
+                rc = 1;
+            }
+            ai++;
+        }
+        if (!saw) {
+            puts("sh: rmdir: missing operand");
             return 1;
         }
-        return 0;
+        return rc;
     }
     if (eq(tokens[0], "sync")) {
         u_sync();
@@ -1051,7 +1107,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         return 0;
     }
     if (eq(tokens[0], "help")) {
-        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir, pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
+        puts("builtins: echo[-neE], cd, mkdir[-p], rmdir[-p], pwd, pid, ppid, uname, sleep, ln[-s], readlink, realpath, env, export, unset, which, chmod, umask, chown, id, setuid, seteuid, sync, clear, history, jobs, fg, bg, kill, exit, help");
         puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
         puts("env: export NAME=val / unset NAME / which CMD; chmod MODE FILE; umask [MODE]; chown UID[:GID] FILE; id; setuid/seteuid; echo[-neE] $NAME / $?; envp -> children");
         puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");

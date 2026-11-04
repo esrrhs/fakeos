@@ -127,7 +127,7 @@ flowchart TD
 - [x] **交互式 /bin/sh 与用户程序**：提示符 `fakeos:~$`（cwd；`~` 缩写 home）、空格分词、内建 `echo`（含 `$?`）/`cd`/`mkdir`/`pwd`/`help`/`exit [code]`；外部命令自动加 `/bin` 前缀，fork+execve+wait4 同步执行并传递退出状态；附带 `/bin/hello`（退出码 42）、`/bin/cat`、`/bin/ls`。启动序列为内核装载 pid 1 = /bin/init（完成阶段三/四全部用户态自测）后 `execve` 到 /bin/sh，`exit` 后内核打印里程碑 SUCCESS。
 
 ### 阶段五：fakecc 自举与生态全闭环（Milestone 5 · 已就绪）
-- [x] **文件系统与进程环境完备化**：补齐 `munmap`（VMA 拆分/截断与帧归还）、`unlink`、`chmod`、`gettid`、`exit_group`、`futex`（WAIT/WAKE；pthread_mutex 已用）等系统调用；Ramfs 扩容至 256 inode / 64 目录项 / 16 MiB 文件；发布 `/proc/self/environ`（live；空 envp 种子 `FAKECC_PKG=/src`）。
+- [x] **文件系统与进程环境完备化**：补齐 `munmap`（VMA 拆分/截断与帧归还）、`unlink`、`chmod`、`gettid`、`exit_group`、`futex`（WAIT/WAKE；pthread_mutex 已用）等系统调用；Ramfs 扩容至 512 inode / 128 目录项 / 16 MiB 文件；发布 `/proc/self/environ`（live；空 envp 种子 `FAKECC_PKG=/src`）。
 - [x] **编译生成原生 fakecc**：`tools/m5_build_fakecc.sh` 在一次性 /tmp scratch 中把宿主 fakecc 源码交叉编译为静态 Linux x86-64 原生镜像，经 `tools/m5_stage.sh` 暂存为 `/bin/fakecc`（幂等、不修改 fakecc 源码树）。
 - [x] **用户空间编译验证**：Shell 支持任意路径执行；OS 内 `/bin/fakecc ping.c -o /tmp/ping && /tmp/ping` 输出 `pong-from-fakeos-compiler`。
 - [x] **内核对象逐字节复现**：`/bin/kbuild` 编排器先跑通 编译器→execve 冒烟，再用 OS 内 fakecc 逐个重编 26 个内核 C 模块并与随镜像发布的宿主参考对象（`/ref`）逐字节比对，输出 26 行 `identical` 与汇总 `all 26 kernel objects byte-identical`。
@@ -252,9 +252,10 @@ flowchart TD
 - [x] **/bin/install**：外部 `install [-d] [-m MODE] SRC DST|DIR...`（`-d` 同 mkdir -p；默认 mode 0755；多源入目录）；供脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/chown + /bin/chgrp**：外部 `chown UID[:GID] FILE...`（缺 GID 不变组）、`chgrp GID FILE...`（uid=(u32)-1）；与 shell `chown` / `chown(2)` 对齐；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tac + /bin/nproc + /bin/timeout**：外部 `tac [FILE...]` 逆序行、`nproc`（读启动期 `/proc/cpuinfo`，来自 `smp_cpu_count`）、`timeout SECONDS CMD...`（fork+nanosleep 轮询+SIGKILL，超时退出 124）；供管道/脚本。virtio login smoke（smp 1/2）。
-- [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir DIR...`（空目录；shell-mirror）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
+- [x] **/bin/rmdir + /bin/unlink**：外部 `rmdir [-p] DIR...`（空目录；`-p` 清空父分量；shell-mirror 同步）、`unlink FILE...`（unlink(2)；拒目录）；供 `xargs` / 脚本。virtio login smoke（smp 1/2）。
 - [x] **/bin/tsort + /bin/pathchk**：外部 `tsort [FILE...]`（有序对拓扑排序；环检测）、`pathchk [-p] PATH...`（路径长度/分量；`-p` 可移植字符集与 POSIX 限）。virtio login smoke（smp 1/2）。
 - [x] **/bin/logname + /bin/nohup**：外部 `logname`（LOGNAME/USER/passwd getuid）、`nohup CMD...`（忽略 SIGHUP；TTY 输出追加 `nohup.out`）。virtio login smoke（smp 1/2）。
+- [x] **/bin/cp + /bin/mv 目录目标**：`cp`/`mv` 支持 `SRC DST` 与 `SRC... DIRECTORY`（目标为目录时落到 `DIR/basename`）；配合 `/bin/rmdir -p` / shell `rmdir -p`。virtio login smoke（smp 1/2）。
 - [x] **/bin/mktemp + /bin/rev + /bin/paste**：外部 `mktemp [-d][-u] [TEMPLATE]`、`rev [FILE...]`、`paste [-s] [-d LIST] [FILE...]`；供脚本/管道。virtio login smoke（smp 1/2）。
 - [x] **shell mkdir -p + /bin/rm -r**：shell `mkdir [-p] DIR...` 递归创建路径分量（已存在目录视为成功）；`/bin/rm [-r|-R] FILE...` 递归删除目录树（getdents 收集后 unlink/rmdir）。virtio login smoke（smp 1/2）。
 - [x] **setuid/seteuid + groups**：`setuid`/`setgid`/`setreuid`/`setregid`/`getgroups`/`setgroups`（nr 105/106/113/114/115/116）；TCB 补充组最多 8；文件创建用 euid/egid；`/etc/group` + login 按 passwd uid/gid 与组成员 `setgroups`/`setgid`/`setuid` 后 exec；shell `id` 显示 groups，`setuid`/`seteuid` 内建；自测 `[U][PASS] setuid/seteuid/groups`；virtio login smoke（smp 1/2）。
