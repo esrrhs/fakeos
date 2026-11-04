@@ -215,6 +215,7 @@ flowchart TD
 - [x] **Ext2 journal commit-block**：SB `jblk` 指向一块 OPEN/COMMIT 记录；`jl_commit` 写 `JL_J_COMMIT`（ORDERED 在 COMMIT 前后各 FLUSH）；挂载时若 `META_PENDING` 且 commit 块 gen 匹配则清标记而不 recount；自测 `[EXT2] [PASS] journal commit-block recover`（仍非完整 jbd）。
 - [x] **Ext2 journal descriptor/revoke + multi-txn ring**：control 块 + 8-slot 环；`jl_commit` 写 DESCRIPTOR（脏 meta）/REVOKE（释放块）/COMMIT；多 txn 环内共存；挂载扫环匹配 COMMIT；自测 `[EXT2] [PASS] journal descriptor/revoke + multi-txn ring`（仍非完整 jbd）。
 - [x] **Ext2 journal metadata-copy replay**：commit 时把脏 meta 整块快照进 4-slot copy pool；`META_PENDING`+匹配 COMMIT 时先 replay 再清标记；自测 `[EXT2] [PASS] journal metadata-copy replay`（仍非完整 jbd）。
+- [x] **Ext2 ordered journal × blk_async**：`jl_write_meta_copies`/`jl_replay_meta_copies` 经 `blk_async_write_batch` 管道化（AHCI NCQ 重叠；VirtIO/ATA inline）；自测 `[EXT2] [PASS] journal ordered blk_async meta-copy`（仍非完整 jbd）。
 - [x] **Ext2 ftruncate(2)**：grow（sparse）/shrink（保留前缀并释放尾块）/zero；自测 `[EXT2] [PASS] ftruncate grow/shrink/zero`。
 - [x] **Ext2 rename(2)**：同卷目录项移动（文件/目录）；替换已存在普通文件或空目录；跨目录移动目录时更新 `..` 与父链接计数；Ramfs 同步支持；`/bin/mv` 优先 `rename`，跨 FS 仍 copy+unlink；自测 `[EXT2] [PASS] rename same-dir/cross-dir`。
 - [x] **pthread_mutex on futex**：libc NPTL-style 0/1/2 word + `atomic_xchg`/`atomic_cmpxchg`；`lock`/`trylock`/`unlock`；跨 fork `MAP_SHARED` 自测 `[U][PASS] pthread_mutex futex lock/unlock`。

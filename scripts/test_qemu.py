@@ -312,7 +312,8 @@ def main():
         "[EXT2] [PASS] journal commit-block recover",
         "[EXT2] [PASS] journal descriptor/revoke + multi-txn ring",
         "[EXT2] [PASS] journal metadata-copy replay",
-        "[EXT2] journal-lite ordered + descriptor/revoke + meta-copy replay online (not a full journal)",
+        "[EXT2] [PASS] journal ordered blk_async meta-copy",
+        "[EXT2] journal-lite ordered + descriptor/revoke + meta-copy replay + blk_async online (not a full journal)",
         # AHCI probe log (QEMU may or may not expose 01.06)
         re.compile(r"\[BLK\] (?:no AHCI \(PCI 01\.06\)|AHCI PCI 01\.06)"),
         "Multiboot Physical Memory Map",
@@ -419,7 +420,7 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 journal meta-copy replay + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
+        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 journal ordered blk_async meta-copy + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",

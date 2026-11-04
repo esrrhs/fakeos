@@ -16,7 +16,7 @@ the in-tree drivers already speak.
 | **VirtIO-net (modern)** | `make qemu-modern` / `disable-legacy=on` | `drivers/virtio_net.c` | Same cap map as blk; multi-vector MSI-X RX=40/TX=43 (per-queue); single MSI/MSI-X or INTx fallback; TX `sched_sleep` when multi |
 
 `drivers/blk.c` preference: **virtio-blk → AHCI → ATA**. Ext2 rides on that
-block layer (journal-lite descriptor/revoke ring + meta-copy replay, multi-bg, triple-indirect).
+block layer (journal-lite descriptor/revoke ring + meta-copy replay via blk_async batch, multi-bg, triple-indirect).
 
 ## Modern virtio status
 
@@ -37,12 +37,13 @@ block layer (journal-lite descriptor/revoke ring + meta-copy replay, multi-bg, t
   `virtio_net_hdr` (includes `num_buffers`); legacy stays at 10.
 - **AHCI async NCQ + bio queue**: multi-slot CL + per-slot bounce (depth 4); large R/W pipelines multiple FPDMA commands. Shared bio queue (8) lets overlapping callers share the NCQ window (cross-caller).
 - **blk_async end_io**: `blk_async_rw` / `ahci_async_rw` submit without waiting; `end_io(private, ok)` from `blk_async_poll` or a concurrent sync-waiter pump (IRQ only wakes — qlock is not IRQ-safe). Sync `blk_read`/`blk_write` unchanged. VirtIO/ATA sync-fallback completes inline then cb. Selftests: `[AHCI] [PASS] async NCQ multi-outstanding`, `[AHCI] [PASS] bio queue cross-caller`, `[AHCI] [PASS] blk_async end_io`.
+- **Ext2 ordered meta-copy on blk_async**: `jl_write_meta_copies` / `jl_replay_meta_copies` pipeline up to 4 pool writes through `blk_async_write_batch` (bounce slots; AHCI overlaps NCQ; VirtIO/ATA inline). Selftest: `[EXT2] [PASS] journal ordered blk_async meta-copy`.
 
 ## Suggested next steps
 
 1. Tiny CFS nesting polish (roots must stay NONE, not BSS 0).
-2. Wire Ext2/journal ordered path onto blk_async where a coherent slice fits.
-3. Grow journal copy pool / revoke-aware replay (still not full jbd).
+2. Grow journal copy pool / revoke-aware replay (still not full jbd).
+3. Broader Ext2 data-path async (beyond ordered meta-copy batch).
 
 Until then, Makefile default keeps `disable-modern=on` for blk and net; use
 `make qemu-modern` to exercise the MMIO + MSI-X path.

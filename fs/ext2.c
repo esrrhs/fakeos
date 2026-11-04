@@ -20,11 +20,11 @@ extern void kprintf(const char *fmt, ...);
  * writeback commit modes with recovery markers in unused SB space
  * (magic/gen/flags/mode/jblk); journal control block + ring slots hold
  * DESCRIPTOR / REVOKE / COMMIT records across multiple txns. Commit also
- * snapshots dirtied meta blocks into a small copy pool; META_PENDING with
- * a matching COMMIT replays those copies onto home blocks before clearing
- * the marker (SB idle write lost after commit). Dirty/incomplete mounts
- * without COMMIT still recount. ORDERED flushes data before COMMIT (not a
- * full jbd).
+ * snapshots dirtied meta blocks into a small copy pool via blk_async batch
+ * writes; META_PENDING with a matching COMMIT replays those copies onto
+ * home blocks (also blk_async) before clearing the marker (SB idle write
+ * lost after commit). Dirty/incomplete mounts without COMMIT still recount.
+ * ORDERED flushes data before COMMIT (not a full jbd).
  *
  * On-disk fields are accessed at explicit byte offsets (no packed structs)
  * so fakecc layout cannot introduce padding bugs.
@@ -202,8 +202,10 @@ static u32 bg_store(u32 g, const struct ext2_bg *in) {
  * (not a full jbd). Ring records: DESCRIPTOR (dirtied meta blocks),
  * REVOKE (freed blocks), COMMIT. ORDERED: device FLUSH before COMMIT
  * (data-before-commit). WRITEBACK: COMMIT without the extra data FLUSH
- * (fsync/sync still drain). Recovery: matching COMMIT gen in the ring
- * clears a stale META_PENDING without recount; otherwise recount. */
+ * (fsync/sync still drain). Meta-copy pool writes ride blk_async_write_batch
+ * (AHCI overlaps; VirtIO/ATA complete inline). Recovery: matching COMMIT
+ * gen in the ring clears a stale META_PENDING without recount; otherwise
+ * recount. */
 enum {
     JL_MAGIC = 0x4C4A3146u,        /* 'F1JL' SB marker */
     JL_CTRL_MAGIC = 0x4B4A3146u,   /* 'F1JK' journal control */
@@ -250,6 +252,10 @@ static u32 jl_copy_blks[JL_MAX_COPIES]; /* durable meta snapshot pool */
 static u32 jl_copy_homes[JL_MAX_COPIES];
 static u32 jl_copy_n;                  /* valid homes for jl_copy_gen */
 static u32 jl_copy_gen;
+/* Bounce pool for ordered meta-copy / replay blk_async batches (4 KiB slots). */
+static u8 jl_aio_bufs[JL_MAX_COPIES * 4096];
+static u64 jl_aio_secs[JL_MAX_COPIES];
+static u32 jl_aio_submits;             /* cumulative batch submits (selftest) */
 
 static u32 alloc_block(void);
 
@@ -515,35 +521,57 @@ static u32 jl_ensure_jblk(void) {
     return 1;
 }
 
-/* Snapshot dirtied meta homes into the copy pool (full FS blocks). */
+/* Snapshot dirtied meta homes into the copy pool (full FS blocks).
+ * ORDERED path pipelines the pool writes through blk_async_write_batch so
+ * AHCI can overlap NCQ slots; VirtIO/ATA complete inline then cb. */
 static u32 jl_write_meta_copies(void) {
     u32 i;
     u32 slot;
+    u32 sectors;
+    u32 b;
     if (!jl_copy_pool_ready()) return 0;
     for (i = 0; i < JL_MAX_COPIES; i++) jl_copy_homes[i] = 0;
     slot = 0;
+    sectors = sb.block_size / SECTOR_SIZE;
     for (i = 0; i < jl_desc_n && slot < JL_MAX_COPIES; i++) {
         u32 home = jl_desc_tags[i];
         if (home == 0 || jl_is_journal_blk(home)) continue;
         if (!bread(home, blk_buf)) return 0;
-        if (!bwrite(jl_copy_blks[slot], blk_buf)) return 0;
+        for (b = 0; b < sb.block_size; b++) {
+            jl_aio_bufs[(u64)slot * 4096 + b] = blk_buf[b];
+        }
+        jl_aio_secs[slot] = ((u64)jl_copy_blks[slot] * (u64)sb.block_size)
+                            / (u64)SECTOR_SIZE;
         jl_copy_homes[slot] = home;
         slot++;
     }
     jl_copy_n = slot;
     jl_copy_gen = jl_gen;
+    if (slot != 0) {
+        if (!drivers.blk_async_write_batch(jl_aio_secs, jl_aio_bufs, 4096,
+                                           sectors, slot)) {
+            return 0;
+        }
+        jl_aio_submits = jl_aio_submits + slot;
+    }
     return jl_write_ctrl();
 }
 
 /* Replay copy-pool snapshots for want_gen onto their home blocks.
- * Missing/empty pool is fine (pre-copy images) — treat as no-op success. */
+ * Missing/empty pool is fine (pre-copy images) — treat as no-op success.
+ * Restores also ride blk_async_write_batch (same ordered path). */
 static u32 jl_replay_meta_copies(u32 want_gen) {
     u32 i;
     u32 n;
+    u32 nsub;
+    u32 sectors;
+    u32 b;
     if (jl_copy_n == 0 || jl_copy_gen != want_gen) return 1;
     if (!jl_copy_pool_ready()) return 1;
     n = jl_copy_n;
     if (n > JL_MAX_COPIES) n = JL_MAX_COPIES;
+    sectors = sb.block_size / SECTOR_SIZE;
+    nsub = 0;
     for (i = 0; i < n; i++) {
         u32 home = jl_copy_homes[i];
         if (home == 0) continue;
@@ -552,7 +580,19 @@ static u32 jl_replay_meta_copies(u32 want_gen) {
         if (home < sb.first_data_block || home >= sb.blocks_count) return 0;
         if (jl_is_journal_blk(home)) return 0;
         if (!bread(jl_copy_blks[i], blk_buf)) return 0;
-        if (!bwrite(home, blk_buf)) return 0;
+        for (b = 0; b < sb.block_size; b++) {
+            jl_aio_bufs[(u64)nsub * 4096 + b] = blk_buf[b];
+        }
+        jl_aio_secs[nsub] = ((u64)home * (u64)sb.block_size)
+                            / (u64)SECTOR_SIZE;
+        nsub++;
+    }
+    if (nsub != 0) {
+        if (!drivers.blk_async_write_batch(jl_aio_secs, jl_aio_bufs, 4096,
+                                           sectors, nsub)) {
+            return 0;
+        }
+        jl_aio_submits = jl_aio_submits + nsub;
     }
     return 1;
 }
@@ -663,9 +703,10 @@ static void jl_begin(void) {
     jl_write_flags(JL_META_PENDING);
 }
 
-/* Commit: ORDERED drains data; write DESCRIPTOR + meta copy snapshots +
- * optional REVOKE + COMMIT into the ring/pool; then clear META_PENDING.
- * A second ORDERED flush makes the commit durable before the SB idle. */
+/* Commit: ORDERED drains data; write DESCRIPTOR + meta copy snapshots
+ * (blk_async batch) + optional REVOKE + COMMIT into the ring/pool; then
+ * clear META_PENDING. A second ORDERED flush makes the commit durable
+ * before the SB idle. */
 static void jl_commit(void) {
     if (jl_mode == JL_MODE_ORDERED) {
         drivers.blk_flush();
@@ -1665,7 +1706,7 @@ u32 ext2_mount(void) {
             (u64)sb.blocks_count, (u64)sb.inodes_count,
             (u64)sb.block_size, (u64)sb.groups_count, (u64)bg0, (u64)jl_gen,
             (u64)jl_jblk, (u64)jl_ring_len);
-    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy replay online (not a full journal)\n",
+    kprintf("[EXT2] journal-lite %s + descriptor/revoke + meta-copy replay + blk_async online (not a full journal)\n",
             jl_mode == JL_MODE_ORDERED ? "ordered" : "writeback");
     return 1;
 }
@@ -2727,6 +2768,111 @@ void ext2_selftest(void) {
         ext2_sync();
         jl_set_mode(saved_mode);
         kprintf("[EXT2] [PASS] journal metadata-copy replay\n");
+    }
+
+    /* Ordered path blk_async: tag two meta homes, commit (async pool write),
+     * prove copy pool holds both and jl_aio_submits advanced by >=2. */
+    {
+        u32 saved_mode = jl_mode;
+        u32 g;
+        u32 before_sub;
+        u32 home0;
+        u32 home1;
+        struct ext2_bg bg0;
+        u8 expect0[64];
+        u8 expect1[64];
+        u32 i;
+        jl_set_mode(JL_MODE_ORDERED);
+        if (!jl_copy_pool_ready()) {
+            kprintf("[EXT2] [FAIL] journal async pool missing\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bg_load(0, &bg0)) {
+            kprintf("[EXT2] [FAIL] journal async bg0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        home0 = sb.bg_block;
+        home1 = bg0.inode_bitmap;
+        if (home1 == 0 || home1 == home0 || jl_is_journal_blk(home1)) {
+            kprintf("[EXT2] [FAIL] journal async homes\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(home0, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal async bread0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) expect0[i] = blk_buf[i];
+        if (!bread(home1, blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal async bread1\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) expect1[i] = blk_buf[i];
+        before_sub = jl_aio_submits;
+        jl_begin();
+        g = jl_gen;
+        jl_desc_add(home0);
+        jl_desc_add(home1);
+        if (jl_desc_n < 2) {
+            kprintf("[EXT2] [FAIL] journal async tag capture\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        jl_commit();
+        if (jl_flags != JL_IDLE) {
+            kprintf("[EXT2] [FAIL] journal async commit idle\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_copy_gen != g || jl_copy_n < 2) {
+            kprintf("[EXT2] [FAIL] journal async copy n=%u gen=%u\n",
+                    (u64)jl_copy_n, (u64)jl_copy_gen);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_copy_homes[0] != home0 || jl_copy_homes[1] != home1) {
+            kprintf("[EXT2] [FAIL] journal async homes mismatch\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (jl_aio_submits < before_sub + 2) {
+            kprintf("[EXT2] [FAIL] journal async submits %u->%u\n",
+                    (u64)before_sub, (u64)jl_aio_submits);
+            jl_set_mode(saved_mode);
+            return;
+        }
+        if (!bread(jl_copy_blks[0], blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal async reread copy0\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) {
+            if (blk_buf[i] != expect0[i]) {
+                kprintf("[EXT2] [FAIL] journal async copy0 mismatch\n");
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        if (!bread(jl_copy_blks[1], blk_buf)) {
+            kprintf("[EXT2] [FAIL] journal async reread copy1\n");
+            jl_set_mode(saved_mode);
+            return;
+        }
+        for (i = 0; i < 64; i++) {
+            if (blk_buf[i] != expect1[i]) {
+                kprintf("[EXT2] [FAIL] journal async copy1 mismatch\n");
+                jl_set_mode(saved_mode);
+                return;
+            }
+        }
+        ext2_sync();
+        jl_set_mode(saved_mode);
+        kprintf("[EXT2] [PASS] journal ordered blk_async meta-copy (submits=%u)\n",
+                (u64)jl_aio_submits);
     }
 
     /* Past single-indirect (268 KiB at 1 KiB blocks). Write full blocks to
