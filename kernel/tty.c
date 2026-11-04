@@ -13,8 +13,9 @@ typedef types.uint64_t u64;
  * read(0) blocks until a full line has been received, echoing input as it
  * arrives. UART (IRQ4) and PS/2 keyboard (IRQ1) both feed this path: UART
  * via its own ring, keyboard via tty_push_byte. Sleepers wake on either
- * source; empty checks use sched_sleep_cli so a byte cannot be lost between
- * poll and sleep. Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
+ * source. Empty checks hold tty_lock under CLI then wait_queue_sleep_unlock
+ * so unlock+sleep is atomic under the run lock (same pattern as pipes).
+ * Echo goes to UART and VGA. Arrow keys (CSI A/B) recall
  * a 32-entry line history shared by serial and PS/2. Left/Right + Ctrl-A/E/U
  * provide basic readline-style editing. ISIG: Ctrl-C/Ctrl-Z are intercepted
  * on input (UART IRQ + PS/2) even while the shell is blocked in wait4 when
@@ -41,15 +42,39 @@ static u32 tty_in_tail;
 static u32 tty_in_count;
 
 extern u64 sched_current_as_h(void);
-extern void sched_sleep_cli(u64 chan);
-extern void sched_wakeup(u64 chan);
 extern void select_kick(void);
 extern void cpu_cli(void);
 extern void cpu_sti(void);
 
-static u32 tty_wait_token;
+struct kmutex {
+    u32 locked;
+    u32 owner;
+};
+
+struct wait_queue_head {
+    u32 pad;
+};
+
+extern void kmutex_init(struct kmutex *m);
+extern void kmutex_lock(struct kmutex *m);
+extern void kmutex_unlock(struct kmutex *m);
+extern void wait_queue_init(struct wait_queue_head *wq);
+extern void wait_queue_wake(struct wait_queue_head *wq);
+extern void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m);
+
+static struct kmutex tty_lock;
+static struct wait_queue_head tty_wait;
+static u32 tty_locks_inited;
 static u32 tty_fg_pgid;         /* foreground process group for ISIG (0=none) */
 static u32 tty_got_intr;        /* Ctrl-C interrupted the current read */
+
+static void tty_locks_ensure(void) {
+    if (!tty_locks_inited) {
+        kmutex_init(&tty_lock);
+        wait_queue_init(&tty_wait);
+        tty_locks_inited = 1;
+    }
+}
 
 /* termios (Linux-ish): stored separately from the 64-byte user TCGETS blob. */
 enum {
@@ -298,7 +323,8 @@ static void tty_ingest_byte(char c) {
         tty_pos = 0;
         tty_got_intr = 1;
         tty_signal_fg(SIGINT_N);
-        sched_wakeup((u64)&tty_wait_token);
+        tty_locks_ensure();
+        wait_queue_wake(&tty_wait);
         select_kick();
         return;
     }
@@ -312,7 +338,8 @@ static void tty_ingest_byte(char c) {
             drivers.vga_putc('\n');
         }
         tty_signal_fg(SIGTSTP_N);
-        sched_wakeup((u64)&tty_wait_token);
+        tty_locks_ensure();
+        wait_queue_wake(&tty_wait);
         select_kick();
         return;
     }
@@ -320,7 +347,8 @@ static void tty_ingest_byte(char c) {
         c = '\n';
     }
     tty_queue_byte(c);
-    sched_wakeup((u64)&tty_wait_token);
+    tty_locks_ensure();
+    wait_queue_wake(&tty_wait);
     select_kick();
 }
 
@@ -366,13 +394,16 @@ static int tty_in_pop(void) {
 
 static int tty_getc_block(void) {
     int c;
-    /* Syscall entry clears IF; allow device IRQs, then close the race under
-     * CLI so wakeup cannot land between an empty poll and sleep. */
-    cpu_sti();
+    /* Hold tty_lock around the wait condition. CLI covers the empty-check to
+     * sleep-arm window so an IRQ byte+wake cannot land in between; sleep uses
+     * wait_queue_sleep_unlock (atomic unlock+sleep under the run lock). */
+    tty_locks_ensure();
+    kmutex_lock(&tty_lock);
     cpu_cli();
     for (;;) {
         if (tty_got_intr || sched_has_pending_fatal()) {
             cpu_sti();
+            kmutex_unlock(&tty_lock);
             return -2;                  /* interrupted */
         }
         c = tty_in_pop();
@@ -381,11 +412,11 @@ static int tty_getc_block(void) {
         }
         if (c >= 0) {
             cpu_sti();
+            kmutex_unlock(&tty_lock);
             return c;
         }
-        sched_sleep_cli((u64)&tty_wait_token);
-        /* Still CLI after sleep_cli; deliver stop/kill before re-polling. */
-        cpu_sti();
+        wait_queue_sleep_unlock(&tty_wait, &tty_lock);
+        /* Lock re-acquired; IF on. Deliver stop/kill before re-polling. */
         sched_check_signals();
         cpu_cli();
     }
@@ -684,12 +715,20 @@ u64 tty_console_read(u64 ubuf, u64 len) {
                 if (done > 0 && tty_cc[TTY_VMIN] == 0) {
                     break;
                 }
-                cpu_sti();
+                tty_locks_ensure();
+                kmutex_lock(&tty_lock);
                 cpu_cli();
-                sched_sleep_cli((u64)&tty_wait_token);
+                c = tty_in_pop();
+                if (c < 0) {
+                    c = drivers.uart_getc_nonblock();
+                }
+                if (c < 0) {
+                    wait_queue_sleep_unlock(&tty_wait, &tty_lock);
+                    sched_check_signals();
+                    continue;
+                }
                 cpu_sti();
-                sched_check_signals();
-                continue;
+                kmutex_unlock(&tty_lock);
             }
             ((volatile char *)ubuf)[done] = (char)c;
             done++;
@@ -730,4 +769,23 @@ u64 tty_console_read(u64 ubuf, u64 len) {
         }
     }
     return done;
+}
+
+/* Self-test: block on tty wait_queue until one input byte arrives, then drop it.
+ * Uses the same kmutex + wait_queue_sleep_unlock path as console read. */
+void tty_selftest_wait_byte(void) {
+    int c;
+    tty_locks_ensure();
+    kmutex_lock(&tty_lock);
+    cpu_cli();
+    for (;;) {
+        c = tty_in_pop();
+        if (c >= 0) {
+            cpu_sti();
+            kmutex_unlock(&tty_lock);
+            return;
+        }
+        wait_queue_sleep_unlock(&tty_wait, &tty_lock);
+        cpu_cli();
+    }
 }

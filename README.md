@@ -146,7 +146,7 @@ flowchart TD
 - [x] **宿主工具**：`tools/mkext2.py` 生成最小 Ext2 镜像（≥4MiB 为多 block group）；`make disk` / `make qemu-disk`。
 - [x] **自测与持久化冒烟**：启动时写入 `/mnt/m6pass.txt` 并回读；跨两次 QEMU 引导文件仍在；用户态 `/bin/cp`、`/bin/rm` 可把 Ramfs 文件拷到 `/mnt` 并持久化。
 - [x] **VirtIO-blk 队列 DMA 排通**：按真实 QueueNum 建环后 used ring 正常前进；`make qemu-disk` 默认 VirtIO，测试仍可用 IDE/ATA。
-- [x] **I/O APIC + 中断驱动 UART**：映射 I/O APIC，ISA IRQ4→vector 36；COM1 RDA 中断填环，TTY `sched_sleep_cli` 阻塞唤醒（键盘/VirtIO IRQ 仍待接）。
+- [x] **I/O APIC + 中断驱动 UART**：映射 I/O APIC，ISA IRQ4→vector 36；COM1 RDA 中断填环，TTY 阻塞走 `kmutex` + `wait_queue_sleep_unlock`（与 pipe 同型；键盘 IRQ 已接入）。
 - [x] **Ext2 rmdir**：空目录删除；`unlink` 不再误拆目录项。Ramfs 同步支持 `rmdir`。
 - [x] **Ext2 双间接块**：文件可跨 single-indirect（1K 块下 >268KiB）；trunc/unlink 回收双重间接；自测 `/mnt/big.bin` 270KiB（越过双间接）。
 - [x] **Ext2 多块组 + 写入硬化**：按 BGDT 索引多 block group；分配/释放维护 SB/BG 空闲计数；挂载置 `s_state` 脏、`sync` 写回 VALID；journal-lite 恢复标记见下。
@@ -215,6 +215,7 @@ flowchart TD
 - [x] **CLONE_CHILD_CLEARTID-style join**：`set_tid_address(2)`（nr 218）登记 per-TCB `clear_child_tid`；线程/进程退出时内核将 `*ctid=0` 并 `futex` 唤醒；libc `pthread_join` 等待该字归零（不再依赖用户态 WAKE）；自测 `[U][PASS] pthread_join CLEARTID`（raw `exit` 路径）。
 - [x] **睡眠锁完备化（kmutex/ksem/wait_queue）**：在既有 channel sleep 上补齐 owner/`trylock`、计数信号量与类型化 waitqueue；`sched_selftest` 验证睡眠而非忙等。
 - [x] **pipe 走 kmutex + wait_queue**：每 pipe 一把 `kmutex` + 读/写 `wait_queue_head`；`wait_queue_sleep_unlock` 在 run-lock 下原子放锁并睡眠，避免 unlock-then-sleep 丢唤醒；表分配另有 `pipes_table_lock`；自测 `[PASS] pipe kmutex + wait_queue_sleep_unlock blocking`（写端填满环后进入 `TCB_SLEEPING`）。
+- [x] **TTY 走 kmutex + wait_queue**：控制台读与 pipe 同型——`tty_lock` + `tty_wait`；空环在 CLI 下检查后 `wait_queue_sleep_unlock`；UART/PS2 摄入路径 `wait_queue_wake`；自测 `[PASS] tty kmutex + wait_queue_sleep_unlock blocking`（waiter 进入 `TCB_SLEEPING`，`tty_push_byte` 唤醒）。
 
 
 
