@@ -375,11 +375,13 @@ plus prior interactive greens (smp 1/2).
 
 ## /bin/date + /bin/stat — landed
 
-Thin utils (not shell builtins): `date [+%s]` prints `clock_gettime(CLOCK_REALTIME)`
-seconds (boot-relative; no RTC yet), and `stat [-L] FILE...` prints
+Thin utils (not shell builtins): `date [+FORMAT]` prints `clock_gettime(CLOCK_REALTIME)`
+(boot-relative; no RTC yet; bare/`+%s` seconds; FORMAT supports
+`%s/%N/%Y/%m/%d/%H/%M/%S/%y/%%`), and `stat [-L] [-c FORMAT] FILE...` prints
 type/mode/ino/nlink/uid/gid/size/mtime via `lstat(2)` (default) or `stat(2)`
-with `-L`. Focused virtio login smoke covers `/bin/date`, `/bin/stat` on file
-and symlink (+ `-L`), `xargs /bin/stat`, plus prior interactive greens (smp 1/2).
+with `-L` (`-c` thin GNU field formats). Focused virtio login smoke covers
+`/bin/date`, `/bin/stat` on file and symlink (+ `-L`/`-c`), `xargs /bin/stat`,
+plus prior interactive greens (smp 1/2).
 
 ## /bin/nl + /bin/fold — landed
 
@@ -781,15 +783,29 @@ with `-ivnF`). `tr` gains `-c`/`-C` (complement SET1) and glued `-cd`/`-dc`
 (`tr -cd SET` keeps only SET). Focused virtio login smoke covers `grep -c`,
 `tr -c`/`-cd`, Ext2, prior greens (smp 1/2). Ramfs `/bin` dents 106/128.
 
+
+
+## date +FORMAT + stat -c — landed
+
+Thin format-string polish (no new `/bin` dent; no kernel work). Inventory: still no
+`statfs(2)` (thin `df` deferred) and no `utimensat(2)` (touch `-r`/`-d`
+deferred); `mkfifo` still needs `mknod` (absent). `/bin/date` gains `+FORMAT`
+beyond bare / `+%s`: `%s` `%N` `%Y` `%m` `%d` `%H` `%M` `%S` `%y` `%%` (calendar
+fields treat boot-relative `CLOCK_REALTIME` seconds as Unix epoch — no RTC).
+`/bin/stat` gains `-c FORMAT` / glued `-cFORMAT` / `-Lc`; thin GNU conversions
+`%n` `%s` `%i` `%a` `%f` `%F` `%h` `%u` `%g` `%Y` `%%` (default multi-field line
+unchanged). Focused virtio login smoke covers `date`/`+%s`/`+%Y-%m-%d`,
+`stat -c`/`-Lc` symlink follow, Ext2, prior greens (smp 1/2). Ramfs `/bin`
+dents 106/128.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory (`grep -c` + `tr -c` +
-   `readlink -n/-f` + `which -a` + …): prefer small coherent chunks; thin
+3. More daily-driver gaps after inventory (`date +FORMAT` + `stat -c` +
+   `grep -c` + `tr -c` + …): prefer small coherent chunks; thin
    `df` **only if** `statfs(2)` is added, or `touch -r`/`-d` if utimens arrive.
-   Candidates: `seq -w`, `du -h`, `xargs -I`, `sort -k`, `stat -c`,
-   `date +FORMAT` (boot-relative only), `timeout --signal`, skip
-   `yes --version` fluff; `/bin/mkfifo` only if `mknod` exists. Avoid deep jbd /
-   Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
+   Candidates: `seq -w`, `du -h`, `xargs -I`, `sort -k`, `timeout --signal`,
+   skip `yes --version` fluff; `/bin/mkfifo` only if `mknod` exists. Avoid deep
+   jbd / Ext2-redirect duplex races / CFS nesting unless a clear bite-sized fix.
