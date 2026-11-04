@@ -1,6 +1,8 @@
 /* fakeos userland - cmp: compare two files byte-by-byte (POSIX-ish subset).
- * Forms: cmp [-l|-s] FILE1 FILE2
- * Exit 0 identical, 1 differ, 2 error. "-" means stdin (at most one).
+ * Forms: cmp [-l|-s] [-n N|-nN] FILE1 FILE2
+ * -n limits comparison to at most N bytes (GNU-ish). Exit 0 identical (within
+ * limit), 1 differ, 2 error. "-" means stdin (at most one). Compact argv for
+ * EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -10,6 +12,7 @@ extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
+extern long strtol_dec(const char *s);
 
 enum {
     O_RDONLY = 0,
@@ -19,8 +22,20 @@ enum {
     BUF = 512
 };
 
+static unsigned long opt_limit; /* 0 = unlimited */
+static int have_limit;
+
 static void usage(void) {
-    u_write(2, "usage: cmp [-l|-s] FILE1 FILE2\n", 31);
+    u_write(2, "usage: cmp [-l|-s] [-n N] FILE1 FILE2\n", 38);
+}
+
+static int is_digits(const char *s) {
+    int i;
+    if (s == 0 || s[0] == 0) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
 }
 
 static void emit_dec(unsigned long v) {
@@ -73,22 +88,23 @@ static int cmp_fds(long fd1, long fd2, const char *n1, const char *n2, int mode)
     unsigned char b[BUF];
     unsigned long byte = 1;
     unsigned long line = 1;
+    unsigned long left = have_limit ? opt_limit : 0; /* remaining when limited */
     int differ = 0;
     long na;
     long nb;
     int i;
+    unsigned long want;
 
     for (;;) {
-        na = u_read(fd1, a, BUF);
-        nb = u_read(fd2, b, BUF);
+        if (have_limit && left == 0) return differ ? 1 : 0;
+        want = BUF;
+        if (have_limit && left < want) want = left;
+        na = u_read(fd1, a, want);
+        nb = u_read(fd2, b, want);
         if (na < 0 || nb < 0) return 2;
         if (na == 0 && nb == 0) return differ ? 1 : 0;
         if (na == 0 || nb == 0) {
-            /* One file ended first — treat as differ at first missing byte. */
             if (mode == MODE_SILENT) return 1;
-            if (mode == MODE_VERBOSE) {
-                /* No more paired bytes to list; fall through to summary. */
-            }
             printf("cmp: EOF on %s after byte ", na == 0 ? n1 : n2);
             emit_dec(byte - 1);
             u_write(1, "\n", 1);
@@ -117,21 +133,17 @@ static int cmp_fds(long fd1, long fd2, const char *n1, const char *n2, int mode)
             }
             if (a[i] == '\n') line++;
             byte++;
+            if (have_limit) {
+                left--;
+                if (left == 0) return differ ? 1 : 0;
+            }
             i++;
         }
         if (na != nb) {
-            /* Unequal short reads with remaining data on one side. */
             if (mode == MODE_SILENT) return 1;
-            if (mode != MODE_VERBOSE) {
-                printf("cmp: EOF on %s after byte ", na < nb ? n1 : n2);
-                emit_dec(byte - 1);
-                u_write(1, "\n", 1);
-            } else {
-                /* Drain remaining bytes of the longer side as EOF. */
-                printf("cmp: EOF on %s after byte ", na < nb ? n1 : n2);
-                emit_dec(byte - 1);
-                u_write(1, "\n", 1);
-            }
+            printf("cmp: EOF on %s after byte ", na < nb ? n1 : n2);
+            emit_dec(byte - 1);
+            u_write(1, "\n", 1);
             return 1;
         }
     }
@@ -148,6 +160,9 @@ int main(int argc, char **argv) {
     int close1 = 0;
     int close2 = 0;
 
+    opt_limit = 0;
+    have_limit = 0;
+
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
         if (strcmp(argv[i], "--") == 0) {
             i++;
@@ -157,13 +172,69 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-s") == 0) {
             mode = MODE_SILENT;
             i++;
-        } else if (strcmp(argv[i], "-l") == 0) {
+            continue;
+        }
+        if (strcmp(argv[i], "-l") == 0) {
             mode = MODE_VERBOSE;
             i++;
-        } else {
-            usage();
-            return 2;
+            continue;
         }
+        if (strcmp(argv[i], "-n") == 0) {
+            if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                usage();
+                return 2;
+            }
+            opt_limit = (unsigned long)strtol_dec(argv[i + 1]);
+            have_limit = 1;
+            i += 2;
+            continue;
+        }
+        if (argv[i][1] == 'n' && argv[i][2] != 0 && is_digits(argv[i] + 2)) {
+            opt_limit = (unsigned long)strtol_dec(argv[i] + 2);
+            have_limit = 1;
+            i++;
+            continue;
+        }
+        /* glued -sn / -ls etc without -n value */
+        {
+            int j;
+            int handled = 0;
+            for (j = 1; argv[i][j]; j++) {
+                if (argv[i][j] == 's') {
+                    mode = MODE_SILENT;
+                    handled = 1;
+                } else if (argv[i][j] == 'l') {
+                    mode = MODE_VERBOSE;
+                    handled = 1;
+                } else if (argv[i][j] == 'n') {
+                    if (argv[i][j + 1] != 0 && is_digits(argv[i] + j + 1)) {
+                        opt_limit = (unsigned long)strtol_dec(argv[i] + j + 1);
+                        have_limit = 1;
+                        handled = 1;
+                        i++;
+                        goto next_arg;
+                    }
+                    if (i + 1 >= argc || !is_digits(argv[i + 1])) {
+                        usage();
+                        return 2;
+                    }
+                    opt_limit = (unsigned long)strtol_dec(argv[i + 1]);
+                    have_limit = 1;
+                    i += 2;
+                    goto next_arg;
+                } else {
+                    usage();
+                    return 2;
+                }
+            }
+            if (!handled) {
+                usage();
+                return 2;
+            }
+            i++;
+        }
+    next_arg:
+        ;
     }
     if (i + 2 != argc) {
         usage();
