@@ -2209,6 +2209,15 @@ Keeps `-p`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 Glued `-Dv`. Keeps `-D`/`-d`/`-t`/`-m`. No new `/bin` dent. Focused virtio
 login smoke (smp 1/2).
 
+## mktemp -p — landed
+
+`/bin/mktemp -p DIR` (GNU `--tmpdir`) places the template under DIR:
+default becomes `DIR/tmp.XXXXXX`; a relative TEMPLATE is joined under DIR;
+an absolute TEMPLATE with `-p` errors. Glued `-pDIR` / `-dpu`. Keeps
+`-d`/`-u`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
+Touch already has `-c`; `-a`/`-m`/`-r`/`-d` wait on utimensat (deferred).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2217,6 +2226,6 @@ login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. touch leftovers beyond -r|-d, seq quirks, dirname/basename
-   polish; `cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. chown -v / chgrp -v, realpath -q, seq leftovers if any;
+   `cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
+   Ext2 duplex / multi-nc / CFS / jbd alone.
