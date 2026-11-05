@@ -1,10 +1,11 @@
 /* fakeos userland - readlink: print symlink target (thin; mirrors shell).
- *   readlink [-n] [-f] [-z] PATH
+ *   readlink [-n] [-f] [-q] [-z] PATH
  * Default: readlink(2) + trailing newline. -n omits the newline. -z ends
  * with NUL instead of newline (wins over -n). -f canonicalizes via readlink
- * walks (same algorithm as /bin/realpath); prints the physical path even
- * when PATH is not a symlink. Glued short options (-nfz/...) accepted.
- * Compact argv for EXEC_MAX_ARGC=8.
+ * walks (same algorithm as /bin/realpath -f style; last component may be
+ * missing); prints the physical path even when PATH is not a symlink. -q
+ * quiets error messages (GNU --quiet/--silent; exit status still non-zero).
+ * Glued short options (-nfqz/...) accepted. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -217,7 +218,7 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: readlink [-n] [-f] [-z] PATH\n", 36);
+    u_write(2, "usage: readlink [-nfqz] PATH\n", 30);
 }
 
 int main(int argc, char **argv) {
@@ -227,6 +228,7 @@ int main(int argc, char **argv) {
     int no_nl = 0;
     int canon = 0;
     int opt_z = 0;
+    int opt_q = 0;
     const char *path;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
@@ -240,6 +242,7 @@ int main(int argc, char **argv) {
             if (o == 'n') no_nl = 1;
             else if (o == 'f') canon = 1;
             else if (o == 'z') opt_z = 1;
+            else if (o == 'q') opt_q = 1;
             else {
                 usage();
                 return 1;
@@ -256,14 +259,14 @@ int main(int argc, char **argv) {
 
     if (canon) {
         if (!urealpath(path, buf, sizeof(buf))) {
-            u_write(2, "readlink: failed\n", 17);
+            if (!opt_q) u_write(2, "readlink: failed\n", 17);
             return 1;
         }
         n = (long)strlen(buf);
     } else {
         n = u_readlink(path, buf, sizeof(buf) - 1);
         if (n < 0) {
-            u_write(2, "readlink: failed\n", 17);
+            if (!opt_q) u_write(2, "readlink: failed\n", 17);
             return 1;
         }
         buf[n] = 0;

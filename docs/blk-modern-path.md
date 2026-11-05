@@ -2241,6 +2241,13 @@ default). Glued `-qz`. Keeps `-z` and multi-PATH. Shell builtin now also
 accepts multi-PATH / `-z`. No new `/bin` dent. Focused virtio login smoke
 (smp 1/2).
 
+## readlink -q — landed
+
+`/bin/readlink -q` (and the shell `readlink` builtin) suppresses error
+messages on failure (GNU `--quiet`/`--silent`); exit status stays
+non-zero. Glued `-nfqz`. Shell builtin also gains `-n`/`-f`/`-z`. Keeps
+`-n`/`-f`/`-z`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2249,6 +2256,6 @@ accepts multi-PATH / `-z`. No new `/bin` dent. Focused virtio login smoke
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. readlink leftovers, sleep quirks, id polish; `cp -p`
-   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
-   duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. readlink -e/-m, sleep quirks, id polish; `cp -p` waits on
+   utimensat; `set --` deferred; skip large shell). Leave Ext2 duplex /
+   multi-nc / CFS / jbd alone.

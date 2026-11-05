@@ -2747,7 +2747,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "mkdir", "mkdir [-pv] [-m MODE] DIR..." },
     { "rmdir", "rmdir [-pv] DIR..." },
     { "ln", "ln [-sfv] TARGET LINKPATH" },
-    { "readlink", "readlink FILE" },
+    { "readlink", "readlink [-nfqz] PATH" },
     { "realpath", "realpath [-qz] PATH..." },
     { "uname", "uname [-asnrvm]" },
     { "pid", "pid  (print $$)" },
@@ -3391,7 +3391,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink[-nfqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -5426,19 +5426,65 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "readlink")) {
+        /* readlink [-nfqz] PATH — -f canonicalize; -q quiet; -z NUL; -n no NL. */
         char buf[128];
         long n;
-        if (tokens[1] == 0) {
-            puts("sh: readlink: missing operand");
+        int ai = 1;
+        int no_nl = 0;
+        int canon = 0;
+        int opt_z = 0;
+        int opt_q = 0;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) {
+                ai++;
+                break;
+            }
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'n') no_nl = 1;
+                else if (o[j] == 'f') canon = 1;
+                else if (o[j] == 'z') opt_z = 1;
+                else if (o[j] == 'q') opt_q = 1;
+                else {
+                    puts("usage: readlink [-nfqz] PATH");
+                    return 1;
+                }
+            }
+            ai++;
+        }
+        if (tokens[ai] == 0 || tokens[ai + 1] != 0) {
+            puts("usage: readlink [-nfqz] PATH");
             rc = 1;
+        } else if (canon) {
+            if (!urealpath(tokens[ai], buf, sizeof(buf))) {
+                if (!opt_q) puts("sh: readlink: failed");
+                rc = 1;
+            } else {
+                n = (long)strlen(buf);
+                if (n > 0) u_write(1, buf, (unsigned long)n);
+                if (opt_z) {
+                    char z = 0;
+                    u_write(1, &z, 1);
+                } else if (!no_nl) {
+                    u_write(1, "\n", 1);
+                }
+                rc = 0;
+            }
         } else {
-            n = u_readlink(tokens[1], buf, sizeof(buf) - 1);
+            n = u_readlink(tokens[ai], buf, sizeof(buf) - 1);
             if (n < 0) {
-                puts("sh: readlink: failed");
+                if (!opt_q) puts("sh: readlink: failed");
                 rc = 1;
             } else {
                 buf[n] = 0;
-                puts(buf);
+                if (n > 0) u_write(1, buf, (unsigned long)n);
+                if (opt_z) {
+                    char z = 0;
+                    u_write(1, &z, 1);
+                } else if (!no_nl) {
+                    u_write(1, "\n", 1);
+                }
                 rc = 0;
             }
         }
