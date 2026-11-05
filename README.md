@@ -431,6 +431,7 @@ flowchart TD
 - [x] **sort -h**：人类可读大小排序（GNU；整数 + kKMGTPE=1024^n；可与 `-k/-r/-u` 等粘连；覆盖 `-n`）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **sort -V**：版本排序（GNU；数字段按数值、前导零多者优先；覆盖 `-n/-h`；可与 `-k/-r/-u/-f` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **timeout --foreground**：`-f`/`--foreground` 不新建进程组、只杀子 pid；默认 `setpgid` 后对 `-pgid` 发信号（GNU）。可与 `-s/-k` 粘连。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **mktemp -t**：`-t PREFIX` → `DIR/PREFIX.XXXXXX`（DIR=`-p` 或 `$TMPDIR` 或 `/tmp`；无 PREFIX 用 `tmp.XXXXXX`；可与 `-du/-p` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
