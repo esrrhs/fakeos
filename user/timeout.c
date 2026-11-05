@@ -1,11 +1,14 @@
 /* fakeos userland - timeout: run COMMAND with a time limit (thin).
- * Forms: timeout [-s SIG] [-k DUR|--kill-after=DUR] SECONDS COMMAND [ARG...]
+ * Forms: timeout [-f|--foreground] [-s SIG] [-k DUR|--kill-after=DUR]
+ *                SECONDS COMMAND [ARG...]
  * SECONDS/DUR are non-negative decimal integers. Uses fork + nanosleep poll +
  * kill(sig) — no alarm(2). Default signal is SIGKILL (9). -k DUR waits DUR
  * seconds after the first signal, then sends SIGKILL if still running (GNU
- * kill-after). Without -k, a short ~2s grace then SIGKILL if needed. Exit
- * 124 on timeout; else child status. COMMAND without '/' is /bin/COMMAND.
- * Compact argv for EXEC_MAX_ARGC=8 (glued -kN / -sN).
+ * kill-after). Without -k, a short ~2s grace then SIGKILL if needed.
+ * Default: put COMMAND in its own process group and signal -pgid (GNU).
+ * -f/--foreground: keep COMMAND in timeout's process group; signal the
+ * child pid only. Exit 124 on timeout; else child status. COMMAND without
+ * '/' is /bin/COMMAND. Compact argv for EXEC_MAX_ARGC=8 (glued -kN/-sN/-f).
  */
 package user;
 
@@ -14,10 +17,12 @@ extern long u_fork(void);
 extern long u_execve(const char *path, char **argv, char **envp);
 extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_kill(long pid, long sig);
+extern long u_setpgid(long pid, long pgid);
 extern long u_nanosleep(const void *req, void *rem);
 extern void u_exit(long code);
 extern char *strcpy(char *dst, const char *src);
 extern int strcmp(const char *a, const char *b);
+extern unsigned long strlen(const char *s);
 
 enum {
     ARG_SLOT = 128,
@@ -29,7 +34,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: timeout [-s SIG] [-k DUR] SECONDS COMMAND [ARG...]\n", 58);
+    u_write(2, "usage: timeout [-f] [-s SIG] [-k DUR] SECONDS COMMAND [ARG...]\n", 62);
 }
 
 static int parse_secs(const char *s, long *out) {
@@ -92,27 +97,25 @@ static int status_exit(long status) {
     return 128 + (int)(status & 0x7f);
 }
 
-/* Parse leading -s/--signal and -k/--kill-after.
- * Returns argv index of SECONDS, or -1. kill_after_out: -1 = default short grace. */
-static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out) {
+/* Parse leading -f/--foreground, -s/--signal, -k/--kill-after.
+ * Returns argv index of SECONDS, or -1. kill_after_out: -1 = default short grace.
+ * foreground_out: 1 = keep child in caller's process group. */
+static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out,
+                      int *foreground_out) {
     int ai = 1;
     long sig = SIGKILL;
     long kill_after = -1;
+    int foreground = 0;
     while (ai < argc) {
         const char *a = argv[ai];
+        int j;
         if (a[0] != '-' || a[1] == 0) break;
         if (strcmp(a, "--") == 0) {
             ai++;
             break;
         }
-        if (strcmp(a, "-s") == 0) {
-            if (ai + 1 >= argc || !parse_sig(argv[ai + 1], &sig)) return -1;
-            ai += 2;
-            continue;
-        }
-        if (a[1] == 's' && a[2] != 0) {
-            /* glued -sN */
-            if (!parse_sig(a + 2, &sig)) return -1;
+        if (strcmp(a, "--foreground") == 0) {
+            foreground = 1;
             ai++;
             continue;
         }
@@ -125,17 +128,6 @@ static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out
             a[4] == 'g' && a[5] == 'n' && a[6] == 'a' && a[7] == 'l' &&
             a[8] == '=') {
             if (!parse_sig(a + 9, &sig)) return -1;
-            ai++;
-            continue;
-        }
-        if (strcmp(a, "-k") == 0) {
-            if (ai + 1 >= argc || !parse_secs(argv[ai + 1], &kill_after)) return -1;
-            ai += 2;
-            continue;
-        }
-        if (a[1] == 'k' && a[2] != 0) {
-            /* glued -kN */
-            if (!parse_secs(a + 2, &kill_after)) return -1;
             ai++;
             continue;
         }
@@ -152,10 +144,38 @@ static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out
             ai++;
             continue;
         }
-        return -1;
+        if (a[1] == '-') return -1; /* unknown long option */
+
+        /* Short cluster: -f, -sN, -kN, -fs9, -fk1, etc. */
+        for (j = 1; a[j]; j++) {
+            char o = a[j];
+            if (o == 'f') {
+                foreground = 1;
+            } else if (o == 's') {
+                if (a[j + 1] != 0) {
+                    if (!parse_sig(a + j + 1, &sig)) return -1;
+                    j = (int)strlen(a) - 1;
+                } else {
+                    ai++;
+                    if (ai >= argc || !parse_sig(argv[ai], &sig)) return -1;
+                }
+            } else if (o == 'k') {
+                if (a[j + 1] != 0) {
+                    if (!parse_secs(a + j + 1, &kill_after)) return -1;
+                    j = (int)strlen(a) - 1;
+                } else {
+                    ai++;
+                    if (ai >= argc || !parse_secs(argv[ai], &kill_after)) return -1;
+                }
+            } else {
+                return -1;
+            }
+        }
+        ai++;
     }
     *sig_out = sig;
     *kill_after_out = kill_after;
+    *foreground_out = foreground;
     return ai;
 }
 
@@ -191,10 +211,12 @@ int main(int argc, char **argv) {
     int ai;
     long sig;
     long kill_after;
+    int foreground;
     char **cmd_argv;
     int wr;
+    long kill_target; /* pid or -pgid */
 
-    ai = parse_opts(argc, argv, &sig, &kill_after);
+    ai = parse_opts(argc, argv, &sig, &kill_after, &foreground);
     if (ai < 0 || ai + 1 >= argc) {
         usage();
         return 1;
@@ -216,11 +238,22 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (pid == 0) {
+        if (!foreground) {
+            /* New process group (GNU default); ignore setpgid failure. */
+            u_setpgid(0, 0);
+        }
         if (u_execve(pathbuf, cmd_argv, envp) < 0) {
             u_write(2, "timeout: exec failed\n", 21);
             u_exit(127);
         }
         u_exit(127);
+    }
+    if (!foreground) {
+        /* Parent side of the setpgid race. */
+        u_setpgid(pid, pid);
+        kill_target = -pid;
+    } else {
+        kill_target = pid;
     }
 
     ticks_left = sec * TICKS_PER_SEC;
@@ -242,7 +275,7 @@ int main(int argc, char **argv) {
         ticks_left--;
     }
 
-    u_kill(pid, sig);
+    u_kill(kill_target, sig);
     if (kill_after >= 0) {
         grace_ticks = kill_after * TICKS_PER_SEC;
         if (grace_ticks == 0) grace_ticks = 1; /* one poll tick for -k0 */
@@ -256,7 +289,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (sig != SIGKILL) {
-        u_kill(pid, SIGKILL);
+        u_kill(kill_target, SIGKILL);
         wr = wait_reap(pid, &status, 40);
         if (wr == 1) return EXIT_TIMEOUT;
         if (wr < 0) {
