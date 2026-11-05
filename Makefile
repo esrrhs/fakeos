@@ -26,19 +26,34 @@ ROOT_DIR  := $(shell pwd)
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
 # in a throwaway /tmp copy.
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
-# !!! M5 RESTAGE PIN (required) !!!
-# Tip of combine/gcc16-macho-and-o0-ldouble AFTER 2c1f4525 miscompiles
-# `imm64 ^ induction` (O0 BXOR) and breaks PMM order-3 + kill/wait on the
-# ldfake-rebuilt kernel. When restaging build/m5stage (rm -rf then make),
-# ALWAYS point FAKECC_SRC at a worktree pinned to 2c1f4525, e.g.:
+# Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK) needs tip fakecc with
+# --target, -T, --kernel-multiboot, %gs:disp, and large link_kernel (e.g.
+# OPEN PR #112 / 6e5a5cdd). Example:
+#   FCC=/tmp/fakecc-master/build/fakecc make
+# !!! M5 RESTAGE PIN (in-OS /bin/fakecc only) !!!
+# Tip after 2c1f4525 has historically miscompiled `imm64 ^ induction` (O0 BXOR)
+# and broken PMM order-3 + kill/wait on the ldfake-rebuilt kernel. When
+# restaging build/m5stage (rm -rf then make), prefer a worktree pinned to
+# 2c1f4525 unless tip has been revalidated for that path:
 #   git -C ../fakecc worktree add /tmp/fakecc-m5-good 2c1f4525
-#   rm -rf build/m5stage build/m5blob.asm build/m5blob.o
+#   rm -rf build/m5stage build/m5blob.asm build/m5blob.S build/m5blob.o
 #   FAKECC_SRC=/tmp/fakecc-m5-good make
 # Full write-up: docs/ldfake-order3-diagnosis.md (section "M5 restage pin").
+# Host C/asm/link may still use a newer FCC binary independently of FAKECC_SRC.
+
+# fakecc-only host path: Gas AT&T .S via $(FCC) -c, and fakecc -T link.
+# Set to 0 to fall back to nasm -f elf64 + GNU ld + objcopy.
+# Remaining nasm: boot.asm (mixed 16/32/64 elf64) and ap_tramp.asm (-f bin).
+USE_FAKECC_ASM ?= 1
+FAKECC_LINK    ?= 1
 
 # Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
 M5STAGE := $(BUILD_DIR)/m5stage
+ifeq ($(USE_FAKECC_ASM),1)
+M5ASM   := $(BUILD_DIR)/m5blob.S
+else
 M5ASM   := $(BUILD_DIR)/m5blob.asm
+endif
 M5OBJ   := $(BUILD_DIR)/m5blob.o
 
 # Flags
@@ -127,6 +142,17 @@ all: build
 
 build: $(KERNEL_BIN)
 
+# Link higher-half Multiboot kernel image
+ifeq ($(FAKECC_LINK),1)
+# fakecc -T + --kernel-multiboot emits the QEMU-loadable ELF32 directly.
+$(KERNEL_BIN): $(OBJS) boot/linker.ld
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $@ (-T --kernel-multiboot)"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -T boot/linker.ld --kernel-multiboot -o $@ $(OBJS)
+	@echo "=================================================="
+	@echo " fakeos kernel build completed: $@"
+	@echo "=================================================="
+else
 # Link 64-bit Higher-Half ELF kernel
 $(KERNEL_64): $(OBJS) boot/linker.ld
 	@mkdir -p $(BUILD_DIR)
@@ -140,13 +166,37 @@ $(KERNEL_BIN): $(KERNEL_64)
 	@echo "=================================================="
 	@echo " fakeos kernel build completed: $@"
 	@echo "=================================================="
+endif
 
 # Assembly objects
+# boot.asm stays nasm -f elf64 (real-mode / protected / long-mode bring-up;
+# fakecc has no real-mode story yet). ap_tramp.asm stays nasm -f bin.
 $(BUILD_DIR)/boot.o: arch/x86_64/boot.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 
+ifeq ($(USE_FAKECC_ASM),1)
+$(BUILD_DIR)/io.o: arch/x86_64/io.S
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/desc.o: arch/x86_64/desc.S
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/switch.o: arch/x86_64/switch.S
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.S
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+else
 $(BUILD_DIR)/io.o: arch/x86_64/io.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
@@ -166,18 +216,28 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+endif
 
 $(BUILD_DIR)/ap_tramp.bin: arch/x86_64/ap_tramp.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $< (bin)"
 	@$(NASM) -f bin -o $@ $<
 
+ifeq ($(USE_FAKECC_ASM),1)
+$(BUILD_DIR)/ap_tramp_blob.o: arch/x86_64/ap_tramp_blob.S $(BUILD_DIR)/ap_tramp.bin
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@cp -f $(BUILD_DIR)/ap_tramp.bin ap_tramp.bin
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+	@rm -f ap_tramp.bin
+else
 $(BUILD_DIR)/ap_tramp_blob.o: arch/x86_64/ap_tramp_blob.asm $(BUILD_DIR)/ap_tramp.bin
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@cp -f $(BUILD_DIR)/ap_tramp.bin ap_tramp.bin
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 	@rm -f ap_tramp.bin
+endif
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
@@ -186,6 +246,17 @@ USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)
 
+ifeq ($(USE_FAKECC_ASM),1)
+$(BUILD_DIR)/user/crt0.o: user/crt0.S
+	@mkdir -p $(BUILD_DIR)/user
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/user/usys.o: user/usys.S
+	@mkdir -p $(BUILD_DIR)/user
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+else
 $(BUILD_DIR)/user/crt0.o: user/crt0.asm
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [NASM]    $<"
@@ -195,6 +266,7 @@ $(BUILD_DIR)/user/usys.o: user/usys.asm
 	@mkdir -p $(BUILD_DIR)/user
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+endif
 
 $(BUILD_DIR)/user/libc.o: user/libc.c
 	@mkdir -p $(BUILD_DIR)/user
@@ -207,6 +279,16 @@ $(BUILD_DIR)/user/%.o: user/%.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 # Each program ELF: crt0 + syscall wrappers + libc + program main.
+ifeq ($(FAKECC_LINK),1)
+define USER_ELF_RULE
+$(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
+                           $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o user/user.ld
+	@echo "  [FAKECC]  $$@"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -T user/user.ld -o $$@ \
+	       $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
+	       $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o
+endef
+else
 define USER_ELF_RULE
 $(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
                            $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o user/user.ld
@@ -214,12 +296,20 @@ $(BUILD_DIR)/user/$(1).elf: $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
 	@$(LD) -T user/user.ld -n -o $$@ $(BUILD_DIR)/user/crt0.o $(BUILD_DIR)/user/usys.o \
 	       $(BUILD_DIR)/user/libc.o $(BUILD_DIR)/user/$(1).o
 endef
+endif
 $(foreach p,$(USER_PROGS),$(eval $(call USER_ELF_RULE,$(p))))
 
+ifeq ($(USE_FAKECC_ASM),1)
+$(BUILD_DIR)/userblob.o: user/blob.S $(USER_ELFS) user/motd.txt user/resolv.conf user/hosts user/passwd user/group
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+else
 $(BUILD_DIR)/userblob.o: user/blob.asm $(USER_ELFS) user/motd.txt user/resolv.conf user/hosts user/passwd user/group
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+endif
 
 # --- Milestone 5: in-OS compiler/source/reference/reference staging -------------------
 M5_REF_DEPS := $(filter-out $(BUILD_DIR)/userblob.o $(M5OBJ),$(OBJS))
@@ -229,11 +319,17 @@ M5_REF_DEPS := $(filter-out $(BUILD_DIR)/userblob.o $(M5OBJ),$(OBJS))
 $(M5ASM): $(M5_REF_DEPS) $(BUILD_DIR)/userblob.o user/progs/ping.c \
 	tools/m5_stage.sh tools/m5_build_fakecc.sh
 	@mkdir -p $(M5STAGE)
-	@FAKECC_SRC=$(FAKECC_SRC) bash tools/m5_stage.sh $(M5STAGE)
+	@FAKECC_SRC=$(FAKECC_SRC) USE_FAKECC_ASM=$(USE_FAKECC_ASM) FCC='$(FCC)' bash tools/m5_stage.sh $(M5STAGE)
 
+ifeq ($(USE_FAKECC_ASM),1)
+$(M5OBJ): $(M5ASM)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+else
 $(M5OBJ): $(M5ASM)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+endif
 
 # C objects compiled with fakecc
 $(BUILD_DIR)/types.o: types/types.c
