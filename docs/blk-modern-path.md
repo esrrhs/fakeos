@@ -2188,6 +2188,13 @@ symlinks and `'LINKPATH' => 'TARGET'` for hard links after success (GNU).
 Glued `-sfv`. Keeps `-s`/`-f`. No new `/bin` dent. Focused virtio login smoke
 (smp 1/2).
 
+## chmod -v — landed
+
+`/bin/chmod -v` (and the shell `chmod` builtin) prints
+`mode of 'PATH' changed from OLD to NEW` or `retained as MODE` using 4-digit
+octal (`mode & 07777`), GNU-ish thin. Glued `-Rv`. Keeps `-R`. No new
+`/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2196,5 +2203,6 @@ Glued `-sfv`. Keeps `-s`/`-f`. No new `/bin` dent. Focused virtio login smoke
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. `rmdir -v`, `install -v`; `cp -p` waits on utimensat;
+   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS /
+   jbd alone.

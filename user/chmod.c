@@ -1,9 +1,11 @@
 /* fakeos userland - chmod: change file mode bits (thin; mirrors shell builtin).
- *   chmod [-R] MODE FILE...
+ *   chmod [-Rv] MODE FILE...
  * MODE is an octal integer (e.g. 755, 0644). -R walks directories depth-first
  * (post-order: children then self) so a restrictive MODE still reaches leaves.
- * Uses lstat(2); does not descend through symlink directories. Depth capped.
- * External form for xargs/scripts.
+ * -v prints mode of 'PATH' changed from OLD to NEW (or retained as MODE)
+ * using 4-digit octal (mode & 07777), GNU-ish thin. Uses lstat(2); does not
+ * descend through symlink directories. Depth capped. Glued -Rv/-vR.
+ * External form for xargs/scripts. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -23,6 +25,7 @@ enum {
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
+    MODE_BITS = 0xFFF, /* 07777 */
     PATH_CAP = 128,
     DENT_BUF = 1920,
     DENT_REC = 48,
@@ -60,18 +63,46 @@ static void join_path(char *out, unsigned long cap, const char *dir,
     out[i] = 0;
 }
 
-static int chmod_path(const char *path, unsigned int mode, int recursive,
-                      int depth);
+static void mode_oct4(char *out, unsigned int mode) {
+    unsigned int m = mode & MODE_BITS;
+    out[0] = (char)('0' + ((m >> 9) & 7));
+    out[1] = (char)('0' + ((m >> 6) & 7));
+    out[2] = (char)('0' + ((m >> 3) & 7));
+    out[3] = (char)('0' + (m & 7));
+    out[4] = 0;
+}
 
-static int chmod_dir_rec(const char *path, unsigned int mode, int depth) {
+static void announce(const char *path, unsigned int oldm, unsigned int newm) {
+    char a[8];
+    char b[8];
+    mode_oct4(a, oldm);
+    mode_oct4(b, newm);
+    if ((oldm & MODE_BITS) == (newm & MODE_BITS)) {
+        printf("mode of '%s' retained as %s\n", path, a);
+    } else {
+        printf("mode of '%s' changed from %s to %s\n", path, a, b);
+    }
+}
+
+static int chmod_path(const char *path, unsigned int mode, int recursive,
+                      int verbose, int depth);
+
+static int chmod_dir_rec(const char *path, unsigned int mode, int verbose,
+                         int depth) {
     char dent[DENT_BUF];
     char child[PATH_CAP];
     char names[MAX_NAMES][NAME_LEN];
+    char st[ST_SIZE_BYTES];
+    unsigned int oldm = 0;
     int nnames;
     long fd;
     long n;
     int i;
     int rc = 0;
+
+    if (u_lstat(path, st) == 0) {
+        oldm = load_u32(st + ST_MODE);
+    }
 
     fd = u_open(path, O_RDONLY, 0);
     if (fd < 0) {
@@ -107,17 +138,19 @@ static int chmod_dir_rec(const char *path, unsigned int mode, int depth) {
     for (i = 0; i < nnames; i++) {
         join_path(child, PATH_CAP, path, names[i]);
         if (child[0] == 0) continue;
-        if (chmod_path(child, mode, 1, depth + 1) != 0) rc = 1;
+        if (chmod_path(child, mode, 1, verbose, depth + 1) != 0) rc = 1;
     }
     if (u_chmod(path, (long)mode) != 0) {
         printf("chmod: %s: failed\n", path);
         rc = 1;
+    } else if (verbose) {
+        announce(path, oldm, mode);
     }
     return rc;
 }
 
 static int chmod_path(const char *path, unsigned int mode, int recursive,
-                      int depth) {
+                      int verbose, int depth) {
     char st[ST_SIZE_BYTES];
     unsigned int st_mode;
 
@@ -131,12 +164,13 @@ static int chmod_path(const char *path, unsigned int mode, int recursive,
             printf("chmod: %s: max depth\n", path);
             return 1;
         }
-        return chmod_dir_rec(path, mode, depth);
+        return chmod_dir_rec(path, mode, verbose, depth);
     }
     if (u_chmod(path, (long)mode) != 0) {
         printf("chmod: %s: failed\n", path);
         return 1;
     }
+    if (verbose) announce(path, st_mode, mode);
     return 0;
 }
 
@@ -156,6 +190,7 @@ int main(int argc, char **argv) {
     unsigned int mode = 0;
     int ai = 1;
     int recursive = 0;
+    int verbose = 0;
     int rc = 0;
     int i;
 
@@ -166,15 +201,17 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'R' || o[j] == 'r') {
                 recursive = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else {
-                u_write(2, "usage: chmod [-R] MODE FILE...\n", 31);
+                u_write(2, "usage: chmod [-Rv] MODE FILE...\n", 33);
                 return 1;
             }
         }
         ai++;
     }
     if (ai + 1 >= argc) {
-        u_write(2, "usage: chmod [-R] MODE FILE...\n", 31);
+        u_write(2, "usage: chmod [-Rv] MODE FILE...\n", 33);
         return 1;
     }
     if (!parse_mode(argv[ai], &mode)) {
@@ -183,7 +220,7 @@ int main(int argc, char **argv) {
     }
     ai++;
     for (i = ai; i < argc; i++) {
-        if (chmod_path(argv[i], mode, recursive, 0) != 0) rc = 1;
+        if (chmod_path(argv[i], mode, recursive, verbose, 0) != 0) rc = 1;
     }
     return rc;
 }
