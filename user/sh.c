@@ -2804,7 +2804,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "umask", "umask [MODE]" },
     { "chmod", "chmod [-Rv] MODE FILE..." },
     { "chown", "chown [-v] [UID][:GID] FILE..." },
-    { "id", "id [-u|-g] [-n]" },
+    { "id", "id [-u|-g|-G] [-nr]" },
     { "setuid", "setuid UID" },
     { "seteuid", "seteuid UID" },
     { "env", "env" },
@@ -3455,9 +3455,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep[NUMBER...], ln[-sfv], readlink[-efmnqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep[NUMBER...], ln[-sfv], readlink[-efmnqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugGnr], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g|-G] [-nr]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -4977,14 +4977,16 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "id")) {
-        /* id [-u|-g] [-n] — glued -un/-nu/-gn/-ng; names via /etc. */
+        /* id [-u|-g|-G] [-nr] — glued; -r real ids; -G all groups; names via /etc. */
         unsigned int gids[8];
         long ng;
         long gi;
         int ti = 1;
         int only_u = 0;
         int only_g = 0;
+        int only_G = 0;
         int want_name = 0;
+        int want_real = 0;
         int bad = 0;
         while (tokens[ti] != 0 && tokens[ti][0] == '-' && tokens[ti][1] != 0) {
             const char *o = tokens[ti] + 1;
@@ -4993,21 +4995,110 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 'u') only_u = 1;
                 else if (o[j] == 'g') only_g = 1;
+                else if (o[j] == 'G') only_G = 1;
                 else if (o[j] == 'n') want_name = 1;
+                else if (o[j] == 'r') want_real = 1;
                 else { bad = 1; break; }
             }
             if (bad) break;
             ti++;
         }
-        if (bad || tokens[ti] != 0 || (only_u && only_g)
-            || (want_name && !only_u && !only_g)) {
-            puts("usage: id [-u|-g] [-n]");
+        if (bad || tokens[ti] != 0 || (only_u + only_g + only_G) > 1
+            || (want_name && !only_u && !only_g && !only_G)) {
+            puts("usage: id [-u|-g|-G] [-nr]");
             rc = 1;
+        } else if (only_G) {
+            unsigned int primary = want_real ? (unsigned int)u_getgid()
+                                             : (unsigned int)u_getegid();
+            unsigned int all[9];
+            int nall = 0;
+            int k;
+            int j;
+            all[nall++] = primary;
+            ng = u_getgroups(8, gids);
+            if (ng < 0) ng = 0;
+            for (gi = 0; gi < ng && nall < 9; gi++) {
+                int seen = 0;
+                for (j = 0; j < nall; j++) {
+                    if (all[j] == gids[gi]) { seen = 1; break; }
+                }
+                if (!seen) all[nall++] = gids[gi];
+            }
+            for (k = 0; k < nall; k++) {
+                char name[64];
+                int got = 0;
+                if (k) u_write(1, " ", 1);
+                if (want_name) {
+                    char buf[512];
+                    long fd = u_open("/etc/group", 0, 0);
+                    long n;
+                    long i;
+                    name[0] = 0;
+                    if (fd >= 0) {
+                        n = u_read(fd, buf, sizeof(buf) - 1);
+                        u_close(fd);
+                        if (n > 0) {
+                            buf[n] = 0;
+                            i = 0;
+                            while (i < n) {
+                                char *line = buf + i;
+                                char *f0;
+                                char *f2 = 0;
+                                char *p;
+                                int col = 0;
+                                unsigned int v = 0;
+                                int any = 0;
+                                while (i < n && buf[i] != '\n') i++;
+                                if (i < n) { buf[i] = 0; i++; }
+                                if (line[0] == 0 || line[0] == '#') continue;
+                                f0 = line;
+                                p = line;
+                                while (*p) {
+                                    if (*p == ':') {
+                                        *p = 0;
+                                        col++;
+                                        if (col == 2) { f2 = p + 1; break; }
+                                        p++;
+                                    } else p++;
+                                }
+                                if (f2 == 0) continue;
+                                while (*f2 && *f2 != ':') {
+                                    if (*f2 < '0' || *f2 > '9') { any = 0; break; }
+                                    v = v * 10u + (unsigned int)(*f2 - '0');
+                                    f2++;
+                                    any = 1;
+                                }
+                                if (!any || v != all[k]) continue;
+                                {
+                                    int kk = 0;
+                                    while (f0[kk] != 0 && kk < 63) {
+                                        name[kk] = f0[kk];
+                                        kk++;
+                                    }
+                                    name[kk] = 0;
+                                    got = 1;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (got && name[0] != 0) u_write(1, name, strlen(name));
+                else printf("%u", all[k]);
+            }
+            u_write(1, "\n", 1);
+            rc = 0;
         } else if (only_u || only_g) {
-            unsigned int idv = only_u ? (unsigned int)u_geteuid()
-                                      : (unsigned int)u_getegid();
+            unsigned int idv;
             char name[64];
             int got = 0;
+            if (only_u) {
+                idv = want_real ? (unsigned int)u_getuid()
+                                : (unsigned int)u_geteuid();
+            } else {
+                idv = want_real ? (unsigned int)u_getgid()
+                                : (unsigned int)u_getegid();
+            }
             if (want_name) {
                 char buf[512];
                 long fd = u_open(only_u ? "/etc/passwd" : "/etc/group", 0, 0);

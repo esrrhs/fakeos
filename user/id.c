@@ -1,10 +1,11 @@
 /* fakeos userland - id: print uid/euid/gid/egid (+ supplementary groups).
  * Thin shell-mirror. Forms:
  *   id
- *   id -u|-g [-n]   (glued -un/-nu/-gn/-ng; numeric or /etc name)
- * Default: uid= euid= gid= egid= [groups=]. -u/-g print euid/egid only.
- * -n with -u/-g looks up /etc/passwd or /etc/group (numeric fallback).
- * No USER operand (compact argv / EXEC_MAX_ARGC).
+ *   id -u|-g|-G [-nr]  (glued -un/-Gn/-Gr/-nu/...; numeric or /etc name)
+ * Default: uid= euid= gid= egid= [groups=]. -u/-g print one id (euid/egid
+ * by default; -r selects real uid/gid). -G prints all group IDs
+ * space-separated (primary + getgroups; GNU). -n prints names when possible.
+ * No USER operand (compact argv / EXEC_MAX_ARGC=8).
  */
 package user;
 
@@ -20,8 +21,10 @@ extern long u_getgroups(long size, unsigned int *list);
 extern void printf(const char *fmt, ...);
 extern unsigned long strlen(const char *s);
 
+enum { MAX_GIDS = 8 };
+
 static void usage(void) {
-    u_write(2, "usage: id [-u|-g] [-n]\n", 23);
+    u_write(2, "usage: id [-u|-g|-G] [-nr]\n", 27);
 }
 
 static int parse_u32(const char *s, unsigned int *out) {
@@ -150,7 +153,8 @@ static int group_name_for_gid(unsigned int gid, char *name_out, int cap) {
     return 0;
 }
 
-static void print_id_or_name(unsigned int id, int want_name, int is_user) {
+static void emit_id_or_name(unsigned int id, int want_name, int is_user,
+                            int trailing_nl) {
     char name[64];
     int ok = 0;
     if (want_name) {
@@ -162,20 +166,46 @@ static void print_id_or_name(unsigned int id, int want_name, int is_user) {
     }
     if (ok && name[0] != 0) {
         u_write(1, name, strlen(name));
-        u_write(1, "\n", 1);
     } else {
-        printf("%u\n", id);
+        printf("%u", id);
     }
+    if (trailing_nl) u_write(1, "\n", 1);
+}
+
+/* Collect primary + getgroups into out[], deduped. Returns count. */
+static int collect_groups(unsigned int primary, unsigned int *out, int cap) {
+    unsigned int gids[MAX_GIDS];
+    long ng;
+    long gi;
+    int n = 0;
+    int j;
+    if (cap <= 0) return 0;
+    out[n++] = primary;
+    ng = u_getgroups(MAX_GIDS, gids);
+    if (ng < 0) ng = 0;
+    for (gi = 0; gi < ng && n < cap; gi++) {
+        int seen = 0;
+        for (j = 0; j < n; j++) {
+            if (out[j] == gids[gi]) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen) out[n++] = gids[gi];
+    }
+    return n;
 }
 
 int main(int argc, char **argv) {
-    unsigned int gids[8];
+    unsigned int gids[MAX_GIDS];
     long ng;
     long gi;
     int ai = 1;
     int only_u = 0;
     int only_g = 0;
+    int only_G = 0;
     int want_name = 0;
+    int want_real = 0;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
         const char *o = argv[ai] + 1;
@@ -186,8 +216,12 @@ int main(int argc, char **argv) {
                 only_u = 1;
             } else if (o[j] == 'g') {
                 only_g = 1;
+            } else if (o[j] == 'G') {
+                only_G = 1;
             } else if (o[j] == 'n') {
                 want_name = 1;
+            } else if (o[j] == 'r') {
+                want_real = 1;
             } else {
                 usage();
                 return 1;
@@ -199,27 +233,46 @@ int main(int argc, char **argv) {
         usage();
         return 1;
     }
-    if (only_u && only_g) {
+    if ((only_u + only_g + only_G) > 1) {
         usage();
         return 1;
     }
-    if (want_name && !only_u && !only_g) {
+    if (want_name && !only_u && !only_g && !only_G) {
         usage();
         return 1;
     }
+
     if (only_u) {
-        print_id_or_name((unsigned int)u_geteuid(), want_name, 1);
+        unsigned int idv = want_real ? (unsigned int)u_getuid()
+                                     : (unsigned int)u_geteuid();
+        emit_id_or_name(idv, want_name, 1, 1);
         return 0;
     }
     if (only_g) {
-        print_id_or_name((unsigned int)u_getegid(), want_name, 0);
+        unsigned int idv = want_real ? (unsigned int)u_getgid()
+                                     : (unsigned int)u_getegid();
+        emit_id_or_name(idv, want_name, 0, 1);
+        return 0;
+    }
+    if (only_G) {
+        unsigned int primary = want_real ? (unsigned int)u_getgid()
+                                         : (unsigned int)u_getegid();
+        unsigned int all[MAX_GIDS + 1];
+        int n;
+        int k;
+        n = collect_groups(primary, all, MAX_GIDS + 1);
+        for (k = 0; k < n; k++) {
+            if (k) u_write(1, " ", 1);
+            emit_id_or_name(all[k], want_name, 0, 0);
+        }
+        u_write(1, "\n", 1);
         return 0;
     }
 
     printf("uid=%d euid=%d gid=%d egid=%d",
            (int)u_getuid(), (int)u_geteuid(),
            (int)u_getgid(), (int)u_getegid());
-    ng = u_getgroups(8, gids);
+    ng = u_getgroups(MAX_GIDS, gids);
     if (ng < 0) {
         ng = 0;
     }

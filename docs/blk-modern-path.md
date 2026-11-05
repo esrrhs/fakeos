@@ -2263,6 +2263,13 @@ seconds (`1.5`, `.5`) and multiple NUMBER operands that are summed.
 Uses nanosleep(2). No new `/bin` dent. Focused virtio login smoke
 (smp 1/2).
 
+## id -G/-r — landed
+
+`/bin/id` and the shell `id` builtin gain GNU `-G` (print all group IDs,
+space-separated; optional `-n` names) and `-r` (real uid/gid with
+`-u`/`-g`/`-G`). Glued `-Gn`/`-Gr`/`-unr`. Keeps `-u`/`-g`/`-n`. No new
+`/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2271,6 +2278,5 @@ Uses nanosleep(2). No new `/bin` dent. Focused virtio login smoke
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. id -G/-r polish; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd
-   alone.
+   inspect (`cp -p` waits on utimensat; `set --` deferred; skip large
+   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
