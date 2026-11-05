@@ -535,6 +535,30 @@ static void sh_chown_announce(const char *path, unsigned int ou, unsigned int og
     }
 }
 
+/* GNU readlink -f: all but last path component must exist. */
+static int sh_readlink_parent_exists(const char *path) {
+    char parent[SH_PATH_CAP];
+    char stbuf[SH_ST_BYTES];
+    unsigned long n;
+    unsigned long i;
+    long last = -1;
+    if (path == 0 || path[0] == 0) return 0;
+    n = strlen(path);
+    if (n >= SH_PATH_CAP) return 0;
+    for (i = 0; i <= n; i++) parent[i] = path[i];
+    while (n > 1 && parent[n - 1] == '/') {
+        parent[n - 1] = 0;
+        n--;
+    }
+    for (i = 0; i < n; i++) {
+        if (parent[i] == '/') last = (long)i;
+    }
+    if (last < 0) return u_lstat(".", stbuf) == 0;
+    if (last == 0) parent[1] = 0;
+    else parent[last] = 0;
+    return u_lstat(parent, stbuf) == 0;
+}
+
 /* Depth-first post-order so a restrictive MODE still reaches leaves. */
 static int sh_chmod_dir_rec(const char *path, unsigned int mode, int verbose,
                             int depth) {
@@ -942,7 +966,8 @@ static int path_join(char *out, unsigned long cap, const char *base,
 }
 
 /* Userland physical resolve via readlink (mirrors kernel path_physical). */
-static int urealpath(const char *in, char *out, unsigned long cap) {
+static int urealpath(const char *in, char *out, unsigned long cap,
+                     int must_exist) {
     char work[128];
     char prefix[128];
     char tgt[128];
@@ -1099,13 +1124,13 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
             }
         }
         if (!found) {
-            char st[144];
+            char stbuf[SH_ST_BYTES];
             nlen = strlen(work);
             if (nlen + 1 > cap) {
                 return 0;
             }
-            /* GNU default: final path must exist. */
-            if (u_lstat(work, st) != 0) {
+            /* realpath default / readlink -e: final path must exist. */
+            if (must_exist && u_lstat(work, stbuf) != 0) {
                 return 0;
             }
             for (i = 0; i <= nlen; i++) {
@@ -2747,7 +2772,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "mkdir", "mkdir [-pv] [-m MODE] DIR..." },
     { "rmdir", "rmdir [-pv] DIR..." },
     { "ln", "ln [-sfv] TARGET LINKPATH" },
-    { "readlink", "readlink [-nfqz] PATH" },
+    { "readlink", "readlink [-efmnqz] PATH" },
     { "realpath", "realpath [-qz] PATH..." },
     { "uname", "uname [-asnrvm]" },
     { "pid", "pid  (print $$)" },
@@ -3391,7 +3416,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink[-nfqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink[-efmnqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -5426,12 +5451,13 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "readlink")) {
-        /* readlink [-nfqz] PATH — -f canonicalize; -q quiet; -z NUL; -n no NL. */
+        /* readlink [-efmnqz] PATH — -f/-e/-m canonicalize; -q quiet; -z NUL; -n no NL. */
         char buf[128];
+        char stbuf[SH_ST_BYTES];
         long n;
         int ai = 1;
         int no_nl = 0;
-        int canon = 0;
+        int canon = 0; /* 0 none, 1 -f, 2 -e, 3 -m */
         int opt_z = 0;
         int opt_q = 0;
         while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
@@ -5444,20 +5470,28 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 'n') no_nl = 1;
                 else if (o[j] == 'f') canon = 1;
+                else if (o[j] == 'e') canon = 2;
+                else if (o[j] == 'm') canon = 3;
                 else if (o[j] == 'z') opt_z = 1;
                 else if (o[j] == 'q') opt_q = 1;
                 else {
-                    puts("usage: readlink [-nfqz] PATH");
+                    puts("usage: readlink [-efmnqz] PATH");
                     return 1;
                 }
             }
             ai++;
         }
         if (tokens[ai] == 0 || tokens[ai + 1] != 0) {
-            puts("usage: readlink [-nfqz] PATH");
+            puts("usage: readlink [-efmnqz] PATH");
             rc = 1;
-        } else if (canon) {
-            if (!urealpath(tokens[ai], buf, sizeof(buf))) {
+        } else if (canon != 0) {
+            if (!urealpath(tokens[ai], buf, sizeof(buf), 0)) {
+                if (!opt_q) puts("sh: readlink: failed");
+                rc = 1;
+            } else if (canon == 2 && u_lstat(buf, stbuf) != 0) {
+                if (!opt_q) puts("sh: readlink: failed");
+                rc = 1;
+            } else if (canon == 1 && !sh_readlink_parent_exists(buf)) {
                 if (!opt_q) puts("sh: readlink: failed");
                 rc = 1;
             } else {
@@ -5521,7 +5555,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             rc = 0;
             for (; tokens[ai] != 0; ai++) {
                 saw = 1;
-                if (!urealpath(tokens[ai], buf, sizeof(buf))) {
+                if (!urealpath(tokens[ai], buf, sizeof(buf), 1)) {
                     if (!opt_q) {
                         printf("sh: realpath: %s: failed\n", tokens[ai]);
                     }

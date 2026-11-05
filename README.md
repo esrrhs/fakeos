@@ -423,6 +423,7 @@ flowchart TD
 - [x] **chgrp -v**：打印 `changed group of 'PATH' from OLD to NEW`（或 retained；十进制 GID）。无 shell builtin。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **realpath -q**：失败时抑制错误信息（GNU `--quiet`/`--silent`；退出码仍非 0）。可粘连 `-qz`。`/bin/realpath` + shell builtin 同步（shell 亦多 PATH）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **readlink -q**：失败时抑制错误信息（GNU；退出码仍非 0）。可粘连 `-nfqz`。`/bin/readlink` + shell builtin 同步（shell 亦支持 `-nfz`）。无新 dent。virtio login smoke（smp 1/2）。
+- [x] **readlink -e/-m**：GNU 规范化——`-e` 要求最终路径存在；`-m` 允许缺失分量；`-f` 要求除末分量外存在。可粘连。`/bin` + shell 同步。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。

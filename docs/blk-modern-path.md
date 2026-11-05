@@ -2248,6 +2248,14 @@ messages on failure (GNU `--quiet`/`--silent`); exit status stays
 non-zero. Glued `-nfqz`. Shell builtin also gains `-n`/`-f`/`-z`. Keeps
 `-n`/`-f`/`-z`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## readlink -e/-m — landed
+
+`/bin/readlink` gains GNU `-e` (canonicalize-existing: final path must
+exist) and `-m` (canonicalize-missing: no component need exist). `-f`
+now checks that all but the last component exist. Last of `-f`/`-e`/`-m`
+wins. Shell builtin synced. Keeps `-n`/`-q`/`-z`. No new `/bin` dent.
+Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2256,6 +2264,6 @@ non-zero. Glued `-nfqz`. Shell builtin also gains `-n`/`-f`/`-z`. Keeps
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. readlink -e/-m, sleep quirks, id polish; `cp -p` waits on
-   utimensat; `set --` deferred; skip large shell). Leave Ext2 duplex /
-   multi-nc / CFS / jbd alone.
+   inspect (e.g. sleep quirks, id polish; `cp -p` waits on utimensat;
+   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc /
+   CFS / jbd alone.
