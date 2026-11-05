@@ -559,6 +559,45 @@ static int sh_readlink_parent_exists(const char *path) {
     return u_lstat(parent, stbuf) == 0;
 }
 
+/* Parse GNU-ish sleep duration: [+]digits[.digits] -> sec/nsec. */
+static int sh_parse_duration(const char *s, long *sec_out, long *nsec_out) {
+    long sec = 0;
+    unsigned long frac = 0;
+    int nd = 0;
+    int i = 0;
+    int saw_digit = 0;
+    if (s == 0 || s[0] == 0) return 0;
+    if (s[0] == '+') {
+        i = 1;
+        if (s[i] == 0) return 0;
+    }
+    while (s[i] >= '0' && s[i] <= '9') {
+        sec = sec * 10 + (long)(s[i] - '0');
+        saw_digit = 1;
+        i++;
+    }
+    if (s[i] == '.') {
+        i++;
+        while (s[i] >= '0' && s[i] <= '9') {
+            saw_digit = 1;
+            if (nd < 9) {
+                frac = frac * 10UL + (unsigned long)(s[i] - '0');
+                nd++;
+            }
+            i++;
+        }
+    }
+    if (!saw_digit || s[i] != 0) return 0;
+    while (nd < 9) {
+        frac *= 10UL;
+        nd++;
+    }
+    *sec_out = sec;
+    *nsec_out = (long)frac;
+    return 1;
+}
+
+
 /* Depth-first post-order so a restrictive MODE still reaches leaves. */
 static int sh_chmod_dir_rec(const char *path, unsigned int mode, int verbose,
                             int depth) {
@@ -2777,7 +2816,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "uname", "uname [-asnrvm]" },
     { "pid", "pid  (print $$)" },
     { "ppid", "ppid" },
-    { "sleep", "sleep N" },
+    { "sleep", "sleep NUMBER..." },
     { "sync", "sync" },
     { "clear", "clear" },
     { 0, 0 }
@@ -3416,7 +3455,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink[-efmnqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep[NUMBER...], ln[-sfv], readlink[-efmnqz], realpath[-qz], env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -5369,21 +5408,38 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "sleep")) {
-        long sec;
+        /* sleep NUMBER... — fractional + summed operands (GNU-ish). */
+        long sec = 0;
+        long nsec = 0;
         long ts[2];
+        int ai = 1;
         if (tokens[1] == 0) {
             puts("sh: sleep: missing operand");
             rc = 1;
         } else {
-            sec = strtol_dec(tokens[1]);
-            if (sec < 0) sec = 0;
-            ts[0] = sec;
-            ts[1] = 0;
-            if (u_nanosleep(ts, 0) < 0) {
-                puts("sh: sleep interrupted");
-                rc = 1;
-            } else {
-                rc = 0;
+            rc = 0;
+            for (ai = 1; tokens[ai] != 0; ai++) {
+                long s;
+                long ns;
+                if (!sh_parse_duration(tokens[ai], &s, &ns)) {
+                    puts("sh: sleep: invalid time interval");
+                    rc = 1;
+                    break;
+                }
+                sec += s;
+                nsec += ns;
+                if (nsec >= 1000000000L) {
+                    sec += nsec / 1000000000L;
+                    nsec = nsec % 1000000000L;
+                }
+            }
+            if (rc == 0) {
+                ts[0] = sec;
+                ts[1] = nsec;
+                if (u_nanosleep(ts, 0) < 0) {
+                    puts("sh: sleep interrupted");
+                    rc = 1;
+                }
             }
         }
     } else if (eq(tokens[0], "ln")) {

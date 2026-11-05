@@ -2256,6 +2256,13 @@ now checks that all but the last component exist. Last of `-f`/`-e`/`-m`
 wins. Shell builtin synced. Keeps `-n`/`-q`/`-z`. No new `/bin` dent.
 Focused virtio login smoke (smp 1/2).
 
+## sleep fractional / multi-operand — landed
+
+`/bin/sleep` and the shell `sleep` builtin accept GNU-ish fractional
+seconds (`1.5`, `.5`) and multiple NUMBER operands that are summed.
+Uses nanosleep(2). No new `/bin` dent. Focused virtio login smoke
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2264,6 +2271,6 @@ Focused virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. sleep quirks, id polish; `cp -p` waits on utimensat;
-   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc /
-   CFS / jbd alone.
+   inspect (e.g. id -G/-r polish; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd
+   alone.
