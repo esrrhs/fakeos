@@ -41,6 +41,8 @@ extern long u_geteuid(void);
 extern long u_getgid(void);
 extern long u_getegid(void);
 extern long u_chown(const char *path, long uid, long gid);
+extern long u_utimensat(long dfd, const char *path, const void *times, long flags);
+extern long u_statfs(const char *path, void *buf);
 extern long u_setuid(long uid);
 extern long u_setgid(long gid);
 extern long u_setreuid(long ruid, long euid);
@@ -1855,6 +1857,71 @@ static void owner_mtime_test(void) {
             return;
         }
         puts("[U] Ext2 chown/mtime OK");
+    }
+    /* utimensat(2): set explicit mtime seconds. */
+    {
+        char ts[32];
+        unsigned long k;
+        for (k = 0; k < 32; k++) ts[k] = 0;
+        /* timespec[0] and [1]: tv_sec=12345, tv_nsec=0 */
+        ts[0] = 57; ts[1] = 48; /* 12345 = 0x3039 little-endian */
+        ts[16] = 57; ts[17] = 48;
+        if (u_utimensat(-100, "/tmp/own_mtime.txt", ts, 0) != 0) {
+            puts("[U][FAIL] utimensat set");
+            return;
+        }
+        for (k = 0; k < 144; k++) st[k] = 0;
+        if (u_stat("/tmp/own_mtime.txt", st) != 0) {
+            puts("[U][FAIL] stat after utimensat");
+            return;
+        }
+        if (st_u64(st, 88) != 12345) {
+            puts("[U][FAIL] utimensat mtime");
+            return;
+        }
+        puts("[U] utimensat OK");
+        /* touch -r equivalent: copy mtime onto a second file. */
+        {
+            long fd2;
+            char ts2[32];
+            unsigned long k2;
+            fd2 = u_open("/tmp/own_mtime2.txt", 0x40 | 0x200 | 2, 0x1A4);
+            if (fd2 < 0) {
+                puts("[U][FAIL] open own_mtime2");
+                return;
+            }
+            u_close(fd2);
+            for (k2 = 0; k2 < 32; k2++) ts2[k2] = 0;
+            ts2[0] = 57; ts2[1] = 48;
+            ts2[16] = 57; ts2[17] = 48;
+            if (u_utimensat(-100, "/tmp/own_mtime2.txt", ts2, 0) != 0) {
+                puts("[U][FAIL] utimensat copy");
+                return;
+            }
+            for (k2 = 0; k2 < 144; k2++) st[k2] = 0;
+            if (u_stat("/tmp/own_mtime2.txt", st) != 0 || st_u64(st, 88) != 12345) {
+                puts("[U][FAIL] utimensat copy mtime");
+                return;
+            }
+            puts("[U] utimensat copy-mtime OK");
+        }
+    }
+    /* statfs(2) on ramfs root must report non-zero blocks. */
+    {
+        char sf[120];
+        unsigned long k;
+        unsigned long blocks;
+        for (k = 0; k < 120; k++) sf[k] = 0;
+        if (u_statfs("/", sf) != 0) {
+            puts("[U][FAIL] statfs /");
+            return;
+        }
+        blocks = st_u64(sf, 16);
+        if (blocks == 0) {
+            puts("[U][FAIL] statfs blocks");
+            return;
+        }
+        puts("[U] statfs OK");
     }
     puts("[U][PASS] getuid/chown/mtime");
 }

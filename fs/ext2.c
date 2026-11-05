@@ -2139,6 +2139,40 @@ u32 ext2_chown(const char *path, u32 uid, u32 gid) {
     return 1;
 }
 
+/* utimensat(2): set i_mtime (+ i_ctime). follow=0 => nofollow last symlink. */
+u32 ext2_utimens(const char *path, u32 mtime_sec, u32 follow) {
+    const char *rel;
+    u32 ino;
+    if (!sb.mounted || path == 0) return 0;
+    rel = persist_rel(path);
+    if (rel == 0) return 0;
+    if (rel[0] == 0) {
+        ino = EXT2_ROOT_INO;
+    } else {
+        ino = walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, follow ? 1 : 0, 0);
+        if (ino == 0) return 0;
+    }
+    if (!inode_read(ino, ino_raw)) return 0;
+    jl_begin();
+    wr32(ino_raw + I_MTIME, mtime_sec);
+    wr32(ino_raw + I_CTIME, now_sec());
+    if (!inode_write(ino, ino_raw)) { jl_commit(); return 0; }
+    jl_commit();
+    return 1;
+}
+
+/* Ext2 volume block/inode counts for statfs(2). */
+u32 ext2_statfs_info(u64 *bsize_out, u64 *blocks_out, u64 *bfree_out,
+                     u64 *files_out, u64 *ffree_out) {
+    if (!sb.mounted) return 0;
+    if (bsize_out) *bsize_out = sb.block_size ? sb.block_size : 1024;
+    if (blocks_out) *blocks_out = sb.blocks_count;
+    if (bfree_out) *bfree_out = sb.free_blocks;
+    if (files_out) *files_out = sb.inodes_count;
+    if (ffree_out) *ffree_out = sb.free_inodes;
+    return 1;
+}
+
 /* Owner + mtime from on-disk inode. */
 u32 ext2_owner_mtime(u32 ino, u32 *uid_out, u32 *gid_out, u32 *mtime_out) {
     u8 raw[128];

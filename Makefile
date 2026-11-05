@@ -3,7 +3,9 @@
 # ==============================================================================
 
 # Toolchain configuration (Auto-detect cross-compiler or native Linux/macOS tools)
-FCC       ?= $(shell which fakecc 2>/dev/null || echo fakecc)
+# Prefer sibling ../fakecc/build/fakecc (merged master with PR #112 features:
+# -T, --kernel-multiboot, %gs:disp, growable link_kernel). Else PATH fakecc.
+FCC       ?= $(shell f='$(CURDIR)/../fakecc/build/fakecc'; if [ -x "$$f" ]; then echo "$$f"; else which fakecc 2>/dev/null || echo fakecc; fi)
 NASM      ?= $(shell which nasm 2>/dev/null || echo nasm)
 QEMU      ?= $(shell which qemu-system-x86_64 2>/dev/null || echo qemu-system-x86_64)
 
@@ -26,10 +28,11 @@ ROOT_DIR  := $(shell pwd)
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
 # in a throwaway /tmp copy.
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
-# Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK) needs tip fakecc with
-# --target, -T, --kernel-multiboot, %gs:disp, and large link_kernel (e.g.
-# OPEN PR #112 / 6e5a5cdd). Example:
-#   FCC=/tmp/fakecc-master/build/fakecc make
+# Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK) needs fakecc with
+# --target (multi-target builds), -T, --kernel-multiboot, %gs:disp, and
+# growable link_kernel — merged via esrrhs/fakecc#112 (master >= 38f34243).
+# Default FCC prefers ../fakecc/build/fakecc; override if needed:
+#   FCC=/path/to/fakecc make
 # !!! M5 RESTAGE PIN (in-OS /bin/fakecc only) !!!
 # Tip after 2c1f4525 has historically miscompiled `imm64 ^ induction` (O0 BXOR)
 # and broken PMM order-3 + kill/wait on the ldfake-rebuilt kernel. When
@@ -241,7 +244,7 @@ endif
 
 # Userland: fakecc-compiled programs linked at 0x400000, embedded into the
 # kernel via incbin. Every program shares crt0.o, libc.o and usys.o.
-USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed login head wc getent tail grep sed printf tee basename dirname true false seq cut tr test uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync readlink realpath date stat nl fold mktemp rev paste expand unexpand comm join split csplit fmt which cksum sum strings pr column md5sum sha1sum sha256sum base64 factor clear reset stty tput tty whoami id groups cal install chown chgrp tac nproc timeout rmdir unlink tsort pathchk logname nohup find du shuf kill diff nice arch time watch hexdump xxd file kbuild ldfake dumpbin
+USER_PROGS := init sh hello cat ls cp rm touch mv ping udptest nc ed login head wc getent tail grep sed printf tee basename dirname true false seq cut tr test uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync readlink realpath date stat nl fold mktemp rev paste expand unexpand comm join split csplit fmt which cksum sum strings pr column md5sum sha1sum sha256sum base64 factor clear reset stty tput tty whoami id groups cal install chown chgrp tac nproc timeout rmdir unlink tsort pathchk logname nohup find du df shuf kill diff nice arch time watch hexdump xxd file kbuild ldfake dumpbin
 USER_OBJS  := $(addprefix $(BUILD_DIR)/user/,crt0.o usys.o libc.o) \
               $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).o)
 USER_ELFS  := $(foreach p,$(USER_PROGS),$(BUILD_DIR)/user/$(p).elf)

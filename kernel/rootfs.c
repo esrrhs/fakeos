@@ -206,6 +206,8 @@ extern char user_find_start;
 extern char user_find_end;
 extern char user_du_start;
 extern char user_du_end;
+extern char user_df_start;
+extern char user_df_end;
 extern char user_shuf_start;
 extern char user_shuf_end;
 extern char user_kill_start;
@@ -440,6 +442,7 @@ void rootfs_publish(void) {
     publish_one("/bin/nohup", (u64)(&user_nohup_start), (u64)(&user_nohup_end));
     publish_one("/bin/find", (u64)(&user_find_start), (u64)(&user_find_end));
     publish_one("/bin/du", (u64)(&user_du_start), (u64)(&user_du_end));
+    publish_one("/bin/df", (u64)(&user_df_start), (u64)(&user_df_end));
     publish_one("/bin/shuf", (u64)(&user_shuf_start), (u64)(&user_shuf_end));
     publish_one("/bin/kill", (u64)(&user_kill_start), (u64)(&user_kill_end));
     publish_one("/bin/diff", (u64)(&user_diff_start), (u64)(&user_diff_end));

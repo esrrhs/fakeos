@@ -1459,3 +1459,142 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
         }
     }
 }
+
+/* utimensat(2): set mtime (atime ignored — ramfs/ext2 only track mtime).
+ * Thin: AT_FDCWD (+ absolute paths); times=NULL => now; UTIME_OMIT/UTIME_NOW
+ * on times[1].tv_nsec. AT_SYMLINK_NOFOLLOW honored. */
+u64 sys_utimensat(u64 dfd, u64 upath, u64 utimes, u64 flags) {
+    char path[PATH_KMAX];
+    u64 as = sched_current_as_h();
+    u32 follow;
+    u32 mtime_sec;
+    u32 omit;
+    i64 sec;
+    i64 nsec;
+    enum {
+        AT_FDCWD_U = 0xFFFFFF9C,
+        AT_SYMLINK_NOFOLLOW = 0x100,
+        UTIME_NOW = 0x3fffffff,
+        UTIME_OMIT = 0x3ffffffe,
+        EINVAL_NEG = (u64)-22
+    };
+
+    if (as == 0 || upath == 0) {
+        return (u64)(-1);
+    }
+    if ((flags & ~(u64)AT_SYMLINK_NOFOLLOW) != 0) {
+        return EINVAL_NEG;
+    }
+    follow = ((flags & (u64)AT_SYMLINK_NOFOLLOW) == 0) ? 1 : 0;
+
+    if ((u32)dfd != AT_FDCWD_U) {
+        /* Absolute path ignores dfd; relative under dirfd not yet. */
+        char raw[PATH_KMAX];
+        if (!copy_user_cstring(raw, upath, PATH_KMAX - 1)) {
+            return (u64)(-1);
+        }
+        if (raw[0] != '/') {
+            return (u64)(-1);
+        }
+        if (!canon_path("/", raw, path, PATH_KMAX)) {
+            return (u64)(-1);
+        }
+    } else if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+
+    omit = 0;
+    if (utimes == 0) {
+        mtime_sec = (u32)(sched_tick_count() / 100);
+    } else {
+        if (!mem.as_user_range_ok(as, utimes, 32)) {
+            return (u64)(-1);
+        }
+        /* times[1] = mtime at offset 16. */
+        sec = (i64)(*(volatile u64 *)(utimes + 16));
+        nsec = (i64)(*(volatile u64 *)(utimes + 24));
+        if (nsec == (i64)UTIME_OMIT) {
+            omit = 1;
+            mtime_sec = 0;
+        } else if (nsec == (i64)UTIME_NOW) {
+            mtime_sec = (u32)(sched_tick_count() / 100);
+        } else if (nsec < 0 || nsec >= 1000000000) {
+            return EINVAL_NEG;
+        } else if (sec < 0) {
+            return EINVAL_NEG;
+        } else {
+            mtime_sec = (u32)sec;
+        }
+    }
+    if (omit) {
+        return 0;
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted() || !fs.ext2_utimens(path, mtime_sec, follow)) {
+            return (u64)(-1);
+        }
+        return 0;
+    }
+    return fs.fs_utimens(path, mtime_sec, follow) ? 0 : (u64)(-1);
+}
+
+/* Fill a Linux x86_64 struct statfs (120 bytes) at ustat. */
+static u32 fill_statfs_user(u64 ustat, u64 bsize, u64 blocks, u64 bfree,
+                            u64 files, u64 ffree) {
+    u64 as = sched_current_as_h();
+    volatile u64 *u;
+    u32 i;
+    if (as == 0 || ustat == 0 || !mem.as_user_range_ok(as, ustat, 120)) {
+        return 0;
+    }
+    u = (volatile u64 *)ustat;
+    for (i = 0; i < 15; i++) {
+        u[i] = 0;
+    }
+    u[0] = 0x858458f6; /* RAMFS_MAGIC-ish / generic */
+    u[1] = bsize;      /* f_bsize */
+    u[2] = blocks;     /* f_blocks */
+    u[3] = bfree;      /* f_bfree */
+    u[4] = bfree;      /* f_bavail */
+    u[5] = files;      /* f_files */
+    u[6] = ffree;      /* f_ffree */
+    /* f_fsid left 0 */
+    u[8] = 255;        /* f_namelen */
+    u[9] = bsize;      /* f_frsize */
+    return 1;
+}
+
+/* statfs(2): Ramfs reports PMM pages as blocks; Ext2 uses on-disk counts. */
+u64 sys_statfs(u64 upath, u64 ustat) {
+    char path[PATH_KMAX];
+    u64 bsize = 0;
+    u64 blocks = 0;
+    u64 bfree = 0;
+    u64 files = 0;
+    u64 ffree = 0;
+    if (!copy_user_path(path, upath)) {
+        return (u64)(-1);
+    }
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted()
+            || !fs.ext2_statfs_info(&bsize, &blocks, &bfree, &files, &ffree)) {
+            return (u64)(-1);
+        }
+        if (!fill_statfs_user(ustat, bsize, blocks, bfree, files, ffree)) {
+            return (u64)(-1);
+        }
+        /* Tag Ext2 magic. */
+        {
+            u64 as = sched_current_as_h();
+            if (as != 0 && mem.as_user_range_ok(as, ustat, 8)) {
+                *(volatile u64 *)ustat = 0xEF53;
+            }
+        }
+        return 0;
+    }
+    if (!fs.fs_statfs_info(&bsize, &blocks, &bfree, &files, &ffree)) {
+        return (u64)(-1);
+    }
+    return fill_statfs_user(ustat, bsize, blocks, bfree, files, ffree)
+           ? 0 : (u64)(-1);
+}

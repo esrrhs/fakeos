@@ -9,8 +9,8 @@
     .globl u_nice, u_open, u_ping, u_pipe, u_poll, u_read, u_readlink, u_recvfrom
     .globl u_rename, u_rmdir, u_rt_sigaction, u_rt_sigreturn, u_select, u_sendto, u_set_tid_address, u_setgid
     .globl u_setgroups, u_setpgid, u_setregid, u_setreuid, u_setsid, u_setsockopt, u_setuid, u_shutdown
-    .globl u_sig_restorer, u_socket, u_stat, u_symlink, u_sync, u_tcgetpgrp, u_tcsetpgrp, u_tty_setfg
-    .globl u_umask, u_uname, u_unlink, u_wait4, u_write, u_yield
+    .globl u_sig_restorer, u_socket, u_stat, u_statfs, u_symlink, u_sync, u_tcgetpgrp, u_tcsetpgrp, u_tty_setfg
+    .globl u_umask, u_uname, u_unlink, u_utimensat, u_wait4, u_write, u_yield
 
     .macro USYSC1 name nr
     .globl \name
@@ -174,6 +174,18 @@ u_clone:
 u_futex:
     mov %rcx, %r10
     mov $202, %eax
+    syscall
+    ret
+
+
+u_utimensat:
+    mov %rcx, %r10
+    mov $280, %eax
+    syscall
+    ret
+
+u_statfs:
+    mov $137, %eax
     syscall
     ret
 

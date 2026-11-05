@@ -1598,6 +1598,42 @@ u32 fs_chown(const char *path, u32 uid, u32 gid) {
     return 1;
 }
 
+/* utimensat(2) helper: set mtime (seconds). follow=1 uses walk_lookup. */
+u32 fs_utimens(const char *path, u32 mtime_sec, u32 follow) {
+    u32 ino = follow ? walk_lookup(path) : walk_lookup_nofollow(path);
+    u32 t;
+    if (ino == 0 || ino >= MAX_INODES) {
+        return 0;
+    }
+    t = inodes[ino].type;
+    if (t == INO_FREE || t == INO_CONSOLE || t == INO_NULL || t == INO_ZERO) {
+        return 0;
+    }
+    inodes[ino].mtime = mtime_sec;
+    return 1;
+}
+
+/* Ramfs capacity snapshot for statfs(2): pages as 4KiB blocks + inode slots.
+ * Not a true block store — reports PMM free/total so thin df is useful. */
+u32 fs_statfs_info(u64 *bsize_out, u64 *blocks_out, u64 *bfree_out,
+                   u64 *files_out, u64 *ffree_out) {
+    extern u64 pmm_total_pages(void);
+    extern u64 pmm_free_pages_count(void);
+    u64 free_ino = 0;
+    u32 i;
+    for (i = 2; i < MAX_INODES; i++) {
+        if (inodes[i].type == INO_FREE) {
+            free_ino++;
+        }
+    }
+    if (bsize_out) *bsize_out = 4096;
+    if (blocks_out) *blocks_out = pmm_total_pages();
+    if (bfree_out) *bfree_out = pmm_free_pages_count();
+    if (files_out) *files_out = MAX_INODES;
+    if (ffree_out) *ffree_out = free_ino;
+    return 1;
+}
+
 /* Owner + mtime for an inode (used by kstat fill). */
 u32 fs_owner_mtime(u32 ino, u32 *uid_out, u32 *gid_out, u32 *mtime_out) {
     if (ino == 0 || ino >= MAX_INODES || inodes[ino].type == INO_FREE) {

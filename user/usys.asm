@@ -89,6 +89,8 @@ global u_gettid
 global u_clone
 global u_arch_prctl
 global u_set_tid_address
+global u_utimensat
+global u_statfs
 
 section .text
 
@@ -447,6 +449,18 @@ u_exit:
 ; unsigned int atomic_xchg(volatile unsigned int *p [RDI], unsigned int v [ESI])
 ; returns previous *p
 global atomic_xchg
+
+; long u_utimensat(long dfd, const char *path, const void *times, long flags)
+align 16
+u_utimensat:
+    mov     r10, rcx
+    mov     eax, 280
+    syscall
+    ret
+
+; long u_statfs(const char *path, void *buf)
+USYSC1 u_statfs, 137
+
 align 16
 atomic_xchg:
     mov     eax, esi

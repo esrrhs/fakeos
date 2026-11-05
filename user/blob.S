@@ -110,6 +110,7 @@
     BLOB user_nohup, "build/user/nohup.elf"
     BLOB user_find, "build/user/find.elf"
     BLOB user_du, "build/user/du.elf"
+    BLOB user_df, "build/user/df.elf"
     BLOB user_shuf, "build/user/shuf.elf"
     BLOB user_kill, "build/user/kill.elf"
     BLOB user_diff, "build/user/diff.elf"

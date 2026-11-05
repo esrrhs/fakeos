@@ -66,6 +66,8 @@ extern u64 sys_stat(u64 upath, u64 ustat);
 extern u64 sys_lstat(u64 upath, u64 ustat);
 extern u64 sys_fstat(u64 fd, u64 ustat);
 extern u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags);
+extern u64 sys_utimensat(u64 dfd, u64 upath, u64 utimes, u64 flags);
+extern u64 sys_statfs(u64 upath, u64 ustat);
 
 /* sysproc.c */
 extern u64 sys_brk(u64 newbrk);
@@ -228,7 +230,9 @@ enum {
     SC_GETPPID = 110,
     SC_UNAME = 63,
     SC_NANOSLEEP = 35,
-    SC_CLOCK_GETTIME = 228
+    SC_CLOCK_GETTIME = 228,
+    SC_STATFS = 137,
+    SC_UTIMENSAT = 280
 };
 
 enum {
@@ -465,6 +469,12 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_NEWFSTATAT) {
         return sys_newfstatat(f->rdi, f->rsi, f->rdx, f->r10);
+    }
+    if (f->rax == SC_UTIMENSAT) {
+        return sys_utimensat(f->rdi, f->rsi, f->rdx, f->r10);
+    }
+    if (f->rax == SC_STATFS) {
+        return sys_statfs(f->rdi, f->rsi);
     }
     if (f->rax == SC_CHMOD) {
         return sys_chmod(f->rdi, f->rsi);

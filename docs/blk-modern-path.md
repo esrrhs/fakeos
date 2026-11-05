@@ -2313,13 +2313,37 @@ set, else `$TMPDIR` from `/proc/self/environ`, else `/tmp`. No PREFIX →
 (glued `-tu`/`-tpDIR`). No new `/bin` dent. Focused virtio login smoke
 (smp 1/2).
 
+
+## utimensat + touch -r — landed
+
+`utimensat(2)` (nr 280): AT_FDCWD (+ absolute paths); `times==NULL` / `UTIME_NOW` /
+`UTIME_OMIT` on mtime; atime ignored (ramfs/ext2 only track mtime);
+`AT_SYMLINK_NOFOLLOW` honored. `/bin/touch` gains `-r REF` and updates mtime via
+utimensat (create still uses O_CREAT; `-c` kept). Init smoke covers explicit
+mtime + copy-mtime (smp 1/2).
+
+## statfs + /bin/df — landed
+
+`statfs(2)` (nr 137): Ramfs reports PMM total/free pages as 4KiB blocks + inode
+slots; Ext2 uses on-disk block/inode counts (`/mnt`, `/home`). New `/bin/df
+[-h] [PATH...]` (default `/`). One new Ramfs `/bin` dent. Init smoke (smp 1/2).
+
+## Host FCC default — landed
+
+Makefile `FCC` prefers `$(CURDIR)/../fakecc/build/fakecc` (merged master /
+fakecc#112: `-T`, `--kernel-multiboot`, `%gs`, growable `link_kernel`), else
+`which fakecc`. M5 restage pin (`FAKECC_SRC=/tmp/fakecc-m5-good` @ `2c1f4525`)
+unchanged and independent of host FCC.
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
    clear bite-sized fix (CFS roots must stay NONE, not BSS 0).
 2. Deep jbd — avoid unless needed.
-3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
-   `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
-   deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (`cp -p` waits on utimensat; `set --` deferred; skip large
-   shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+3. Interactive shell external-exec currently dies with SIGINT (exit 130) in this
+   environment even on clean master — pre-existing vs kill/* selftest FAILs;
+   investigate before relying on virtio login smoke for new `/bin` tools.
+4. More daily-driver gaps: `touch -d`/`cp -p` (need richer time parse), `mkfifo`
+   (needs `mknod` + named pipe), `ps`/`uptime`/`free` (need `/proc` pid enum /
+   meminfo), `tar`/`gzip`/`awk`. Prefer small coherent chunks. Leave Ext2 duplex
+   / multi-nc / CFS / jbd alone.
