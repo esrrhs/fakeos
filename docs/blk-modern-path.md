@@ -2202,6 +2202,13 @@ octal (`mode & 07777`), GNU-ish thin. Glued `-Rv`. Keeps `-R`. No new
 (GNU). With `-p`, announces each removed parent component. Glued `-pv`.
 Keeps `-p`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## install -v — landed
+
+`/bin/install -v` prints `'SRC' -> 'DST'` after each successful file install
+(GNU). With `-d`, prints `creating directory 'PATH'` after each mkdir+chmod.
+Glued `-Dv`. Keeps `-D`/`-d`/`-t`/`-m`. No new `/bin` dent. Focused virtio
+login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2210,5 +2217,6 @@ Keeps `-p`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. `install -v`; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. touch leftovers beyond -r|-d, seq quirks, dirname/basename
+   polish; `cp -p` waits on utimensat; `set --` deferred; skip large shell).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.

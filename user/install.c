@@ -1,14 +1,16 @@
 /* fakeos userland - install: copy files / create dirs (thin POSIX/GNU subset).
  * Forms:
- *   install [-D] [-m MODE|-mMODE] SOURCE DEST
- *   install [-D] [-m MODE|-mMODE] SOURCE... DIRECTORY
- *   install [-D] -t DIR|-tDIR [-m MODE|-mMODE] SOURCE...
- *   install -d [-m MODE|-mMODE] DIR...
+ *   install [-Dv] [-m MODE|-mMODE] SOURCE DEST
+ *   install [-Dv] [-m MODE|-mMODE] SOURCE... DIRECTORY
+ *   install [-Dv] -t DIR|-tDIR [-m MODE|-mMODE] SOURCE...
+ *   install -d [-v] [-m MODE|-mMODE] DIR...
  * Default MODE is 0755. -d is mkdir -p style, then chmod. -D creates leading
  * path components of the destination (GNU): parents of DEST for file copy,
  * or DIRECTORY itself when installing into a dir / with -t. -t names the
- * destination directory. Copy path reuses open/read/write + chmod.
- * Glued -DmMODE / -tDIR / -dmMODE keep argv under EXEC_MAX_ARGC=8.
+ * destination directory. -v announces each install (GNU): "'SRC' -> 'DST'"
+ * for file copies, "creating directory 'PATH'" for -d. Copy path reuses
+ * open/read/write + chmod. Glued -Dv / -DmMODE / -tDIR / -dmMODE keep argv
+ * under EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -36,6 +38,16 @@ enum {
     PATH_CAP = 128,
     DEFAULT_MODE = 0x1ED
 };
+
+static int verbose;
+
+static void announce_copy(const char *src, const char *dst) {
+    if (verbose) printf("'%s' -> '%s'\n", src, dst);
+}
+
+static void announce_dir(const char *path) {
+    if (verbose) printf("creating directory '%s'\n", path);
+}
 
 static unsigned int load_u32(const char *p) {
     return (unsigned int)(unsigned char)p[0]
@@ -180,11 +192,12 @@ static int copy_file(const char *src, const char *dst, unsigned int mode) {
         printf("install: %s: chmod failed\n", dst);
         return -1;
     }
+    announce_copy(src, dst);
     return 0;
 }
 
 static void usage(void) {
-    u_write(2, "usage: install [-Dd] [-t DIR] [-m MODE] SRC...\n", 49);
+    u_write(2, "usage: install [-Ddv] [-t DIR] [-m MODE] SRC...\n", 50);
 }
 
 int main(int argc, char **argv) {
@@ -196,6 +209,8 @@ int main(int argc, char **argv) {
     int rc = 0;
     int nops;
     int i;
+
+    verbose = 0;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
         const char *o = argv[ai] + 1;
@@ -209,6 +224,8 @@ int main(int argc, char **argv) {
                 dirs = 1;
             } else if (o[j] == 'D') {
                 opt_D = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else if (o[j] == 't') {
                 if (o[j + 1] != 0) {
                     tdir = o + j + 1;
@@ -266,7 +283,9 @@ int main(int argc, char **argv) {
             if (u_chmod(argv[i], (long)mode) != 0) {
                 printf("install: %s: chmod failed\n", argv[i]);
                 rc = 1;
+                continue;
             }
+            announce_dir(argv[i]);
         }
         return rc;
     }
