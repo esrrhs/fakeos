@@ -1,12 +1,13 @@
 /* fakeos userland - mv: rename(2); falls back to copy-tree+rm across FS.
  * Forms:
- *   mv [-n] SRC DST
- *   mv [-n] SRC... DIRECTORY
+ *   mv [-nv] SRC DST
+ *   mv [-nv] SRC... DIRECTORY
  * If DST/DIRECTORY exists as a directory, place each SRC under it as
  * DIRECTORY/basename(SRC). Directories move via rename when possible;
  * otherwise copy-tree then recursive remove. Refuse cycles (DST under
- * SRC). -n noclobber: skip existing destinations (quiet, exit 0). Compact
- * argv for EXEC_MAX_ARGC=8.
+ * SRC). -n noclobber: skip existing destinations (quiet, exit 0). -v prints
+ * 'SRC' -> 'DST' once per successful top-level move (GNU). Sticky -nv/-vn.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -283,7 +284,12 @@ static int copy_unlink(const char *src, const char *dst) {
     return 0;
 }
 
-static int move_one(const char *src, const char *dst, int noclobber) {
+static void announce(const char *src, const char *dst) {
+    printf("'%s' -> '%s'\n", src, dst);
+}
+
+static int move_one(const char *src, const char *dst, int noclobber, int verbose) {
+    int rc;
     if (is_under(src, dst)) {
         printf("mv: %s: cannot move a directory into itself\n", src);
         return 1;
@@ -292,18 +298,23 @@ static int move_one(const char *src, const char *dst, int noclobber) {
         return 0;
     }
     if (u_rename(src, dst) == 0) {
+        if (verbose) announce(src, dst);
         return 0;
     }
     /* EXDEV / unsupported: copy-tree then remove source. */
     if (is_dir(src)) {
         if (copy_path(src, dst) != 0) return 1;
-        return rm_path(src);
+        rc = rm_path(src);
+        if (rc == 0 && verbose) announce(src, dst);
+        return rc;
     }
-    return copy_unlink(src, dst);
+    rc = copy_unlink(src, dst);
+    if (rc == 0 && verbose) announce(src, dst);
+    return rc;
 }
 
 static void usage(void) {
-    u_write(2, "usage: mv [-n] SRC DST|DIR...\n", 30);
+    u_write(2, "usage: mv [-nv] SRC DST|DIR...\n", 32);
 }
 
 int main(int argc, char **argv) {
@@ -311,6 +322,7 @@ int main(int argc, char **argv) {
     int i;
     int ai = 1;
     int noclobber = 0;
+    int verbose = 0;
     int rc = 0;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
@@ -322,6 +334,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'n') {
                 noclobber = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else {
                 usage();
                 return 1;
@@ -347,7 +361,7 @@ int main(int argc, char **argv) {
             }
             dst = joined;
         }
-        return move_one(src, dst, noclobber);
+        return move_one(src, dst, noclobber, verbose);
     }
 
     /* Multiple sources into directory. */
@@ -364,7 +378,7 @@ int main(int argc, char **argv) {
                 rc = 1;
                 continue;
             }
-            if (move_one(argv[i], joined, noclobber) != 0) rc = 1;
+            if (move_one(argv[i], joined, noclobber, verbose) != 0) rc = 1;
         }
     }
     return rc;

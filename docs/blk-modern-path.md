@@ -2174,6 +2174,13 @@ each directory created under `-r` (GNU). `-n` skips still stay silent. Not
 `-p` (deferred for utimensat). Glued `-rnv`. No new `/bin` dent. Focused
 virtio login smoke (smp 1/2).
 
+## mv -v — landed
+
+`/bin/mv -v` prints `'SRC' -> 'DST'` once per successful top-level move
+(GNU), whether via rename(2) or copy+unlink/copy-tree fallback. `-n` skips
+stay silent. Glued `-nv`. No new `/bin` dent. Focused virtio login smoke
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2182,5 +2189,5 @@ virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
-   Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. `ln -v`; `cp -p` waits on utimensat; `set --` deferred;
+   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
