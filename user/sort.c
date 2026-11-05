@@ -1,11 +1,13 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-rnufbz] [-k N|-kN] [FILE...]
+ * Forms: sort [-rnufbRz] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
  * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
  * string compares / tie-breaks; -b ignore leading blanks on the sort key;
- * -z NUL-terminated records (input+output; pairs with xargs -0);
- * -k N sort by blank-separated field N (1-based; missing field sorts as
- * empty / 0). Loads into RAM. Compact argv for EXEC_MAX_ARGC=8.
+ * -R random order (GNU; Fisher-Yates shuffle; other compare flags ignored
+ * for ordering; -u still unique by key after shuffle); -z NUL-terminated
+ * records (input+output; pairs with xargs -0); -k N sort by blank-separated
+ * field N (1-based; missing field sorts as empty / 0). Loads into RAM.
+ * Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -20,10 +22,13 @@ extern void *malloc(unsigned long size);
 extern void free(void *ptr);
 extern void printf(const char *fmt, ...);
 extern long strtol_dec(const char *s);
+extern long u_getpid(void);
+extern long u_clock_gettime(long clockid, void *tp);
 
 enum {
     LINE_MAX = 512,
-    MAX_LINES = 4096
+    MAX_LINES = 4096,
+    CLOCK_REALTIME = 0
 };
 
 static int opt_r;
@@ -31,13 +36,15 @@ static int opt_n;
 static int opt_u;
 static int opt_f;
 static int opt_b; /* ignore leading blanks on key */
+static int opt_R; /* random order (GNU) */
 static int opt_z; /* NUL-terminated records */
 static int opt_k; /* 0 = whole line; else 1-based field */
 static char *lines[MAX_LINES];
 static int nlines;
+static unsigned int rng_state;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnufbz] [-k N] [FILE...]\n", 39);
+    u_write(2, "usage: sort [-rnufbRz] [-k N] [FILE...]\n", 40);
 }
 
 static int is_digits(const char *s) {
@@ -220,6 +227,51 @@ static int key_cmp(const char *a, const char *b) {
     return cmp_str(ka, kb);
 }
 
+static void rng_seed(void) {
+    long ts[2];
+    unsigned int s;
+    if (u_clock_gettime(CLOCK_REALTIME, ts) != 0) {
+        ts[0] = 1;
+        ts[1] = 1;
+    }
+    s = (unsigned int)ts[0] ^ (unsigned int)ts[1]
+      ^ ((unsigned int)u_getpid() * 2654435761u);
+    if (s == 0) s = 0xA5A5A5A5u;
+    rng_state = s;
+}
+
+static unsigned int rng_next(void) {
+    unsigned int x = rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    rng_state = x;
+    return x;
+}
+
+/* Uniform in [0, bound) for bound > 0. */
+static unsigned int rng_below(unsigned int bound) {
+    unsigned int x;
+    unsigned int lim;
+    if (bound <= 1) return 0;
+    lim = (0u - bound) % bound;
+    do {
+        x = rng_next();
+    } while (x < lim);
+    return x % bound;
+}
+
+static void shuffle_lines(void) {
+    int i;
+    rng_seed();
+    for (i = nlines - 1; i > 0; i--) {
+        unsigned int j = rng_below((unsigned int)(i + 1));
+        char *tmp = lines[i];
+        lines[i] = lines[j];
+        lines[j] = tmp;
+    }
+}
+
 static void sort_lines(void) {
     /* Insertion sort — fine for thin daily-driver smoke sizes. */
     int i;
@@ -308,6 +360,7 @@ int main(int argc, char **argv) {
     opt_u = 0;
     opt_f = 0;
     opt_b = 0;
+    opt_R = 0;
     opt_z = 0;
     opt_k = 0;
 
@@ -340,6 +393,7 @@ int main(int argc, char **argv) {
             else if (o == 'u') opt_u = 1;
             else if (o == 'f') opt_f = 1;
             else if (o == 'b') opt_b = 1;
+            else if (o == 'R') opt_R = 1;
             else if (o == 'z') opt_z = 1;
             else {
                 usage();
@@ -382,7 +436,8 @@ int main(int argc, char **argv) {
         free_all();
         return rc;
     }
-    sort_lines();
+    if (opt_R) shuffle_lines();
+    else sort_lines();
     emit_all();
     free_all();
     return rc;

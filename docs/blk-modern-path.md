@@ -2277,6 +2277,13 @@ space-separated; optional `-n` names) and `-r` (real uid/gid with
 Mutually exclusive with `-u`; supersedes `-d`. No new `/bin` dent.
 Focused virtio login smoke (smp 1/2).
 
+## sort -R — landed
+
+`/bin/sort -R` randomizes line order (GNU; Fisher-Yates; seed from
+clock_gettime + getpid, same as shuf). Other compare flags ignored for
+ordering; `-u` still unique-by-key after shuffle. Glues with `-rnufbz`.
+No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2285,6 +2292,6 @@ Focused virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. sort -R/-h/-V leftovers, timeout --foreground;
+   inspect (e.g. sort -h/-V leftovers, timeout --foreground, mktemp -t;
    `cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
    Ext2 duplex / multi-nc / CFS / jbd alone.
