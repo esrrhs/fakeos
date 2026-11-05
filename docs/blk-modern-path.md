@@ -2232,6 +2232,15 @@ smoke (smp 1/2).
 `group of 'PATH' retained as GID` (decimal; GNU-ish). No shell builtin.
 No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## realpath -q — landed
+
+`/bin/realpath -q` (and the shell `realpath` builtin) suppresses error
+messages when a PATH fails to resolve (GNU `--quiet`/`--silent`); exit
+status stays non-zero. Final resolved path must exist (`lstat`, GNU
+default). Glued `-qz`. Keeps `-z` and multi-PATH. Shell builtin now also
+accepts multi-PATH / `-z`. No new `/bin` dent. Focused virtio login smoke
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2240,6 +2249,6 @@ No new `/bin` dent. Focused virtio login smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. realpath -q; `cp -p` waits on utimensat; `set --`
-   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd
-   alone.
+   inspect (e.g. readlink leftovers, sleep quirks, id polish; `cp -p`
+   waits on utimensat; `set --` deferred; skip large shell). Leave Ext2
+   duplex / multi-nc / CFS / jbd alone.

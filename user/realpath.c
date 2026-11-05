@@ -1,16 +1,19 @@
 /* fakeos userland - realpath: physical path resolve (thin; mirrors shell).
- *   realpath [-z] PATH...
+ *   realpath [-qz] PATH...
  * One or more operands; each resolved path printed on its own line (GNU
- * multi-arg). -z ends each result with NUL (pairs with xargs -0). Walks
- * components with readlink(2), collapsing . / .. like the shell builtin.
- * Exit 0 iff every PATH resolves. Compact argv for EXEC_MAX_ARGC=8.
- * External form for xargs/scripts that exec realpath.
+ * multi-arg). -z ends each result with NUL (pairs with xargs -0). -q
+ * quiets error messages on failed PATH (GNU --quiet/--silent; exit status
+ * still non-zero). Walks components with readlink(2), collapsing . / ..
+ * like the shell builtin. Final path must exist (lstat). Exit 0 iff
+ * every PATH resolves. Compact argv for
+ * EXEC_MAX_ARGC=8. External form for xargs/scripts that exec realpath.
  */
 package user;
 
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_getcwd(char *buf, unsigned long len);
+extern long u_lstat(const char *path, void *statbuf);
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
@@ -202,8 +205,13 @@ static int urealpath(const char *in, char *out, unsigned long cap) {
             }
         }
         if (!found) {
+            char st[144];
             nlen = strlen(work);
             if (nlen + 1 > cap) {
+                return 0;
+            }
+            /* GNU default: final path must exist. */
+            if (u_lstat(work, st) != 0) {
                 return 0;
             }
             for (i = 0; i <= nlen; i++) {
@@ -220,26 +228,41 @@ int main(int argc, char **argv) {
     int i = 1;
     int rc = 0;
     int opt_z = 0;
+    int opt_q = 0;
 
     while (i < argc && argv[i][0] == '-' && argv[i][1] != 0) {
+        const char *o;
+        int j;
         if (strcmp(argv[i], "--") == 0) {
             i++;
             break;
         }
-        if (strcmp(argv[i], "-z") == 0) {
-            opt_z = 1;
+        o = argv[i] + 1;
+        if (o[0] == '-' && o[1] == 0) {
             i++;
-            continue;
+            break;
         }
-        break;
+        for (j = 0; o[j] != 0; j++) {
+            if (o[j] == 'z') {
+                opt_z = 1;
+            } else if (o[j] == 'q') {
+                opt_q = 1;
+            } else {
+                u_write(2, "usage: realpath [-qz] PATH...\n", 31);
+                return 1;
+            }
+        }
+        i++;
     }
     if (i >= argc) {
-        u_write(2, "usage: realpath [-z] PATH...\n", 29);
+        u_write(2, "usage: realpath [-qz] PATH...\n", 31);
         return 1;
     }
     for (; i < argc; i++) {
         if (!urealpath(argv[i], buf, sizeof(buf))) {
-            printf("realpath: %s: failed\n", argv[i]);
+            if (!opt_q) {
+                printf("realpath: %s: failed\n", argv[i]);
+            }
             rc = 1;
             continue;
         }
