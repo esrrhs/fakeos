@@ -46,9 +46,13 @@ FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
 
 # fakecc-only host path: Gas AT&T .S via $(FCC) -c, and fakecc -T link.
 # Set to 0 to fall back to nasm -f elf64 + GNU ld + objcopy.
-# Remaining nasm: boot.asm (mixed 16/32/64 elf64) and ap_tramp.asm (-f bin).
+# Remaining nasm (unless FAKECC_BOOT_BIN=1): boot.asm + ap_tramp.asm.
 USE_FAKECC_ASM ?= 1
 FAKECC_LINK    ?= 1
+# Assemble boot.asm / ap_tramp.asm with fakecc NASM-subset (-f elf64 / -f bin).
+# Requires fakecc with feat/nasm-bin-realmode (or successor) merged.
+# Default 0 until that fakecc PR lands; then flip to 1 to drop the last nasm uses.
+FAKECC_BOOT_BIN ?= 0
 
 # Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
 M5STAGE := $(BUILD_DIR)/m5stage
@@ -172,12 +176,18 @@ $(KERNEL_BIN): $(KERNEL_64)
 endif
 
 # Assembly objects
-# boot.asm stays nasm -f elf64 (real-mode / protected / long-mode bring-up;
-# fakecc has no real-mode story yet). ap_tramp.asm stays nasm -f bin.
+# boot.asm / ap_tramp.asm: nasm by default; fakecc -f elf64/-f bin when FAKECC_BOOT_BIN=1.
+ifeq ($(FAKECC_BOOT_BIN),1)
+$(BUILD_DIR)/boot.o: arch/x86_64/boot.asm
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $< (-f elf64)"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' -f elf64 -o $@ $<
+else
 $(BUILD_DIR)/boot.o: arch/x86_64/boot.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $<"
 	@$(NASM) $(NASMFLAGS) -o $@ $<
+endif
 
 ifeq ($(USE_FAKECC_ASM),1)
 $(BUILD_DIR)/io.o: arch/x86_64/io.S
@@ -221,10 +231,17 @@ $(BUILD_DIR)/sysentry.o: arch/x86_64/sysentry.asm
 	@$(NASM) $(NASMFLAGS) -o $@ $<
 endif
 
+ifeq ($(FAKECC_BOOT_BIN),1)
+$(BUILD_DIR)/ap_tramp.bin: arch/x86_64/ap_tramp.asm
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $< (-f bin)"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' -f bin -o $@ $<
+else
 $(BUILD_DIR)/ap_tramp.bin: arch/x86_64/ap_tramp.asm
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [NASM]    $< (bin)"
 	@$(NASM) -f bin -o $@ $<
+endif
 
 ifeq ($(USE_FAKECC_ASM),1)
 $(BUILD_DIR)/ap_tramp_blob.o: arch/x86_64/ap_tramp_blob.S $(BUILD_DIR)/ap_tramp.bin
