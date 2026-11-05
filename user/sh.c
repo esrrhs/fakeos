@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-pv], rmdir[-p], ln[-sf],
+ * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-pv], rmdir[-p], ln[-sfv],
  * readlink, realpath, env/export[-n]/unset/which/type/command[-vV]/hash[-rplt]/read/alias[-p]/unalias[-a]/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg, wait.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -2694,7 +2694,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "env", "env" },
     { "mkdir", "mkdir [-pv] [-m MODE] DIR..." },
     { "rmdir", "rmdir [-p] DIR..." },
-    { "ln", "ln [-sf] TARGET LINKPATH" },
+    { "ln", "ln [-sfv] TARGET LINKPATH" },
     { "readlink", "readlink FILE" },
     { "realpath", "realpath FILE" },
     { "uname", "uname [-asnrvm]" },
@@ -3336,7 +3336,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sf], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-R] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
@@ -5265,10 +5265,11 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "ln")) {
-        /* ln [-sf] TARGET LINKPATH */
+        /* ln [-sfv] TARGET LINKPATH */
         int ti = 1;
         int symbolic = 0;
         int force = 0;
+        int verbose = 0;
         int bad = 0;
         while (tokens[ti] != 0 && tokens[ti][0] == '-' && tokens[ti][1] != 0) {
             const char *o = tokens[ti] + 1;
@@ -5277,13 +5278,14 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 's') symbolic = 1;
                 else if (o[j] == 'f') force = 1;
+                else if (o[j] == 'v') verbose = 1;
                 else { bad = 1; break; }
             }
             if (bad) break;
             ti++;
         }
         if (bad || tokens[ti] == 0 || tokens[ti + 1] == 0 || tokens[ti + 2] != 0) {
-            puts("sh: ln: usage: ln [-sf] TARGET LINKPATH");
+            puts("sh: ln: usage: ln [-sfv] TARGET LINKPATH");
             rc = 1;
         } else {
             const char *target = tokens[ti];
@@ -5309,11 +5311,21 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                     if (u_symlink(target, linkpath) != 0) {
                         puts("sh: ln: symlink failed");
                         rc = 1;
-                    } else rc = 0;
+                    } else {
+                        rc = 0;
+                        if (verbose) {
+                            printf("'%s' -> '%s'\n", linkpath, target);
+                        }
+                    }
                 } else if (u_link(target, linkpath) != 0) {
                     puts("sh: ln: link failed");
                     rc = 1;
-                } else rc = 0;
+                } else {
+                    rc = 0;
+                    if (verbose) {
+                        printf("'%s' => '%s'\n", linkpath, target);
+                    }
+                }
             }
         }
     } else if (eq(tokens[0], "readlink")) {

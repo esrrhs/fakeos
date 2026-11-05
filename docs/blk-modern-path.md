@@ -2181,6 +2181,13 @@ virtio login smoke (smp 1/2).
 stay silent. Glued `-nv`. No new `/bin` dent. Focused virtio login smoke
 (smp 1/2).
 
+## ln -v — landed
+
+`/bin/ln -v` (and the shell `ln` builtin) prints `'LINKPATH' -> 'TARGET'` for
+symlinks and `'LINKPATH' => 'TARGET'` for hard links after success (GNU).
+Glued `-sfv`. Keeps `-s`/`-f`. No new `/bin` dent. Focused virtio login smoke
+(smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2189,5 +2196,5 @@ stay silent. Glued `-nv`. No new `/bin` dent. Focused virtio login smoke
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. `ln -v`; `cp -p` waits on utimensat; `set --` deferred;
-   skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (`cp -p` waits on utimensat; `set --` deferred; skip large shell).
+   Leave Ext2 duplex / multi-nc / CFS / jbd alone.

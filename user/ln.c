@@ -1,8 +1,10 @@
 /* fakeos userland - ln: create hard or symbolic links (thin; mirrors shell).
- *   ln [-s] [-f] TARGET LINKPATH
+ *   ln [-s] [-f] [-v] TARGET LINKPATH
  * -s  create a symlink via symlink(2); otherwise hard link via link(2).
  * -f  force: unlink LINKPATH first if it exists (not a directory).
- * Glued -sf/-fs accepted. External form for xargs/scripts.
+ * -v  print 'LINKPATH' -> 'TARGET' (symlink) or 'LINKPATH' => 'TARGET'
+ *     (hard link) after success (GNU). Glued -sfv/-svf/… accepted.
+ * External form for xargs/scripts. Compact argv for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -12,6 +14,7 @@ extern long u_symlink(const char *target, const char *linkpath);
 extern long u_unlink(const char *path);
 extern long u_stat(const char *path, void *statbuf);
 extern int strcmp(const char *a, const char *b);
+extern void printf(const char *fmt, ...);
 
 enum {
     ST_MODE = 24,
@@ -21,7 +24,7 @@ enum {
 };
 
 static void usage(void) {
-    u_write(2, "usage: ln [-sf] TARGET LINKPATH\n", 32);
+    u_write(2, "usage: ln [-sfv] TARGET LINKPATH\n", 33);
 }
 
 static unsigned int load_u32(const char *p) {
@@ -49,10 +52,19 @@ static int force_unlink(const char *path) {
     return 0;
 }
 
+static void announce(const char *target, const char *linkpath, int symbolic) {
+    if (symbolic) {
+        printf("'%s' -> '%s'\n", linkpath, target);
+    } else {
+        printf("'%s' => '%s'\n", linkpath, target);
+    }
+}
+
 int main(int argc, char **argv) {
     int ai = 1;
     int symbolic = 0;
     int force = 0;
+    int verbose = 0;
     const char *target;
     const char *linkpath;
 
@@ -65,6 +77,8 @@ int main(int argc, char **argv) {
                 symbolic = 1;
             } else if (o[j] == 'f') {
                 force = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else {
                 usage();
                 return 1;
@@ -86,11 +100,13 @@ int main(int argc, char **argv) {
             u_write(2, "ln: symlink failed\n", 19);
             return 1;
         }
+        if (verbose) announce(target, linkpath, 1);
         return 0;
     }
     if (u_link(target, linkpath) != 0) {
         u_write(2, "ln: link failed\n", 16);
         return 1;
     }
+    if (verbose) announce(target, linkpath, 0);
     return 0;
 }
