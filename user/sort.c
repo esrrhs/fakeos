@@ -1,10 +1,12 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-rnufbhRz] [-k N|-kN] [FILE...]
+ * Forms: sort [-rnufbhVRz] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
  * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
  * string compares / tie-breaks; -b ignore leading blanks on the sort key;
  * -h human-numeric (GNU; integer + optional SI suffix kKMGTPE as 1024^n;
- * optional trailing i ignored; overrides -n for key compare); -R random
+ * optional trailing i ignored; overrides -n for key compare); -V version
+ * sort (GNU; digit runs compared numerically, non-digits as chars; more
+ * leading zeros sorts first; overrides -n/-h for key compare); -R random
  * order (GNU; Fisher-Yates shuffle; other compare flags ignored for
  * ordering; -u still unique by key after shuffle); -z NUL-terminated
  * records (input+output; pairs with xargs -0); -k N sort by blank-separated
@@ -39,6 +41,7 @@ static int opt_u;
 static int opt_f;
 static int opt_b; /* ignore leading blanks on key */
 static int opt_h; /* human-numeric (GNU SI suffixes) */
+static int opt_V; /* version sort (GNU) */
 static int opt_R; /* random order (GNU) */
 static int opt_z; /* NUL-terminated records */
 static int opt_k; /* 0 = whole line; else 1-based field */
@@ -47,7 +50,7 @@ static int nlines;
 static unsigned int rng_state;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnufbhRz] [-k N] [FILE...]\n", 41);
+    u_write(2, "usage: sort [-rnufbhVRz] [-k N] [FILE...]\n", 42);
 }
 
 static int is_digits(const char *s) {
@@ -198,6 +201,58 @@ static char fold_ch(char c) {
     return c;
 }
 
+/* Version compare (thin GNU -V): digit runs as numbers; longer leading-zero
+ * prefix sorts first when values equal; other chars by byte (honors -f). */
+static int is_ver_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+static int cmp_version_n(const char *a, int al, const char *b, int bl) {
+    int i = 0;
+    int j = 0;
+    if (al < 0) al = (int)strlen(a);
+    if (bl < 0) bl = (int)strlen(b);
+    while (i < al && j < bl) {
+        if (is_ver_digit(a[i]) && is_ver_digit(b[j])) {
+            int zi = 0;
+            int zj = 0;
+            int si;
+            int sj;
+            int li;
+            int lj;
+            int k;
+            while (i < al && a[i] == '0') { i++; zi++; }
+            while (j < bl && b[j] == '0') { j++; zj++; }
+            si = i;
+            sj = j;
+            while (i < al && is_ver_digit(a[i])) i++;
+            while (j < bl && is_ver_digit(b[j])) j++;
+            li = i - si;
+            lj = j - sj;
+            if (li != lj) return li < lj ? -1 : 1;
+            for (k = 0; k < li; k++) {
+                if (a[si + k] != b[sj + k]) {
+                    return (unsigned char)a[si + k] < (unsigned char)b[sj + k] ? -1 : 1;
+                }
+            }
+            if (zi != zj) return zi > zj ? -1 : 1;
+        } else {
+            unsigned char ca = (unsigned char)(opt_f ? fold_ch(a[i]) : a[i]);
+            unsigned char cb = (unsigned char)(opt_f ? fold_ch(b[j]) : b[j]);
+            if (ca != cb) return (int)ca - (int)cb;
+            i++;
+            j++;
+        }
+    }
+    if (i < al) return 1;
+    if (j < bl) return -1;
+    return 0;
+}
+
+static int cmp_version(const char *a, const char *b) {
+    return cmp_version_n(a, -1, b, -1);
+}
+
 static const char *skip_blanks(const char *s) {
     while (*s == ' ' || *s == '\t') s++;
     return s;
@@ -250,7 +305,9 @@ static int cmp_lines(const char *a, const char *b) {
     if (opt_k > 0) {
         ka = sort_key(a, &al);
         kb = sort_key(b, &bl);
-        if (opt_h) {
+        if (opt_V) {
+            c = cmp_version_n(ka, al, kb, bl);
+        } else if (opt_h) {
             long ma, mb;
             int ea, eb, na, nb;
             parse_human_n(ka, al, &ma, &ea, &na);
@@ -271,6 +328,10 @@ static int cmp_lines(const char *a, const char *b) {
             const char *tb = opt_b ? skip_blanks(b) : b;
             c = cmp_str(ta, tb);
         }
+    } else if (opt_V) {
+        ka = sort_key(a, 0);
+        kb = sort_key(b, 0);
+        c = cmp_version(ka, kb);
     } else if (opt_h) {
         long ma, mb;
         int ea, eb, na, nb;
@@ -307,6 +368,9 @@ static int key_cmp(const char *a, const char *b) {
     if (opt_k > 0) {
         ka = sort_key(a, &al);
         kb = sort_key(b, &bl);
+        if (opt_V) {
+            return cmp_version_n(ka, al, kb, bl);
+        }
         if (opt_h) {
             long ma, mb;
             int ea, eb, na, nb;
@@ -325,6 +389,9 @@ static int key_cmp(const char *a, const char *b) {
     }
     ka = sort_key(a, 0);
     kb = sort_key(b, 0);
+    if (opt_V) {
+        return cmp_version(ka, kb);
+    }
     if (opt_h) {
         long ma, mb;
         int ea, eb, na, nb;
@@ -476,6 +543,7 @@ int main(int argc, char **argv) {
     opt_f = 0;
     opt_b = 0;
     opt_h = 0;
+    opt_V = 0;
     opt_R = 0;
     opt_z = 0;
     opt_k = 0;
@@ -510,6 +578,7 @@ int main(int argc, char **argv) {
             else if (o == 'f') opt_f = 1;
             else if (o == 'b') opt_b = 1;
             else if (o == 'h') opt_h = 1;
+            else if (o == 'V') opt_V = 1;
             else if (o == 'R') opt_R = 1;
             else if (o == 'z') opt_z = 1;
             else {
