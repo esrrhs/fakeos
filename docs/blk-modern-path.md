@@ -2218,6 +2218,14 @@ an absolute TEMPLATE with `-p` errors. Glued `-pDIR` / `-dpu`. Keeps
 
 Touch already has `-c`; `-a`/`-m`/`-r`/`-d` wait on utimensat (deferred).
 
+## chown -v — landed
+
+`/bin/chown -v` (and the shell `chown` builtin) prints
+`changed ownership of 'PATH' from OLDUID:OLDGID to NEWUID:NEWGID` or
+`ownership of 'PATH' retained as UID:GID` (decimal; GNU-ish). Keeps
+OWNER[:GROUP] / :GROUP forms. No new `/bin` dent. Focused virtio login
+smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2226,6 +2234,6 @@ Touch already has `-c`; `-a`/`-m`/`-r`/`-d` wait on utimensat (deferred).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. chown -v / chgrp -v, realpath -q, seq leftovers if any;
-   `cp -p` waits on utimensat; `set --` deferred; skip large shell). Leave
-   Ext2 duplex / multi-nc / CFS / jbd alone.
+   inspect (e.g. chgrp -v, realpath -q; `cp -p` waits on utimensat;
+   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc /
+   CFS / jbd alone.

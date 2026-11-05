@@ -259,6 +259,8 @@ static int eq(const char *a, const char *b) {
 
 enum {
     SH_ST_MODE = 24,
+    SH_ST_UID = 28,
+    SH_ST_GID = 32,
     SH_ST_SIZE = 48,
     SH_ST_BYTES = 144,
     SH_S_IFMT = 0xF000,
@@ -520,6 +522,16 @@ static void sh_chmod_announce(const char *path, unsigned int oldm,
         printf("mode of '%s' retained as %s\n", path, a);
     } else {
         printf("mode of '%s' changed from %s to %s\n", path, a, b);
+    }
+}
+
+static void sh_chown_announce(const char *path, unsigned int ou, unsigned int og,
+                              unsigned int nu, unsigned int ng) {
+    if (ou == nu && og == ng) {
+        printf("ownership of '%s' retained as %u:%u\n", path, nu, ng);
+    } else {
+        printf("changed ownership of '%s' from %u:%u to %u:%u\n",
+               path, ou, og, nu, ng);
     }
 }
 
@@ -2722,7 +2734,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "which", "which NAME..." },
     { "umask", "umask [MODE]" },
     { "chmod", "chmod [-Rv] MODE FILE..." },
-    { "chown", "chown [UID][:GID] FILE..." },
+    { "chown", "chown [-v] [UID][:GID] FILE..." },
     { "id", "id [-u|-g] [-n]" },
     { "setuid", "setuid UID" },
     { "seteuid", "seteuid UID" },
@@ -3374,9 +3386,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[-v], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
-            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
+            puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [-v] [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");
             puts("signals: Ctrl-C/Z/TTIN/TTOU; setsid/fg pgid; ioctl TIOCSPGRP; pipelines share setpgid; fg/bg/jobs[-l]/wait [PID|%N]; kill [-]PGID; history (/home/.sh_history)");
             puts("help NAME  — one-line synopsis for a builtin");
@@ -5038,18 +5050,38 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             }
         }
     } else if (eq(tokens[0], "chown")) {
-        /* chown [UID][:GID] FILE...  (:GID leaves owner; missing GID leaves group) */
-        if (tokens[1] == 0 || tokens[2] == 0) {
-            puts("usage: chown [UID][:GID] FILE...");
+        /* chown [-v] [UID][:GID] FILE...  (:GID leaves owner; missing GID leaves group) */
+        int verbose = 0;
+        int ai = 1;
+        while (tokens[ai] != 0 && tokens[ai][0] == '-' && tokens[ai][1] != 0) {
+            const char *o = tokens[ai] + 1;
+            int j;
+            if (o[0] == '-' && o[1] == 0) {
+                ai++;
+                break;
+            }
+            if (o[0] >= '0' && o[0] <= '9') break;
+            for (j = 0; o[j] != 0; j++) {
+                if (o[j] == 'v') {
+                    verbose = 1;
+                } else {
+                    puts("usage: chown [-v] [UID][:GID] FILE...");
+                    return 1;
+                }
+            }
+            ai++;
+        }
+        if (tokens[ai] == 0 || tokens[ai + 1] == 0) {
+            puts("usage: chown [-v] [UID][:GID] FILE...");
             rc = 1;
         } else {
             unsigned long uid = 0xFFFFFFFFUL; /* unchanged unless digits */
             unsigned long gid = 0xFFFFFFFFUL; /* unchanged */
-            const char *spec = tokens[1];
-            long ai;
+            const char *spec = tokens[ai];
             long i = 0;
             int bad = 0;
             int have_uid = 0;
+            ai++;
             if (spec[0] == ':') {
                 long j = 1;
                 gid = 0;
@@ -5103,11 +5135,30 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
                 rc = 1;
             } else {
                 rc = 0;
-                for (ai = 2; tokens[ai] != 0; ai++) {
+                for (; tokens[ai] != 0; ai++) {
+                    char st[SH_ST_BYTES];
+                    unsigned int ou = 0;
+                    unsigned int og = 0;
+                    unsigned int nu;
+                    unsigned int ng;
+                    if (verbose) {
+                        if (u_lstat(tokens[ai], st) != 0) {
+                            printf("sh: chown: %s: failed\n", tokens[ai]);
+                            rc = 1;
+                            break;
+                        }
+                        ou = sh_load_u32(st + SH_ST_UID);
+                        og = sh_load_u32(st + SH_ST_GID);
+                    }
                     if (u_chown(tokens[ai], (long)uid, (long)gid) != 0) {
                         printf("sh: chown: %s: failed\n", tokens[ai]);
                         rc = 1;
                         break;
+                    }
+                    if (verbose) {
+                        nu = (uid == 0xFFFFFFFFUL) ? ou : (unsigned int)uid;
+                        ng = (gid == 0xFFFFFFFFUL) ? og : (unsigned int)gid;
+                        sh_chown_announce(tokens[ai], ou, og, nu, ng);
                     }
                 }
             }
