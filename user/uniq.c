@@ -1,11 +1,12 @@
 /* fakeos userland - uniq: collapse consecutive duplicate lines (thin POSIX).
- * Forms: uniq [-cduiz] [-f N] [-s N] [-w N] [FILE...]
- * -c count prefix; -d only duplicated; -u only unique; -i fold case when
- * comparing; -z NUL-terminated records (input+output; pairs with xargs -0);
- * -f N skip N fields; -s N skip N chars (after fields) when comparing;
- * -w N compare at most N chars of the key (GNU; after -f/-s). Output still
- * emits the full original line. stdin if no FILE. Compact argv for
- * EXEC_MAX_ARGC=8.
+ * Forms: uniq [-cduDiz] [-f N] [-s N] [-w N] [FILE...]
+ * -c count prefix; -d only duplicated (one line per group); -D all duplicate
+ * lines (GNU; print every line in a duplicated group); -u only unique; -i
+ * fold case when comparing; -z NUL-terminated records (input+output; pairs
+ * with xargs -0); -f N skip N fields; -s N skip N chars (after fields) when
+ * comparing; -w N compare at most N chars of the key (GNU; after -f/-s).
+ * Output still emits the full original line. stdin if no FILE. Compact argv
+ * for EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -23,6 +24,7 @@ enum { LINE_MAX = 512 };
 
 static int opt_c;
 static int opt_d;
+static int opt_D; /* all duplicate lines (GNU) */
 static int opt_u;
 static int opt_i;
 static int opt_f; /* skip N fields (0 = none) */
@@ -31,7 +33,7 @@ static int opt_w; /* compare at most N chars (-1 = unlimited) */
 static int opt_z; /* NUL-terminated records */
 
 static void usage(void) {
-    u_write(2, "usage: uniq [-cduiz] [-f N] [-s N] [-w N] [FILE...]\n", 52);
+    u_write(2, "usage: uniq [-cduDiz] [-f N] [-s N] [-w N] [FILE...]\n", 53);
 }
 
 static int is_digits(const char *s) {
@@ -115,11 +117,7 @@ static void emit_count(int count) {
     u_write(1, " ", 1);
 }
 
-static void emit(const char *line, int count) {
-    if (count <= 0) return;
-    if (opt_d && count < 2) return;
-    if (opt_u && count != 1) return;
-    if (opt_c) emit_count(count);
+static void emit_one(const char *line) {
     u_write(1, line, strlen(line));
     if (opt_z) {
         char z = 0;
@@ -127,6 +125,24 @@ static void emit(const char *line, int count) {
     } else {
         u_write(1, "\n", 1);
     }
+}
+
+static void emit(const char *line, int count) {
+    int k;
+    if (count <= 0) return;
+    if (opt_D) {
+        /* GNU -D: print every line in a duplicated group. */
+        if (count < 2) return;
+        for (k = 0; k < count; k++) {
+            if (opt_c) emit_count(count);
+            emit_one(line);
+        }
+        return;
+    }
+    if (opt_d && count < 2) return;
+    if (opt_u && count != 1) return;
+    if (opt_c) emit_count(count);
+    emit_one(line);
 }
 
 static int uniq_fd(long fd) {
@@ -202,6 +218,7 @@ int main(int argc, char **argv) {
 
     opt_c = 0;
     opt_d = 0;
+    opt_D = 0;
     opt_u = 0;
     opt_i = 0;
     opt_f = 0;
@@ -262,6 +279,7 @@ int main(int argc, char **argv) {
             char o = argv[i][j];
             if (o == 'c') opt_c = 1;
             else if (o == 'd') opt_d = 1;
+            else if (o == 'D') opt_D = 1;
             else if (o == 'u') opt_u = 1;
             else if (o == 'i') opt_i = 1;
             else if (o == 'z') opt_z = 1;
@@ -292,10 +310,12 @@ int main(int argc, char **argv) {
     next_arg:
         ;
     }
-    if (opt_d && opt_u) {
+    if ((opt_d || opt_D) && opt_u) {
         usage();
         return 1;
     }
+    /* -D supersedes -d (print all duplicates, not one per group). */
+    if (opt_D) opt_d = 0;
 
     if (i >= argc) {
         return uniq_fd(0);
