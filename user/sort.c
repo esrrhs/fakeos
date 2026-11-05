@@ -1,10 +1,12 @@
 /* fakeos userland - sort: lexicographic line sort (thin POSIX subset).
- * Forms: sort [-rnufbRz] [-k N|-kN] [FILE...]
+ * Forms: sort [-rnufbhRz] [-k N|-kN] [FILE...]
  * -r reverse; -n numeric (leading optional sign/digits); -u unique by key
  * (suppress consecutive equal keys after sort); -f fold case (A-Z→a-z) for
  * string compares / tie-breaks; -b ignore leading blanks on the sort key;
- * -R random order (GNU; Fisher-Yates shuffle; other compare flags ignored
- * for ordering; -u still unique by key after shuffle); -z NUL-terminated
+ * -h human-numeric (GNU; integer + optional SI suffix kKMGTPE as 1024^n;
+ * optional trailing i ignored; overrides -n for key compare); -R random
+ * order (GNU; Fisher-Yates shuffle; other compare flags ignored for
+ * ordering; -u still unique by key after shuffle); -z NUL-terminated
  * records (input+output; pairs with xargs -0); -k N sort by blank-separated
  * field N (1-based; missing field sorts as empty / 0). Loads into RAM.
  * Compact argv for EXEC_MAX_ARGC=8.
@@ -36,6 +38,7 @@ static int opt_n;
 static int opt_u;
 static int opt_f;
 static int opt_b; /* ignore leading blanks on key */
+static int opt_h; /* human-numeric (GNU SI suffixes) */
 static int opt_R; /* random order (GNU) */
 static int opt_z; /* NUL-terminated records */
 static int opt_k; /* 0 = whole line; else 1-based field */
@@ -44,7 +47,7 @@ static int nlines;
 static unsigned int rng_state;
 
 static void usage(void) {
-    u_write(2, "usage: sort [-rnufbRz] [-k N] [FILE...]\n", 40);
+    u_write(2, "usage: sort [-rnufbhRz] [-k N] [FILE...]\n", 41);
 }
 
 static int is_digits(const char *s) {
@@ -108,6 +111,88 @@ static long parse_num(const char *s) {
     return parse_num_n(s, -1);
 }
 
+/* Human-numeric key: optional sign + digits + optional SI suffix (1024^n).
+ * Thin: no fractional part. Trailing 'i' (Ki/Mi) ignored. */
+static int human_suffix_exp(char c) {
+    if (c == 'k' || c == 'K') return 1;
+    if (c == 'm' || c == 'M') return 2;
+    if (c == 'g' || c == 'G') return 3;
+    if (c == 't' || c == 'T') return 4;
+    if (c == 'p' || c == 'P') return 5;
+    if (c == 'e' || c == 'E') return 6;
+    return -1;
+}
+
+static void parse_human_n(const char *s, int n, long *mant_out, int *exp_out, int *neg_out) {
+    int i = 0;
+    int end = n;
+    int neg = 0;
+    long v = 0;
+    int exp = 0;
+    int se;
+    if (n < 0) end = (int)strlen(s);
+    while (i < end && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i < end && s[i] == '-') {
+        neg = 1;
+        i++;
+    } else if (i < end && s[i] == '+') {
+        i++;
+    }
+    if (i >= end || s[i] < '0' || s[i] > '9') {
+        *mant_out = 0;
+        *exp_out = 0;
+        *neg_out = 0;
+        return;
+    }
+    while (i < end && s[i] >= '0' && s[i] <= '9') {
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    if (i < end) {
+        se = human_suffix_exp(s[i]);
+        if (se >= 0) {
+            exp = se;
+            i++;
+            if (i < end && (s[i] == 'i' || s[i] == 'I')) i++;
+        }
+    }
+    *mant_out = v;
+    *exp_out = exp;
+    *neg_out = neg;
+}
+
+static void parse_human(const char *s, long *mant_out, int *exp_out, int *neg_out) {
+    parse_human_n(s, -1, mant_out, exp_out, neg_out);
+}
+
+/* Compare non-negative (mant, exp) pairs; exp is power-of-1024.
+ * Expand the higher-exp mantissa downward (×1024, exp--) to the lower
+ * exponent so both are in the same unit, then compare mantissas. */
+static int cmp_human_pos(long m1, int e1, long m2, int e2) {
+    while (e1 > e2) {
+        if (m1 > 0x7fffffffffffffffL / 1024L) return 1;
+        m1 *= 1024L;
+        e1--;
+    }
+    while (e2 > e1) {
+        if (m2 > 0x7fffffffffffffffL / 1024L) return -1;
+        m2 *= 1024L;
+        e2--;
+    }
+    if (m1 < m2) return -1;
+    if (m1 > m2) return 1;
+    return 0;
+}
+
+static int cmp_human_vals(long m1, int e1, int n1, long m2, int e2, int n2) {
+    int c;
+    if (n1 && !n2) return -1;
+    if (!n1 && n2) return 1;
+    c = cmp_human_pos(m1, e1, m2, e2);
+    if (n1) return -c;
+    return c;
+}
+
 static char fold_ch(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
     return c;
@@ -165,7 +250,14 @@ static int cmp_lines(const char *a, const char *b) {
     if (opt_k > 0) {
         ka = sort_key(a, &al);
         kb = sort_key(b, &bl);
-        if (opt_n) {
+        if (opt_h) {
+            long ma, mb;
+            int ea, eb, na, nb;
+            parse_human_n(ka, al, &ma, &ea, &na);
+            parse_human_n(kb, bl, &mb, &eb, &nb);
+            c = cmp_human_vals(ma, ea, na, mb, eb, nb);
+            if (c == 0) c = cmp_key_str(ka, al, kb, bl);
+        } else if (opt_n) {
             long na = parse_num_n(ka, al);
             long nb = parse_num_n(kb, bl);
             if (na < nb) c = -1;
@@ -179,6 +271,15 @@ static int cmp_lines(const char *a, const char *b) {
             const char *tb = opt_b ? skip_blanks(b) : b;
             c = cmp_str(ta, tb);
         }
+    } else if (opt_h) {
+        long ma, mb;
+        int ea, eb, na, nb;
+        ka = sort_key(a, 0);
+        kb = sort_key(b, 0);
+        parse_human(ka, &ma, &ea, &na);
+        parse_human(kb, &mb, &eb, &nb);
+        c = cmp_human_vals(ma, ea, na, mb, eb, nb);
+        if (c == 0) c = cmp_str(ka, kb);
     } else if (opt_n) {
         ka = sort_key(a, 0);
         kb = sort_key(b, 0);
@@ -206,6 +307,13 @@ static int key_cmp(const char *a, const char *b) {
     if (opt_k > 0) {
         ka = sort_key(a, &al);
         kb = sort_key(b, &bl);
+        if (opt_h) {
+            long ma, mb;
+            int ea, eb, na, nb;
+            parse_human_n(ka, al, &ma, &ea, &na);
+            parse_human_n(kb, bl, &mb, &eb, &nb);
+            return cmp_human_vals(ma, ea, na, mb, eb, nb);
+        }
         if (opt_n) {
             long na = parse_num_n(ka, al);
             long nb = parse_num_n(kb, bl);
@@ -217,6 +325,13 @@ static int key_cmp(const char *a, const char *b) {
     }
     ka = sort_key(a, 0);
     kb = sort_key(b, 0);
+    if (opt_h) {
+        long ma, mb;
+        int ea, eb, na, nb;
+        parse_human(ka, &ma, &ea, &na);
+        parse_human(kb, &mb, &eb, &nb);
+        return cmp_human_vals(ma, ea, na, mb, eb, nb);
+    }
     if (opt_n) {
         long na = parse_num(ka);
         long nb = parse_num(kb);
@@ -360,6 +475,7 @@ int main(int argc, char **argv) {
     opt_u = 0;
     opt_f = 0;
     opt_b = 0;
+    opt_h = 0;
     opt_R = 0;
     opt_z = 0;
     opt_k = 0;
@@ -393,6 +509,7 @@ int main(int argc, char **argv) {
             else if (o == 'u') opt_u = 1;
             else if (o == 'f') opt_f = 1;
             else if (o == 'b') opt_b = 1;
+            else if (o == 'h') opt_h = 1;
             else if (o == 'R') opt_R = 1;
             else if (o == 'z') opt_z = 1;
             else {
