@@ -2195,6 +2195,13 @@ Glued `-sfv`. Keeps `-s`/`-f`. No new `/bin` dent. Focused virtio login smoke
 octal (`mode & 07777`), GNU-ish thin. Glued `-Rv`. Keeps `-R`. No new
 `/bin` dent. Focused virtio login smoke (smp 1/2).
 
+## rmdir -v — landed
+
+`/bin/rmdir -v` (and the shell `rmdir` builtin) prints
+`rmdir: removing directory, 'PATH'` for each successfully removed directory
+(GNU). With `-p`, announces each removed parent component. Glued `-pv`.
+Keeps `-p`. No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2203,6 +2210,5 @@ octal (`mode & 07777`), GNU-ish thin. Glued `-Rv`. Keeps `-R`. No new
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. `rmdir -v`, `install -v`; `cp -p` waits on utimensat;
-   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS /
-   jbd alone.
+   inspect (e.g. `install -v`; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd alone.

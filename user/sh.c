@@ -1,5 +1,5 @@
 /* fakeos userland - tiny interactive shell.
- * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-pv], rmdir[-p], ln[-sfv],
+ * Builtins: echo [-neE], printf, ($?/$VAR/$((arith))), cd[-], pushd/popd/dirs, pwd[-LP], mkdir[-pv], rmdir[-pv], ln[-sfv],
  * readlink, realpath, env/export[-n]/unset/which/type/command[-vV]/hash[-rplt]/read/alias[-p]/unalias[-a]/return/local/[[ ]], set [-eu]/[+eu], exit [code], help, jobs, fg, bg, wait.
  * Prompt shows cwd (~ for home). Shell env table drives PATH lookup and
  * is passed through execve envp (live /proc/self/environ). Redirects,
@@ -662,19 +662,22 @@ static int sh_mkdir_one(const char *path, int parents, int verbose) {
 
 /* Remove one empty directory; with -p, also strip empty parents
  * (inverse of mkdir -p). Stops before removing "/". */
-static int sh_rmdir_one(const char *path, int parents) {
+static int sh_rmdir_one(const char *path, int parents, int verbose) {
     char buf[SH_PATH_CAP];
     unsigned long n;
     unsigned long i;
     if (path == 0 || path[0] == 0) return -1;
     if (!parents) {
-        return u_rmdir(path) < 0 ? -1 : 0;
+        if (u_rmdir(path) < 0) return -1;
+        if (verbose) printf("rmdir: removing directory, '%s'\n", path);
+        return 0;
     }
     n = strlen(path);
     if (n >= SH_PATH_CAP) return -1;
     strcpy(buf, path);
     for (;;) {
         if (u_rmdir(buf) < 0) return -1;
+        if (verbose) printf("rmdir: removing directory, '%s'\n", buf);
         n = strlen(buf);
         while (n > 1 && buf[n - 1] == '/') {
             buf[n - 1] = 0;
@@ -2725,7 +2728,7 @@ static const struct sh_help_ent sh_help_tab[] = {
     { "seteuid", "seteuid UID" },
     { "env", "env" },
     { "mkdir", "mkdir [-pv] [-m MODE] DIR..." },
-    { "rmdir", "rmdir [-p] DIR..." },
+    { "rmdir", "rmdir [-pv] DIR..." },
     { "ln", "ln [-sfv] TARGET LINKPATH" },
     { "readlink", "readlink FILE" },
     { "realpath", "realpath FILE" },
@@ -3138,6 +3141,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
     }
     if (eq(tokens[0], "rmdir")) {
         int parents = 0;
+        int verbose = 0;
         int ai = 1;
         int rc = 0;
         int saw = 0;
@@ -3148,8 +3152,10 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
             for (j = 0; o[j] != 0; j++) {
                 if (o[j] == 'p') {
                     parents = 1;
+                } else if (o[j] == 'v') {
+                    verbose = 1;
                 } else {
-                    puts("usage: rmdir [-p] DIR...");
+                    puts("usage: rmdir [-pv] DIR...");
                     return 1;
                 }
             }
@@ -3161,7 +3167,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         while (tokens[ai] != 0) {
             saw = 1;
-            if (sh_rmdir_one(tokens[ai], parents) < 0) {
+            if (sh_rmdir_one(tokens[ai], parents, verbose) < 0) {
                 printf("sh: rmdir: %s: cannot remove directory\n", tokens[ai]);
                 rc = 1;
             }
@@ -3368,7 +3374,7 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         int ai;
         int bad = 0;
         if (tokens[1] == 0) {
-            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-p], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
+            puts("builtins: echo[-neE], printf, :/true/false, eval, let, declare/typeset, source/., cd[-LP], pushd, popd, dirs[-vp], alias[-p], unalias[-a], return, local[-rx], shift, [[ ]], mkdir[-pvm], rmdir[-pv], pwd[-LP], pid, ppid, uname[-asnrvm], sleep, ln[-sfv], readlink, realpath, env, export[-np], readonly[-p], unset, which, type[-t], command[-vV], builtin, hash[-rplt], read, set[-eu|-o], chmod, umask, chown[:GID], id[-ugn], setuid, seteuid, sync, clear, history, jobs[-l], fg, bg, wait, kill, break[N], continue[N], exec, exit, help[NAME]");
             puts("redirects: > >> <   pipelines: |   lists: && ||   jobs: &");
             puts("env: export [-np] NAME[=val] / readonly [-p] NAME[=val] / unset NAME / which|type [-t]|command [-vV]|builtin|hash [-rplt] / read [-r] [-p PROMPT] NAME / alias [-p]|unalias [-a] / return / local [-rx] / shift; :/true/false; eval; let; declare/typeset; source/.; set [-eu]|[+eu]|[-o|+o]; cd [-L|-P] [DIR|-]; pushd [DIR]; popd; dirs [-vp]; chmod [-Rv] MODE FILE; umask [MODE]; chown [UID][:GID] FILE; id [-u|-g] [-n]; setuid/seteuid; printf FORMAT; echo[-neE] $NAME / $? / $0..$9 / $# / $@ / $* / $((arith)); name(){…;}; [[ == != (*?) </> -eq… -z -n -efdh… && || ]]; for/while/until/if/elif/case/esac; break[N]/continue[N]/exec/return/shift; ; seq; envp -> children");
             puts("programs: hello cat ls cp rm touch mv ping nc ed login head wc getent tail grep printf tee basename dirname true false seq cut tr test/[ uniq sort yes od xargs cmp dd expr hostname echo sleep truncate mkdir pwd ln chmod uname env sync (default PATH=/bin:/usr/bin:.)");

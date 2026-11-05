@@ -1,7 +1,9 @@
 /* fakeos userland - rmdir: remove empty directories (thin shell/POSIX mirror).
- * Forms: rmdir [-p] DIR...
+ * Forms: rmdir [-pv] DIR...
  * -p also removes empty parent components (mkdir -p inverse).
- * External form for xargs/scripts that exec rmdir without the shell builtin.
+ * -v prints rmdir: removing directory, 'PATH' for each removed dir (GNU).
+ * Glued -pv/-vp. External form for xargs/scripts. Compact argv for
+ * EXEC_MAX_ARGC=8.
  */
 package user;
 
@@ -12,6 +14,10 @@ extern char *strcpy(char *dst, const char *src);
 extern void printf(const char *fmt, ...);
 
 enum { PATH_CAP = 128 };
+
+static void announce(const char *path) {
+    printf("rmdir: removing directory, '%s'\n", path);
+}
 
 /* Strip one trailing path component in-place. Returns 0 if a parent remains
  * to try, -1 when nothing left (empty, "/", or bare name with no slash). */
@@ -40,7 +46,7 @@ static int strip_parent(char *path) {
     return 0;
 }
 
-static int rmdir_parents(const char *path) {
+static int rmdir_parents(const char *path, int verbose) {
     char buf[PATH_CAP];
     unsigned long n;
     if (path == 0 || path[0] == 0) return -1;
@@ -51,6 +57,7 @@ static int rmdir_parents(const char *path) {
         if (u_rmdir(buf) < 0) {
             return -1;
         }
+        if (verbose) announce(buf);
         if (strip_parent(buf) < 0) {
             return 0;
         }
@@ -59,13 +66,14 @@ static int rmdir_parents(const char *path) {
 }
 
 static void usage(void) {
-    u_write(2, "usage: rmdir [-p] DIR...\n", 24);
+    u_write(2, "usage: rmdir [-pv] DIR...\n", 25);
 }
 
 int main(int argc, char **argv) {
     int i;
     int rc = 0;
     int parents = 0;
+    int verbose = 0;
     int ai = 1;
 
     while (ai < argc && argv[ai][0] == '-' && argv[ai][1] != 0) {
@@ -78,6 +86,8 @@ int main(int argc, char **argv) {
         for (j = 0; o[j] != 0; j++) {
             if (o[j] == 'p') {
                 parents = 1;
+            } else if (o[j] == 'v') {
+                verbose = 1;
             } else {
                 usage();
                 return 1;
@@ -92,13 +102,15 @@ int main(int argc, char **argv) {
     }
     for (i = ai; i < argc; i++) {
         if (parents) {
-            if (rmdir_parents(argv[i]) < 0) {
+            if (rmdir_parents(argv[i], verbose) < 0) {
                 printf("rmdir: %s: cannot remove directory\n", argv[i]);
                 rc = 1;
             }
         } else if (u_rmdir(argv[i]) < 0) {
             printf("rmdir: %s: cannot remove directory\n", argv[i]);
             rc = 1;
+        } else if (verbose) {
+            announce(argv[i]);
         }
     }
     return rc;
