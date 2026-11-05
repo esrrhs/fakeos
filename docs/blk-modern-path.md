@@ -2226,6 +2226,12 @@ Touch already has `-c`; `-a`/`-m`/`-r`/`-d` wait on utimensat (deferred).
 OWNER[:GROUP] / :GROUP forms. No new `/bin` dent. Focused virtio login
 smoke (smp 1/2).
 
+## chgrp -v — landed
+
+`/bin/chgrp -v` prints `changed group of 'PATH' from OLD to NEW` or
+`group of 'PATH' retained as GID` (decimal; GNU-ish). No shell builtin.
+No new `/bin` dent. Focused virtio login smoke (smp 1/2).
+
 ## Suggested next steps
 
 1. Leave Ext2-redirect duplex / multi-nc SMP races and CFS nesting unless a
@@ -2234,6 +2240,6 @@ smoke (smp 1/2).
 3. More daily-driver gaps after inventory: prefer small coherent chunks. Keep
    `df`/`touch -r|-d`/`mkfifo`/`ps`/`uptime`/`free`/`tar`/`gzip`/`awk`
    deferred. Next thin polish: other util flags on existing `/bin` after
-   inspect (e.g. chgrp -v, realpath -q; `cp -p` waits on utimensat;
-   `set --` deferred; skip large shell). Leave Ext2 duplex / multi-nc /
-   CFS / jbd alone.
+   inspect (e.g. realpath -q; `cp -p` waits on utimensat; `set --`
+   deferred; skip large shell). Leave Ext2 duplex / multi-nc / CFS / jbd
+   alone.
