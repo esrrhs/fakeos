@@ -26,14 +26,15 @@ BUILD_DIR := build
 ROOT_DIR  := $(shell pwd)
 # External fakecc source tree used to build the in-OS native compiler
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
-# in a throwaway /tmp copy.
+# in a throwaway /tmp copy and compiles checked-in v0/*.c with the seed FCC
+# (no CMake/cc/cpp in the normal fakeos path).
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
 # Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK / FAKECC_BOOT_BIN) needs
 # fakecc with -T, --kernel-multiboot, %gs:disp, growable link_kernel (#112) and
 # -f bin|-f elf64 NASM-subset (#113; master >= c53fc4ea). Multi-target trees
 # may also expose --target=x86_64-linux (probed). Override FCC if needed:
 #   FCC=/path/to/fakecc make
-# !!! M5 RESTAGE PIN (in-OS /bin/fakecc only) !!!
+# !!! M5 RESTAGE PIN (in-OS /bin/fakecc source snapshot only) !!!
 # Tip after 2c1f4525 has historically miscompiled `imm64 ^ induction` (O0 BXOR)
 # and broken PMM order-3 + kill/wait on the ldfake-rebuilt kernel. When
 # restaging build/m5stage (rm -rf then make), prefer a worktree pinned to
@@ -42,7 +43,9 @@ FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
 #   rm -rf build/m5stage build/m5blob.asm build/m5blob.S build/m5blob.o
 #   FAKECC_SRC=/tmp/fakecc-m5-good make
 # Full write-up: docs/ldfake-order3-diagnosis.md (section "M5 restage pin").
-# Host C/asm/link may still use a newer FCC binary independently of FAKECC_SRC.
+# Seed FCC (host C/asm/link + self-host driver) may be a newer binary than
+# FAKECC_SRC; the embed is always seed-compiles-FAKECC_SRC/v0, never a copy
+# of the seed and never a host-cc rebuild of the seed.
 
 # fakecc-only host path (default): Gas AT&T .S via $(FCC) -c, fakecc -T link,
 # and NASM-subset boot.asm/ap_tramp.asm via $(FCC) -f elf64 / -f bin.

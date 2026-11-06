@@ -1357,6 +1357,7 @@ static void sh_env_init(void) {
     sh_setenv("USER", "root");
     sh_setenv("LOGNAME", "root");
     sh_setenv("FAKECC_PKG", "/src");
+    sh_setenv("FAKECC_RTCACHE", "0");
 }
 
 /* Build a NULL-terminated envp from the table (at most 8 entries). */

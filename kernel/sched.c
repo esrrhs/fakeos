@@ -3397,17 +3397,20 @@ void sched_set_environ_tcb(u32 tid, const char *data, u64 n) {
 
 /* Default for empty envp: keep fakecc getenv(/proc/self/environ) working. */
 void sched_set_environ_default(void) {
+    /* NUL-separated: FAKECC_PKG=/src, FAKECC_RTCACHE=0 (tip fakecc rt cache). */
     static const char defenv[] = {
-        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c'
+        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c', 0,
+        'F','A','K','E','C','C','_','R','T','C','A','C','H','E','=','0'
     };
-    sched_set_environ(defenv, 15);
+    sched_set_environ(defenv, 32);
 }
 
 void sched_set_environ_tcb_default(u32 tid) {
     static const char defenv[] = {
-        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c'
+        'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c', 0,
+        'F','A','K','E','C','C','_','R','T','C','A','C','H','E','=','0'
     };
-    sched_set_environ_tcb(tid, defenv, 15);
+    sched_set_environ_tcb(tid, defenv, 32);
 }
 
 /* Build environ from flat exec envbuf (EXEC_ARG_SLOT = 128). */

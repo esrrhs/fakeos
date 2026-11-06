@@ -10,7 +10,7 @@
 #   src/<pkg>/*.c              /src/<pkg>/...   (kernel C sources)
 #   src/ping.c                 /src/ping.c
 #   ref/<pkg>/*.o              /ref/<pkg>/...   (host reference objects)
-#   asm/*.o                    /asm/...         (prebuilt nasm objects)
+#   asm/*.o                    /asm/...         (prebuilt host asm objects)
 # ==============================================================================
 set -euo pipefail
 
@@ -34,12 +34,10 @@ esac
 mkdir -p "$STAGE"
 STAGE=$(cd "$STAGE" && pwd)
 
-# Native compiler binary (rebuilt only when missing; the build script itself
-# is idempotent from a clean scratch copy).
-if [ ! -f "$STAGE/bin/fakecc" ]; then
-    mkdir -p "$STAGE/bin"
-    FAKECC_SRC="$FAKECC_SRC" bash "$SCRIPT_DIR/m5_build_fakecc.sh" "$STAGE/bin/fakecc"
-fi
+# Native compiler binary: always freshly self-hosted from checked-in v0 via the
+# seed FCC (never CMake/cc, never copy the seed binary into place).
+mkdir -p "$STAGE/bin"
+FAKECC_SRC="$FAKECC_SRC" FCC="${FCC:-}" bash "$SCRIPT_DIR/m5_build_fakecc.sh" "$STAGE/bin/fakecc"
 
 # Publish the extra CFLAGS this embedded fakecc understands. Multi-target
 # builds accept --target; upstream master's single-backend compiler emits
@@ -101,26 +99,14 @@ cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
 
 # Host reference objects.
 #
-# The in-OS compiler is fakecc stage 1: the current fakecc sources compiled
-# to a static linux x86-64 binary by the clang-built fakecc "stage 0" (see
-# tools/m5_build_fakecc.sh). Stage 0 runs natively on this (arm64 macOS)
-# host while emitting x86-64 linux code, so use it to compile every kernel
-# module here: byte-identical output between stage 0 and the self-hosted stage 1
-# is exactly the determinism AC-5 proves inside the OS. M5_S0 overrides the
-# stage-0 location; when it is unavailable, fall back to the objects already
-# built for the kernel image in $BUILD (produced by the installed fakecc).
+# Prefer the freshly self-hosted STAGE/bin/fakecc (same binary the guest will
+# run as /bin/fakecc) so /ref matches in-OS codegen. Override with M5_S0.
+# If that binary cannot run on this host (e.g. staging on macOS), fall back to
+# the seed FCC, then to build/*.o — but never mix producers across files.
 #
-# Reference objects must come from ONE compiler, never a per-file mix: the
-# milestone's whole claim is that the in-OS fakecc reproduces them byte for
-# byte, and two different producers guarantee a spurious mismatch. On the CI
-# runner stage 0 is built from upstream fakecc master, which dies partway
-# through this tree while the installed fakecc compiles all of it.
-#
-# So trial-compile the whole tree with stage 0 first and commit to a single
-# source afterwards. Probing one file is not enough: master's stage 0 handles
-# types.c fine and only crashes later on vfstest.c, so a single-file probe
-# passes and the loop then dies halfway, having produced a mixed tree.
-M5_S0="${M5_S0:-/tmp/fakeos-m5-fakecc/s0host/fakecc}"
+# Trial-compile the whole tree with the chosen producer first and commit to a
+# single source afterwards. Probing one file is not enough.
+M5_S0="${M5_S0:-$STAGE/bin/fakecc}"
 M5_SRCS=$(find "$STAGE/src" -name '*.c' ! -path '*/runtime/*' ! -name 'ping.c' | sort)
 M5_S0_OK=0
 if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
@@ -133,7 +119,7 @@ if [ -n "$M5_S0" ] && [ -x "$M5_S0" ]; then
         if ! ( cd "$ROOT" && FAKECC_PKG="$ROOT" \
                    "$M5_S0" -O0 $REF_TARGET_FLAG \
                    -c "$src" -o "$M5_PROBE/$out_rel" ) >/dev/null 2>&1; then
-            echo "stage0 cannot compile $rel; using build/*.o as reference" >&2
+            echo "ref-compiler cannot compile $rel; using build/*.o as reference" >&2
             stage0_ok=0
             break
         fi
@@ -158,7 +144,7 @@ while IFS= read -r src; do
     rel=${src#"$STAGE/src/"}
     n=$(basename "$rel" .c)
     out_rel=$(dirname "$rel")/$n.o
-    # When stage 0 handled the tree the trial objects are already in place.
+    # When the chosen ref compiler handled the tree the trial objects are already in place.
     [ -n "$M5_S0" ] && [ -f "$STAGE/ref/$out_rel" ] && continue
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
     cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
@@ -166,7 +152,7 @@ done <<EOF
 $M5_SRCS
 EOF
 
-# Prebuilt nasm objects (no in-OS assembler in this milestone).
+# Prebuilt host asm objects (boot/ap_tramp/etc.; no in-OS assembler required here).
 # ap_tramp_blob embeds the SIPI trampoline flat binary used by arch/smp.c.
 for a in boot desc io sysentry switch ap_tramp_blob; do
     cp "$BUILD/$a.o" "$STAGE/asm/$a.o"
@@ -262,6 +248,11 @@ fi
     done < <(find "$STAGE" -type f ! -name '.staged' | sort)
     echo
     if [ "$USE_FAKECC_ASM" = "1" ]; then
+        # Pointer table + count live in .data so fakecc emits .rela.data with the
+        # correct sh_info. Keeping them in .rodata historically produced
+        # .rela.data entries whose offsets pointed into .rodata; the linker then
+        # left every start/end pointer as 0 and rootfs published 0 staged files.
+        echo '    .section .data'
         echo '    .globl m5_blob_table'
         echo 'm5_blob_table:'
         while IFS= read -r f; do

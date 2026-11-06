@@ -60,7 +60,7 @@ enum {
     NULL_INO    = 62,              /* fixed /dev/null inode */
     CONSOLE_INO = 63,
     MAX_INODES  = 512,            /* daily-driver /bin + init leftovers neared 256 */
-    MAX_DENTS   = 128,            /* /bin grew past 64 with daily-driver utils */
+    MAX_DENTS   = 256,            /* /bin ~115 + /tmp selftest debris + M5 outputs */
     NAME_LEN    = 32,               /* 31 usable chars + NUL */
     NAME_MAX    = 31,
 

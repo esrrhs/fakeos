@@ -128,7 +128,7 @@ flowchart TD
 
 ### 阶段五：fakecc 自举与生态全闭环（Milestone 5 · 已就绪）
 - [x] **文件系统与进程环境完备化**：补齐 `munmap`（VMA 拆分/截断与帧归还）、`unlink`、`chmod`、`gettid`、`exit_group`、`futex`（WAIT/WAKE；pthread_mutex 已用）等系统调用；Ramfs 扩容至 512 inode / 128 目录项 / 16 MiB 文件；发布 `/proc/self/environ`（live；空 envp 种子 `FAKECC_PKG=/src`）。
-- [x] **编译生成原生 fakecc**：`tools/m5_build_fakecc.sh` 在一次性 /tmp scratch 中把宿主 fakecc 源码交叉编译为静态 Linux x86-64 原生镜像，经 `tools/m5_stage.sh` 暂存为 `/bin/fakecc`（幂等、不修改 fakecc 源码树）。
+- [x] **编译生成原生 fakecc**：`tools/m5_build_fakecc.sh` 在 /tmp scratch 中用 **seed fakecc** 编译已检入的 `v0/*.c`，产出静态 Linux x86-64 `/bin/fakecc`（自举；无 CMake/cc；不修改 fakecc 源码树）。
 - [x] **用户空间编译验证**：Shell 支持任意路径执行；OS 内 `/bin/fakecc ping.c -o /tmp/ping && /tmp/ping` 输出 `pong-from-fakeos-compiler`。
 - [x] **内核对象逐字节复现**：`/bin/kbuild` 编排器先跑通 编译器→execve 冒烟，再用 OS 内 fakecc 逐个重编 26 个内核 C 模块并与随镜像发布的宿主参考对象（`/ref`）逐字节比对，输出 26 行 `identical` 与汇总 `all 26 kernel objects byte-identical`。
 - [x] **OS 内最小静态链接器 `/bin/ldfake`**：解析 ELF64 可重定位对象（节/符号/RELA/字符串表），处理 `R_X86_64_64/PC32/PLT32/GOTPCREL/32/32S`（含合成 GOT 槽与 SHN_ABS 常量），解析跨对象全局符号与链接脚本边界符号（`_kernel_*`），按 `boot/linker.ld` 的低/高两段布局（低段 `0x100000` 恒等映射、高段 `KERNEL_VMA+LMA`）输出**无节头、双 PT_LOAD 的 ELF32 multiboot 镜像**（QEMU 直接引导）；支持 `@response` 文件绕开 execve 8 参数上限，坏输入一律非零退出 + stderr 诊断。
@@ -490,11 +490,17 @@ flowchart TD
 ## 🛠️ 构建与运行
 
 ### 依赖环境
-- [fakecc](https://github.com/esrrhs/fakecc) master（建议 `../fakecc/build/fakecc`；需含 `-T` / `--kernel-multiboot`（#112）与 `-f bin`/`-f elf64` NASM 子集汇编（#113）；另需一份 fakecc 源码树供 M5 嵌入，默认 `../fakecc`，可用 `FAKECC_SRC=... make` 覆盖。M5 暂存若遇 tip 回归可钉 `2c1f4525`，见 Makefile 注释）
-- 宿主 C 编译器 + CMake（仅用于一次性引导构建嵌入 OS 的 `/bin/fakecc`；与目标内核的 C/asm/link 链无关）
-- `qemu-system-x86_64`（虚拟机与模拟器）
-- `python3`（用于自动化回归测试脚本）
+- [fakecc](https://github.com/esrrhs/fakecc) **seed 可执行文件**（建议 `../fakecc/build/fakecc`；需含 `-T` / `--kernel-multiboot`（#112）与 `-f bin`/`-f elf64` NASM 子集（#113））。普通 `make` 用该 seed 编译内核/用户态，并用它自举嵌入镜像的 `/bin/fakecc`（编译 `FAKECC_SRC` 的已检入 `v0/*.c`），**不再调用 CMake / cc / gcc / clang / cpp / GNU as·ld·objcopy / nasm**。
+- 一份 fakecc 源码树（默认 `../fakecc`，`FAKECC_SRC=...` 可覆盖；须带与 src 对齐的已检入 `v0/`。M5 暂存若遇 tip 回归可钉 `2c1f4525`，见 Makefile 注释）
+- `qemu-system-x86_64`、`python3`
 - 可选遗留回退：`USE_FAKECC_ASM=0 FAKECC_LINK=0 FAKECC_BOOT_BIN=0` 时仍需要 `nasm` 与 `x86_64-elf-binutils`（或系统 `ld`/`objcopy`）
+
+#### 首次获得 seed fakecc（不在普通 fakeos 构建内）
+若机器上还没有可用的 fakecc 二进制，需在 fakecc 仓库用宿主编译器引导一次（此后 fakeos 普通构建只复用该 seed）：
+```bash
+cmake -S ../fakecc -B ../fakecc/build -DCMAKE_C_FLAGS=-O0
+cmake --build ../fakecc/build --target fakecc --parallel
+```
 
 ### 常用命令
 ```bash

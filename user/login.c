@@ -204,7 +204,7 @@ int main(int argc, char **argv) {
     char *sh_argv[2];
     char env_user[80];
     char env_home[80];
-    char *envp[4];
+    char *envp[5];
     (void)argc;
     (void)argv;
 
@@ -250,7 +250,8 @@ int main(int argc, char **argv) {
                 envp[0] = env_user;
                 envp[1] = env_home;
                 envp[2] = "FAKECC_PKG=/src";
-                envp[3] = 0;
+                envp[3] = "FAKECC_RTCACHE=0";
+                envp[4] = 0;
                 sh_argv[0] = "/bin/sh";
                 sh_argv[1] = 0;
                 if (u_execve("/bin/sh", sh_argv, envp) != 0) {
