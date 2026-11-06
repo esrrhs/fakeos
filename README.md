@@ -434,7 +434,7 @@ flowchart TD
 - [x] **mktemp -t**：`-t PREFIX` → `DIR/PREFIX.XXXXXX`（DIR=`-p` 或 `$TMPDIR` 或 `/tmp`；无 PREFIX 用 `tmp.XXXXXX`；可与 `-du/-p` 粘连）。无新 dent。virtio login smoke（smp 1/2）。
 - [x] **utimensat(2) + touch -r**：`utimensat`（AT_FDCWD；times=NULL/`UTIME_NOW`/`UTIME_OMIT`；忽略 atime；`-r REF` 复制 mtime）。现有文件默认 NOW。init smoke。
 - [x] **statfs(2) + /bin/df**：Ramfs 以 PMM 页作块；Ext2 用超级块计数。`df [-h] [PATH...]`。新 `/bin` dent。init smoke。
-- [x] **Makefile FCC**：默认优先 `../fakecc/build/fakecc`（merged #112+），否则 PATH。
+- [x] **Makefile FCC**：默认优先 `../fakecc/build/fakecc`（merged #112+#113；默认 USE_FAKECC_ASM/FAKECC_LINK/FAKECC_BOOT_BIN=1），否则 PATH。
 - [x] **shell for/while/if + ;**：薄 `for NAME in WORDS; do LIST; done`、`while LIST; do LIST; done`、`if LIST; then LIST; [else LIST;] fi`；`;` 为独立 token 与命令序列分隔；循环体每轮重新 `$`/`$(( ))` 展开；`in` 词表展开一次；条件不受 `set -e` 影响；while 迭代上限 256。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **od -t u1/d1 + dup-line suppress**：`od` 增加 `-t u1`/`d1`（粘连 `-tu1`/`-td1`；无符号宽 3 / 有符号宽 4 空格填充）与 GNU 风格整行重复折叠为单行 `*`（`-v` / 粘连 `-vtx1`/`-vtu1`/… 关闭）。无新 /bin dent。virtio login smoke（smp 1/2）。
 - [x] **/bin/cp -n + /bin/mv -n noclobber**：`cp [-rnR]` / `mv [-n]` 跳过已存在目标（安静、退出 0；粘连 `-rn`/`-nr`）；递归合并时仅跳过已存在文件。无新 /bin dent。virtio login smoke（smp 1/2）。
@@ -479,7 +479,7 @@ flowchart TD
 
 
 
-> **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与 nasm 对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。
+> **暂存（scratch）边界说明**：OS 内构建所需的编译器、内核/运行时源码、参考对象与汇编对象仅存在于构建期暂存树 `build/m5stage/`（由 `tools/m5_stage.sh` 生成，`.gitignore` 已覆盖整个 `build/`）；它们以只读 incbin 形式编入默认镜像的 m5 blob（`m5blob.o`），在 OS 内发布为 `/bin/fakecc`、`/src/...`、`/ref/...`、`/asm/...`。重建内核时 `/bin/kbuild` 用空的 `m5stub.o` 顶替 m5 blob（二次引导时发布 0 个暂存文件，保留等价用户空间），因此重建镜像体积更小但功能完整。
 
 > **已修复的上游缺陷 · 自举字节一致性**：此前 upstream fakecc 存在一处 use-after-free（`src/sema.c` 中 `ftab_lookup()` 返回表内指针后跨 `realloc` 悬垂），导致「CMake 构建的编译器」与「fakecc 自举出的编译器」对 `kernel/vfstest.c` 的输出有稳定 5 字节差异（寄存器分配读到了已释放的堆内存）。该缺陷已由 [esrrhs/fakecc#92](https://github.com/esrrhs/fakecc/pull/92) 修复：valgrind 报错清零，`stage2_check.sh` 达到不动点，26 个模块**全部逐字节一致**。完整分析、复现命令与修复验证见 [`docs/fakecc-bootstrap-nondeterminism.md`](docs/fakecc-bootstrap-nondeterminism.md)。
 >
@@ -490,11 +490,11 @@ flowchart TD
 ## 🛠️ 构建与运行
 
 ### 依赖环境
-- [fakecc](https://github.com/esrrhs/fakecc)（自主研发 C 编译器，建议加入环境变量 `PATH`；另需一份 fakecc 源码树，默认取 `../fakecc`，可用 `FAKECC_SRC=... make` 覆盖）
-- `nasm`（汇编器）
-- `x86_64-elf-binutils`（或 Linux 系统原生 `ld` / `objcopy`）
+- [fakecc](https://github.com/esrrhs/fakecc) master（建议 `../fakecc/build/fakecc`；需含 `-T` / `--kernel-multiboot`（#112）与 `-f bin`/`-f elf64` NASM 子集汇编（#113）；另需一份 fakecc 源码树供 M5 嵌入，默认 `../fakecc`，可用 `FAKECC_SRC=... make` 覆盖。M5 暂存若遇 tip 回归可钉 `2c1f4525`，见 Makefile 注释）
+- 宿主 C 编译器 + CMake（仅用于一次性引导构建嵌入 OS 的 `/bin/fakecc`；与目标内核的 C/asm/link 链无关）
 - `qemu-system-x86_64`（虚拟机与模拟器）
 - `python3`（用于自动化回归测试脚本）
+- 可选遗留回退：`USE_FAKECC_ASM=0 FAKECC_LINK=0 FAKECC_BOOT_BIN=0` 时仍需要 `nasm` 与 `x86_64-elf-binutils`（或系统 `ld`/`objcopy`）
 
 ### 常用命令
 ```bash

@@ -3,8 +3,8 @@
 # ==============================================================================
 
 # Toolchain configuration (Auto-detect cross-compiler or native Linux/macOS tools)
-# Prefer sibling ../fakecc/build/fakecc (merged master with PR #112 features:
-# -T, --kernel-multiboot, %gs:disp, growable link_kernel). Else PATH fakecc.
+# Prefer sibling ../fakecc/build/fakecc (merged master: #112 -T/--kernel-multiboot
+# /%gs:disp/growable link_kernel; #113 -f bin|-f elf64 NASM-subset). Else PATH.
 FCC       ?= $(shell f='$(CURDIR)/../fakecc/build/fakecc'; if [ -x "$$f" ]; then echo "$$f"; else which fakecc 2>/dev/null || echo fakecc; fi)
 NASM      ?= $(shell which nasm 2>/dev/null || echo nasm)
 QEMU      ?= $(shell which qemu-system-x86_64 2>/dev/null || echo qemu-system-x86_64)
@@ -28,10 +28,10 @@ ROOT_DIR  := $(shell pwd)
 # (milestone 5). Never modified by this build; tools/m5_build_fakecc.sh works
 # in a throwaway /tmp copy.
 FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
-# Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK) needs fakecc with
-# --target (multi-target builds), -T, --kernel-multiboot, %gs:disp, and
-# growable link_kernel — merged via esrrhs/fakecc#112 (master >= 38f34243).
-# Default FCC prefers ../fakecc/build/fakecc; override if needed:
+# Host fakecc-only path (USE_FAKECC_ASM / FAKECC_LINK / FAKECC_BOOT_BIN) needs
+# fakecc with -T, --kernel-multiboot, %gs:disp, growable link_kernel (#112) and
+# -f bin|-f elf64 NASM-subset (#113; master >= c53fc4ea). Multi-target trees
+# may also expose --target=x86_64-linux (probed). Override FCC if needed:
 #   FCC=/path/to/fakecc make
 # !!! M5 RESTAGE PIN (in-OS /bin/fakecc only) !!!
 # Tip after 2c1f4525 has historically miscompiled `imm64 ^ induction` (O0 BXOR)
@@ -44,15 +44,16 @@ FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
 # Full write-up: docs/ldfake-order3-diagnosis.md (section "M5 restage pin").
 # Host C/asm/link may still use a newer FCC binary independently of FAKECC_SRC.
 
-# fakecc-only host path: Gas AT&T .S via $(FCC) -c, and fakecc -T link.
-# Set to 0 to fall back to nasm -f elf64 + GNU ld + objcopy.
-# Remaining nasm (unless FAKECC_BOOT_BIN=1): boot.asm + ap_tramp.asm.
+# fakecc-only host path (default): Gas AT&T .S via $(FCC) -c, fakecc -T link,
+# and NASM-subset boot.asm/ap_tramp.asm via $(FCC) -f elf64 / -f bin.
+# Requires sibling fakecc master with -T/--kernel-multiboot (esrrhs/fakecc#112)
+# and -f bin|-f elf64 real-mode asm (esrrhs/fakecc#113; master >= c53fc4ea).
+# Legacy fallback (nasm + GNU ld + objcopy):
+#   USE_FAKECC_ASM=0 FAKECC_LINK=0 FAKECC_BOOT_BIN=0 make
 USE_FAKECC_ASM ?= 1
 FAKECC_LINK    ?= 1
 # Assemble boot.asm / ap_tramp.asm with fakecc NASM-subset (-f elf64 / -f bin).
-# Requires fakecc with feat/nasm-bin-realmode (or successor) merged.
-# Default 0 until that fakecc PR lands; then flip to 1 to drop the last nasm uses.
-FAKECC_BOOT_BIN ?= 0
+FAKECC_BOOT_BIN ?= 1
 
 # Milestone 5 staging tree (in-OS compiler, kernel sources, reference objects).
 M5STAGE := $(BUILD_DIR)/m5stage
@@ -176,7 +177,7 @@ $(KERNEL_BIN): $(KERNEL_64)
 endif
 
 # Assembly objects
-# boot.asm / ap_tramp.asm: nasm by default; fakecc -f elf64/-f bin when FAKECC_BOOT_BIN=1.
+# boot.asm / ap_tramp.asm: fakecc -f elf64/-f bin by default; nasm when FAKECC_BOOT_BIN=0.
 ifeq ($(FAKECC_BOOT_BIN),1)
 $(BUILD_DIR)/boot.o: arch/x86_64/boot.asm
 	@mkdir -p $(BUILD_DIR)
