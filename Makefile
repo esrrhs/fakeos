@@ -45,7 +45,9 @@ FAKECC_SRC ?= $(ROOT_DIR)/../fakecc
 # Full write-up: docs/ldfake-order3-diagnosis.md (section "M5 restage pin").
 # Seed FCC (host C/asm/link + self-host driver) may be a newer binary than
 # FAKECC_SRC; the embed is always seed-compiles-FAKECC_SRC/v0, never a copy
-# of the seed and never a host-cc rebuild of the seed.
+# of the seed and never a host-cc rebuild of the seed. FAKECC_SRC/v0 must
+# match src/ (incl. as_nasm after #113); see fakecc#114. Relative FCC= paths
+# are resolved before the /tmp scratch cd.
 
 # fakecc-only host path (default): Gas AT&T .S via $(FCC) -c, fakecc -T link,
 # and NASM-subset boot.asm/ap_tramp.asm via $(FCC) -f elf64 / -f bin.

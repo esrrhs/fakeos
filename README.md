@@ -491,7 +491,7 @@ flowchart TD
 
 ### 依赖环境
 - [fakecc](https://github.com/esrrhs/fakecc) **seed 可执行文件**（建议 `../fakecc/build/fakecc`；需含 `-T` / `--kernel-multiboot`（#112）与 `-f bin`/`-f elf64` NASM 子集（#113））。普通 `make` 用该 seed 编译内核/用户态，并用它自举嵌入镜像的 `/bin/fakecc`（编译 `FAKECC_SRC` 的已检入 `v0/*.c`），**不再调用 CMake / cc / gcc / clang / cpp / GNU as·ld·objcopy / nasm**。
-- 一份 fakecc 源码树（默认 `../fakecc`，`FAKECC_SRC=...` 可覆盖；须带与 src 对齐的已检入 `v0/`。M5 暂存若遇 tip 回归可钉 `2c1f4525`，见 Makefile 注释）
+- 一份 fakecc 源码树（默认 `../fakecc`，`FAKECC_SRC=...` 可覆盖；**已检入 `v0/` 必须与 `src/` 模块对齐**，含 `as_nasm` 与 `-f bin`/`-f elf64` 接线——见 [fakecc#114](https://github.com/esrrhs/fakecc/pull/114)；`m5_build_fakecc.sh` 对缺失模块 fail-fast，不再静默丢弃。M5 tip 回归可钉 `2c1f4525`，见 Makefile 注释）
 - `qemu-system-x86_64`、`python3`
 - 可选遗留回退：`USE_FAKECC_ASM=0 FAKECC_LINK=0 FAKECC_BOOT_BIN=0` 时仍需要 `nasm` 与 `x86_64-elf-binutils`（或系统 `ld`/`objcopy`）
 

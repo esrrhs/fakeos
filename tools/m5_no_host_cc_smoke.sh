@@ -35,7 +35,7 @@ echo "[smoke] deny wrappers in $DENY"
 echo "[smoke] seed FCC=$FCC ($(git -C "$(dirname "$FCC")/.." rev-parse --short HEAD 2>/dev/null || echo unknown))"
 cd "$ROOT"
 rm -rf "$ROOT/build" /tmp/fakeos-m5-fakecc
-make -j"$(nproc)" FCC="$FCC"
+make -j"$(nproc)" FCC="../fakecc/build/fakecc"
 if [ -s "$LOG" ]; then
   echo "[smoke] FAIL: host toolchain invocations:" >&2
   cat "$LOG" >&2
@@ -50,3 +50,12 @@ if cmp -s "$FCC" "$ROOT/build/m5stage/bin/fakecc"; then
   exit 1
 fi
 echo "[smoke] staged fakecc differs from seed (freshly self-hosted)"
+USAGE=$("$ROOT/build/m5stage/bin/fakecc" 2>&1 || true)
+echo "$USAGE" | grep -q -- '-f bin' || { echo "[smoke] FAIL: staged fakecc lacks -f bin" >&2; exit 1; }
+echo "$USAGE" | grep -q -- '-f elf64' || { echo "[smoke] FAIL: staged fakecc lacks -f elf64" >&2; exit 1; }
+# Assemble real boot sources with the embed (host-exec of linux guest binary)
+"$ROOT/build/m5stage/bin/fakecc" -f elf64 -o /tmp/smoke-boot.o "$ROOT/arch/x86_64/boot.asm"
+"$ROOT/build/m5stage/bin/fakecc" -f bin -o /tmp/smoke-ap.bin "$ROOT/arch/x86_64/ap_tramp.asm"
+"$FCC" -f bin -o /tmp/smoke-ap-seed.bin "$ROOT/arch/x86_64/ap_tramp.asm"
+cmp -s /tmp/smoke-ap.bin /tmp/smoke-ap-seed.bin || { echo "[smoke] FAIL: embed ap_tramp != seed" >&2; exit 1; }
+echo "[smoke] OK: staged embed -f bin/-f elf64 + ap_tramp matches seed"

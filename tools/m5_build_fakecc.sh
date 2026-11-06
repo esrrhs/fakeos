@@ -15,9 +15,9 @@
 #   - FAKECC_SRC has src/ + runtime/ + include/ + a checked-in v0/ whose module
 #     set covers the linux bootstrap (hoststub XOR macho; see below).
 #   - If src/ gains a module not yet in v0/ (e.g. as_nasm before v0 refresh),
-#     that module is omitted from the embed with a clear warning. Refreshing
-#     v0/ is an upstream fakecc maintenance step (translate.py needs a host
-#     preprocessor) and is outside the normal fakeos make.
+#     this script FAILS FAST rather than silently pruning tip features.
+#     Refresh upstream v0 (translate.py / host cpp) or point FAKECC_SRC at a
+#     coherent tree (e.g. fakecc#114). Not part of normal fakeos make.
 #
 # Obtaining the first seed fakecc from source (CMake/cc) is outside this script;
 # see README "构建与运行".
@@ -46,6 +46,8 @@ case "$OUT" in
 esac
 
 # Seed compiler: never cmake/cc-build one here.
+# Resolve relative FCC / FAKECC_SRC against the caller's cwd BEFORE we cd into
+# the /tmp scratch (otherwise FCC=../fakecc/build/fakecc breaks after cd).
 S0=${FCC:-${FAKECC:-}}
 if [ -z "$S0" ]; then
     if [ -x "$ROOT/../fakecc/build/fakecc" ]; then
@@ -54,16 +56,27 @@ if [ -z "$S0" ]; then
         S0=$(command -v fakecc)
     fi
 fi
-if [ -z "$S0" ] || [ ! -x "$S0" ]; then
+if [ -z "$S0" ]; then
     echo "m5_build_fakecc: no seed fakecc (set FCC= to an existing fakecc binary)." >&2
     echo "The first seed is obtained outside the normal fakeos build (fakecc CMake)." >&2
     exit 1
 fi
-# Refuse to silently use a non-executable path string.
+case "$S0" in
+    /*) ;;
+    *)  S0="$PWD/$S0" ;;
+esac
 if [ ! -x "$S0" ]; then
     echo "m5_build_fakecc: seed not executable: $S0" >&2
     exit 1
 fi
+# Canonical absolute path (also collapses ..).
+S0=$(cd "$(dirname "$S0")" && pwd)/$(basename "$S0")
+
+case "$FAKECC_SRC" in
+    /*) ;;
+    *)  FAKECC_SRC="$PWD/$FAKECC_SRC" ;;
+esac
+FAKECC_SRC=$(cd "$FAKECC_SRC" && pwd)
 
 SCRATCH=/tmp/fakeos-m5-fakecc
 
@@ -103,33 +116,54 @@ PYEOF
 fi
 
 # --- 2. choose module set from checked-in v0 (no translate / no host cpp) -----
-# Intersection of src/*.c and v0/*.c. Modules only in src/ (stale v0) are
-# reported and omitted — never silently invoke translate.py.
+# Every src/*.c module MUST have a matching checked-in v0/*.c, except the
+# intentional linux backend drop (macho XOR hoststub). Silently pruning stale
+# modules (e.g. as_nasm) would embed a compiler missing tip features — refuse.
 SRC_MODS=$(cd src && LC_ALL=C ls *.c | sed 's/\.c$//')
 V0_MODS=$(cd v0 && LC_ALL=C ls *.c | sed 's/\.c$//')
-BOTH=$(comm -12 <(printf '%s\n' $SRC_MODS | sort) <(printf '%s\n' $V0_MODS | sort))
 ONLY_SRC=$(comm -23 <(printf '%s\n' $SRC_MODS | sort) <(printf '%s\n' $V0_MODS | sort) || true)
-if [ -n "$ONLY_SRC" ]; then
-    echo "[m5] warning: src modules missing from checked-in v0 (omitted from embed):" >&2
-    echo "$ONLY_SRC" | sed 's/^/  - /' >&2
-    echo "[m5] refresh upstream v0/ outside fakeos (v0/translate.py) if the embed needs them." >&2
-fi
 
 # Linux embed: prefer hoststub over macho when the snapshot provides hoststub
 # (matches fakecc FAKECC_NO_MACHO). Otherwise keep macho so the link stays static.
 DROP=
 if [ "$HAS_HOSTSTUB_V0" = 1 ]; then
     DROP=macho
-elif [ "$HAS_MACHO" = 1 ] && printf '%s\n' $BOTH | grep -qx macho; then
+elif [ "$HAS_MACHO" = 1 ] && printf '%s\n' $V0_MODS | grep -qx macho; then
     DROP=hoststub
 else
     echo "m5_build_fakecc: checked-in v0 needs hoststub.c or macho.c for a static linux link" >&2
     exit 1
 fi
 
-MODULES=
-for m in $BOTH; do
+MISSING=
+for m in $ONLY_SRC; do
     [ "$m" = "$DROP" ] && continue
+    # src may list the dropped sibling (macho when using hoststub, or vice versa)
+    if [ "$DROP" = macho ] && [ "$m" = hoststub ]; then continue; fi
+    if [ "$DROP" = hoststub ] && [ "$m" = macho ]; then continue; fi
+    MISSING="$MISSING $m"
+done
+if [ -n "$(echo $MISSING)" ]; then
+    echo "m5_build_fakecc: FAKECC_SRC v0/ is stale vs src/ — refusing to drop modules:" >&2
+    echo "$MISSING" | tr ' ' '\n' | sed '/^$/d;s/^/  - /' >&2
+    echo "Refresh upstream v0 outside fakeos (cd FAKECC_SRC && python3 v0/translate.py)," >&2
+    echo "or point FAKECC_SRC at a tree whose checked-in v0 matches src (e.g. fakecc#114)." >&2
+    exit 1
+fi
+
+MODULES=
+for m in $SRC_MODS; do
+    [ "$m" = "$DROP" ] && continue
+    # When dropping macho, require hoststub in v0 (already gated above).
+    if [ "$DROP" = macho ] && [ "$m" = hoststub ]; then
+        MODULES="$MODULES $m"
+        continue
+    fi
+    if [ "$DROP" = hoststub ] && [ "$m" = macho ]; then
+        MODULES="$MODULES $m"
+        continue
+    fi
+    [ -f "v0/$m.c" ] || { echo "m5_build_fakecc: missing v0/$m.c" >&2; exit 1; }
     MODULES="$MODULES $m"
 done
 [ -n "$MODULES" ] || { echo "m5_build_fakecc: empty module set" >&2; exit 1; }
@@ -223,3 +257,44 @@ if undef:
 print(f"verified static ELF64 ET_EXEC: {path} ({len(d)} bytes)")
 PYEOF
 echo "built static native fakecc (self-hosted from v0): $OUT ($(stat -f%z "$OUT" 2>/dev/null || stat -c%s "$OUT") bytes)"
+
+# --- 5. capability smoke: tip assembler features must survive the embed -----
+# If src ships as_nasm, the guest compiler must advertise and exercise -f bin /
+# -f elf64 (fakeos boot.asm / ap_tramp.asm). Skip only when as_nasm is absent
+# from the module set (pre-#113 trees).
+if printf '%s\n' $MODULES | grep -qx as_nasm; then
+    USAGE=$("$OUT" 2>&1 || true)
+    echo "$USAGE" | grep -q -- '-f bin' || {
+        echo "m5_build_fakecc: embed lacks -f bin (as_nasm present but unused?)" >&2
+        exit 1
+    }
+    echo "$USAGE" | grep -q -- '-f elf64' || {
+        echo "m5_build_fakecc: embed lacks -f elf64" >&2
+        exit 1
+    }
+    # Prefer assembling the real fakeos boot sources when available (absolute
+    # ROOT captured before scratch cd).
+    BOOT_ASM="$ROOT/arch/x86_64/boot.asm"
+    AP_ASM="$ROOT/arch/x86_64/ap_tramp.asm"
+    if [ -f "$BOOT_ASM" ] && [ -f "$AP_ASM" ]; then
+        CAP=$SCRATCH/cap
+        mkdir -p "$CAP"
+        "$OUT" -f elf64 -o "$CAP/boot.o" "$BOOT_ASM" 2>"$CAP/boot.err" || {
+            cat "$CAP/boot.err" >&2
+            echo "m5_build_fakecc: embed failed -f elf64 on boot.asm" >&2
+            exit 1
+        }
+        "$OUT" -f bin -o "$CAP/ap_tramp.bin" "$AP_ASM" 2>"$CAP/ap.err" || {
+            cat "$CAP/ap.err" >&2
+            echo "m5_build_fakecc: embed failed -f bin on ap_tramp.asm" >&2
+            exit 1
+        }
+        # Seed must produce the same flat binary (assembler feature parity).
+        "$S0" -f bin -o "$CAP/ap_seed.bin" "$AP_ASM" 2>/dev/null || true
+        if [ -f "$CAP/ap_seed.bin" ] && ! cmp -s "$CAP/ap_tramp.bin" "$CAP/ap_seed.bin"; then
+            echo "m5_build_fakecc: embed ap_tramp.bin differs from seed (as_nasm mismatch)" >&2
+            exit 1
+        fi
+        echo "[m5] capability OK: embed -f elf64 boot.o + -f bin ap_tramp.bin ($(wc -c <"$CAP/ap_tramp.bin") bytes)"
+    fi
+fi
