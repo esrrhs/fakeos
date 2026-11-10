@@ -12,9 +12,31 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from test_qemu import VM
 
 
+PROCESS_PASSES = (
+    '[PASS] pipe kmutex + wait_queue_sleep_unlock blocking',
+    '[U][PASS] kill SIGKILL + wait status',
+    '[U][PASS] SIGTERM handler + sigreturn',
+    '[U][PASS] SIGSTOP/CONT + WUNTRACED/WCONTINUED',
+    '[U][PASS] pipe read EINTR + handler',
+    '[U][PASS] pipe SA_RESTART keeps read',
+    '[U][PASS] orphan reparented to pid 1',
+)
+
+
+def verify_process_selftests(transcript):
+    missing = [marker for marker in PROCESS_PASSES if marker not in transcript]
+    failures = [line for line in transcript.splitlines()
+                if '[FAIL]' in line and re.search(
+                    r'pipe|kill|SIG|WUNTRACED|WCONTINUED|SA_RESTART|orphan', line)]
+    assert not missing and not failures, 'process selftests: missing=' + repr(missing) + ' failures=' + repr(failures)
+    print('PASS: all seven pipe/signal/wait/orphan boot regressions')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smp', type=int, default=1)
+    parser.add_argument('--require-process-selftests', action='store_true',
+                        help='require pipe, signal/wait and orphan boot regressions')
     parser.add_argument('--log', default='/tmp/fakeos-m5-guest.log')
     args = parser.parse_args()
     os.chdir(ROOT)
@@ -41,9 +63,14 @@ def main():
         wait('Password:', 30)
         vm.send('root')
         wait('fakeos:/', 30)
-        # Startup signal selftests can interfere with early foreground execs.
+        if args.require_process_selftests:
+            command('/bin/true; echo M5_EARLY:$?; echo M5_EARLY_END',
+                    'M5_EARLY_END', 'M5_EARLY:0')
+        # Keep the expensive compiler smoke separate from boot's monitor window.
         if 'interactive shell still running after 30 s monitor window' not in transcript:
             wait('interactive shell still running after 30 s monitor window')
+        if args.require_process_selftests:
+            verify_process_selftests(transcript)
         vm.send('export FAKECC_RTCACHE=0')
         transcript += vm.read_available(1)
         out = command('cd /src; /bin/fakecc --target=x86_64-linux -O0 ping.c -o /tmp/ping && /tmp/ping; echo M5_C:$?; echo M5_C_END',
