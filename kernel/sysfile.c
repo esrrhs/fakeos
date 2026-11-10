@@ -892,7 +892,7 @@ static void kstat_fill(char *k, u64 ino, u32 mode, u64 size, u64 rdev, u32 nlink
                        u32 uid, u32 gid, u32 mtime) {
     u64 blocks;
     kstat_zero(k);
-    kstat_put_u64(k, 0, 1);                      /* st_dev: fake major */
+    kstat_put_u64(k, 0, 1);                      /* Ramfs device identity */
     kstat_put_u64(k, 8, ino);
     kstat_put_u64(k, 16, (u64)nlink);
     kstat_put_u32(k, 24, mode);
@@ -951,6 +951,7 @@ static u32 kstat_from_fh(u32 fh, char *k) {
         }
         fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
         kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
+        kstat_put_u64(k, 0, 2); /* Ext2 is distinct from Ramfs inode numbers. */
         return 1;
     }
     ino = fs.fs_file_ino(fh);
@@ -989,6 +990,7 @@ static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
         }
         fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
         kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
+        kstat_put_u64(k, 0, 2); /* Ext2 is distinct from Ramfs inode numbers. */
         return 1;
     }
     ino = follow ? fs.fs_lookup(path) : fs.fs_lookup_nofollow(path);
@@ -1098,6 +1100,7 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
         }
         fs.ext2_owner_mtime(ino, &uid, &gid, &mtime);
         kstat_fill(k, (u64)ino, mode, size, 0, nlink ? nlink : 1, uid, gid, mtime);
+        kstat_put_u64(k, 0, 2); /* Ext2 is distinct from Ramfs inode numbers. */
         return copy_kstat_to_user(ustat, k) ? 0 : (u64)(-1);
     }
     if (!fs.fs_file_is_dir(fh)) {

@@ -15,6 +15,7 @@ extern unsigned long strlen(const char *s);
 extern void printf(const char *fmt, ...);
 
 enum {
+    ST_DEV = 0,
     ST_INO = 8,
     ST_NLINK = 16,
     ST_MODE = 24,
@@ -167,6 +168,8 @@ static void print_format(const char *fmt, const char *path, const char *st) {
             emit_str(path);
         } else if (*p == 's') {
             emit_udec(size);
+        } else if (*p == 'd') {
+            emit_udec(load_u64(st + ST_DEV));
         } else if (*p == 'i') {
             emit_udec(ino);
         } else if (*p == 'a') {

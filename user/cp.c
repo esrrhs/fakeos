@@ -17,6 +17,9 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_stat(const char *path, void *statbuf);
+extern long u_lstat(const char *path, void *statbuf);
+extern long u_fstat(long fd, void *statbuf);
+extern long u_ftruncate(long fd, unsigned long length);
 extern long u_mkdir(const char *path);
 extern long u_getdents(long fd, void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
@@ -28,11 +31,14 @@ enum {
     O_RDONLY = 0,
     O_WRONLY = 1,
     O_CREAT  = 0x40,
-    O_TRUNC  = 0x200,
+    O_EXCL   = 0x80,
+    ST_DEV = 0,
+    ST_INO = 8,
     ST_MODE = 24,
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
+    S_IFREG = 0x8000,
     PATH_CAP = 128,
     DENT_BUF = 1920,
     DENT_REC = 48,
@@ -48,6 +54,15 @@ static unsigned int load_u32(const char *p) {
          | ((unsigned int)(unsigned char)p[3] << 24);
 }
 
+static u64 load_u64(const char *p) {
+    return (u64)load_u32(p) | ((u64)load_u32(p + 4) << 32);
+}
+
+static int same_identity(const char *a, const char *b) {
+    return load_u64(a + ST_DEV) == load_u64(b + ST_DEV)
+        && load_u64(a + ST_INO) == load_u64(b + ST_INO);
+}
+
 static int is_dir(const char *path) {
     char st[ST_SIZE_BYTES];
     unsigned int mode;
@@ -58,7 +73,7 @@ static int is_dir(const char *path) {
 
 static int path_exists(const char *path) {
     char st[ST_SIZE_BYTES];
-    return u_stat(path, st) == 0;
+    return u_lstat(path, st) == 0;
 }
 
 static const char *basename_of(const char *path) {
@@ -109,36 +124,71 @@ static void announce(const char *src, const char *dst) {
 
 static int copy_file(const char *src, const char *dst, int noclobber, int verbose) {
     char buf[1024];
+    char src_st[ST_SIZE_BYTES];
+    char dst_st[ST_SIZE_BYTES];
     long in;
     long out;
     long n;
+    int rc = 0;
 
-    if (noclobber && path_exists(dst)) {
-        return 0;
-    }
+    if (noclobber && path_exists(dst)) return 0;
     in = u_open(src, O_RDONLY, 0);
     if (in < 0) {
         printf("cp: %s: cannot open\n", src);
         return 1;
     }
-    out = u_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
-    if (out < 0) {
-        printf("cp: %s: cannot create\n", dst);
+    if (u_fstat(in, src_st) < 0) {
+        printf("cp: %s: cannot stat\n", src);
         u_close(in);
         return 1;
     }
-    while ((n = u_read(in, buf, 1024)) > 0) {
-        if (u_write(out, buf, (u64)n) != n) {
-            printf("cp: write failed\n");
-            u_close(in);
-            u_close(out);
-            return 1;
+    /* Never truncate through a pathname. Compare the OPEN file identities
+     * first: strings cannot detect hard links, symlinks or ./../ aliases.
+     * O_EXCL asks the backend to reject an existing -n destination too.
+     * This is not a transaction against concurrent rename/unlink. */
+    out = u_open(dst, O_WRONLY | O_CREAT | (noclobber ? O_EXCL : 0), 0x1A4);
+    if (out < 0) {
+        u_close(in);
+        if (noclobber && path_exists(dst)) return 0;
+        printf("cp: %s: cannot create\n", dst);
+        return 1;
+    }
+    if (u_fstat(out, dst_st) < 0) {
+        printf("cp: %s: cannot stat\n", dst);
+        rc = 1;
+    } else if (same_identity(src_st, dst_st)) {
+        printf("cp: %s and %s are the same file\n", src, dst);
+        rc = 1;
+    } else if ((load_u32(dst_st + ST_MODE) & S_IFMT) == S_IFREG
+               && u_ftruncate(out, 0) < 0) {
+        printf("cp: %s: cannot truncate\n", dst);
+        rc = 1;
+    }
+    while (rc == 0) {
+        long off = 0;
+        n = u_read(in, buf, sizeof(buf));
+        if (n == -4) continue; /* EINTR */
+        if (n < 0) {
+            printf("cp: %s: read failed\n", src);
+            rc = 1;
+            break;
+        }
+        if (n == 0) break;
+        while (off < n) {
+            long written = u_write(out, buf + off, (u64)(n - off));
+            if (written == -4) continue;
+            if (written <= 0 || written > n - off) {
+                printf("cp: %s: write failed\n", dst);
+                rc = 1;
+                break;
+            }
+            off += written;
         }
     }
-    u_close(in);
-    u_close(out);
-    if (verbose) announce(src, dst);
-    return 0;
+    if (u_close(in) < 0) rc = 1;
+    if (u_close(out) < 0) rc = 1;
+    if (verbose && rc == 0) announce(src, dst);
+    return rc;
 }
 
 static int copy_path(const char *src, const char *dst, int recursive, int noclobber,
@@ -155,7 +205,11 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
     int i;
     int rc = 0;
 
-    if (is_under(src, dst)) {
+    char src_st[ST_SIZE_BYTES];
+    char dst_st[ST_SIZE_BYTES];
+    if (is_under(src, dst)
+        || (u_stat(src, src_st) == 0 && u_stat(dst, dst_st) == 0
+            && same_identity(src_st, dst_st))) {
         printf("cp: %s: cannot copy a directory into itself\n", src);
         return 1;
     }
@@ -180,7 +234,13 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
     for (;;) {
         long off;
         n = u_getdents(fd, dent, sizeof(dent));
-        if (n <= 0) break;
+        if (n == -4) continue;
+        if (n < 0) {
+            printf("cp: %s: directory read failed\n", src);
+            u_close(fd);
+            return 1;
+        }
+        if (n == 0) break;
         for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
             char name[NAME_LEN];
             unsigned long k = 0;

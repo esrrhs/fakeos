@@ -109,12 +109,41 @@ when that signal was ignored. Background writes now proceed unless TOSTOP is
 set and SIGTTOU is not ignored. The daily smoke requires actual output from an
 external background printf, not just its exit status.
 
+## Safe copy acceptance
+
+A real guest probe reproduced `/bin/cp /tmp/cpself /tmp/cpself` returning 0
+while destroying `keep-me` (the resulting file was empty). Copying now opens
+both files without truncation, checks **descriptor** device+inode identities,
+and only then truncates the open destination. This rejects same paths, `.` /
+`..` aliases, hard links, and source/destination symlinks onto the same file.
+Ramfs and Ext2 stat/fstat/newfstatat now have distinct device IDs; `stat -c %d`
+can inspect them. Ext2 also honors O_CREAT|O_EXCL instead of ignoring it.
+
+`tools/m5_copy_smoke.py --smp 1|2` uses its own new disposable disk: aliases on
+both filesystems must return 1 and retain source bytes; ordinary replacement,
+-n (including dangling links), cross-filesystem copies, and source/destination
+open failures are checked. Two successful 1.5 MiB copies leave too little
+space for a third on that 4 MiB test disk: copy must report a write error, return 1, omit the verbose success message,
+and allow a later small copy after removing the partial file.
+
+`FCC=... python3 tools/test_cp_io.py` compiles the real copy implementation
+with fakecc and injected syscall outcomes: short writes, EINTR, read/stat/
+truncate/close errors, failed/zero writes, same inode and cross-device inode
+collisions. These are unit error-path checks, not substitutes for guest tests.
+
+Limits: not an atomic copy/rollback facility; failed copies can leave a partial
+destination. Concurrent unlink/rename, recursively following symlink cycles,
+metadata preservation and power-loss durability are not certified here.
+The first ENOSPC fixture also exposed a separate Ramfs contiguous-allocation
+limit: 5 MiB `dd` failed while preparing its source. The fixture now verifies
+an exact 1.5 MiB source before filling the disposable disk; larger Ramfs files
+remain a real unresolved daily-use gap, not a passing claim.
+
 ## Next concrete gaps
 
-1. Safe file copying: inspect/test copying onto the same inode (including hard
-   links and aliases) before `O_TRUNC`; current `/bin/cp` lacks that guard. Also
-   check read failures and partial writes before reporting successful copying.
-2. Script launching: shell currently ignores script argv; only source/. is
+1. Script launching: shell currently ignores script argv; only source/. is
    tested. Add non-interactive script execution with meaningful exit status.
-3. Metadata UX (`cp -p` / `touch -d`) and pager/named pipes remain missing.
-   Historical full in-OS kbuild restage pin is still unresolved.
+2. Recursive copy symlink-cycle safety and atomic replacement/metadata UX
+   (`cp -p` / `touch -d`) still need work.
+3. Pager/named pipes and the historical full in-OS kbuild restage pin remain
+   unresolved. Desktop/network readiness is not established.

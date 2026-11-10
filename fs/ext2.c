@@ -62,6 +62,7 @@ enum {
     O_WRONLY        = 1,
     O_RDWR          = 2,
     O_CREAT         = 0x040,
+    O_EXCL          = 0x080,
     O_TRUNC         = 0x200,
     O_APPEND        = 0x400,
 
@@ -1989,6 +1990,10 @@ u32 ext2_open_mode(const char *path, u32 flags, u32 creat_mode) {
         return fh;
     }
 
+    /* O_EXCL checks the directory entry, not its symlink target (including
+     * dangling links). Previously this flag was silently ignored on Ext2. */
+    if (want_creat && (flags & O_EXCL) != 0
+        && walk_rel_from_flags(EXT2_ROOT_INO, rel, 0, 0, 0) != 0) return 0;
     ino = walk_rel(rel, &is_dir);
     if (ino == 0) {
         if (!want_creat) return 0;
