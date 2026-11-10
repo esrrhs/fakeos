@@ -1,5 +1,6 @@
 package kernel;
 import arch;
+import mem;
 import types;
 
 typedef types.uint32_t u32;
@@ -1363,30 +1364,34 @@ enum {
     MSR_LSTAR = 0xC0000082
 };
 
-static volatile u32 g_ap_sysret_ok;
-static volatile u32 g_ap_sysret_cpu;
-static volatile u32 g_ap_sysret_done;
+/* One result slot per worker: no racy shared increment on multiple CPUs. */
+static volatile u32 g_ap_sysret_done[4];
+static volatile u32 g_ap_sysret_cpu[4];
+static volatile u32 g_ap_sysret_ok[4];
 
-static void ap_sysret_msr_worker(u64 unused) {
+static void ap_sysret_msr_worker(u64 id) {
+    u64 flags = cpu_irq_save();
     u32 c = smp_cpuid();
     u64 star = msr_read(MSR_STAR);
     u64 lstar = msr_read(MSR_LSTAR);
     u64 efer = msr_read(MSR_EFER);
-    (void)unused;
-    if (c != 0
-        && star == (((u64)0x10 << 48) | ((u64)0x08 << 32))
+    g_ap_sysret_cpu[id] = c;
+    g_ap_sysret_ok[id] =
+        star == (((u64)0x10 << 48) | ((u64)0x08 << 32))
         && lstar == (u64)(&syscall_entry)
-        && (efer & 1ull) != 0) {
-        g_ap_sysret_ok = 1;
-        g_ap_sysret_cpu = c;
-    }
-    g_ap_sysret_done = g_ap_sysret_done + 1;
+        && (efer & 0x801ull) == 0x801ull
+        && mem.as_current_pml4() == mem.vmm_read_cr3();
+    g_ap_sysret_done[id] = 1;
+    cpu_irq_restore(flags);
     kthread_exit();
 }
 
 void sched_ap_sysret_selftest(void) {
     u32 i;
+    u32 done;
+    u32 saw_ap = 0;
     u32 ncpu = smp_cpu_count();
+    u64 deadline;
 
     kprintf("\n[SCHED] AP SYSCALL/SYSRET MSR self-test...\n");
     if (ncpu < 2) {
@@ -1394,9 +1399,11 @@ void sched_ap_sysret_selftest(void) {
         return;
     }
 
-    g_ap_sysret_ok = 0;
-    g_ap_sysret_cpu = 0;
-    g_ap_sysret_done = 0;
+    for (i = 0; i < 4; i++) {
+        g_ap_sysret_ok[i] = 0;
+        g_ap_sysret_cpu[i] = 0;
+        g_ap_sysret_done[i] = 0;
+    }
     arch.cpu_sti();
     for (i = 0; i < 4; i++) {
         if (kthread_create((u64)(&ap_sysret_msr_worker), i) == 0xFFFFFFFFu) {
@@ -1405,24 +1412,29 @@ void sched_ap_sysret_selftest(void) {
             return;
         }
     }
-    {
-        u64 deadline = sched_tick_count() + 800;
-        while (g_ap_sysret_done != 4 && sched_tick_count() < deadline) {
-            sched_yield();
-        }
-    }
-    arch.pit_busy_wait_ms(20);
+    deadline = sched_tick_count() + 800;
+    do {
+        done = 0;
+        for (i = 0; i < 4; i++) done += g_ap_sysret_done[i];
+        if (done != 4) sched_yield();
+    } while (done != 4 && sched_tick_count() < deadline);
     arch.cpu_cli();
 
-    if (g_ap_sysret_done != 4) {
-        kprintf("      [FAIL] AP SYSRET MSR workers done %u/4\n",
-                (u64)g_ap_sysret_done);
+    if (done != 4) {
+        kprintf("      [FAIL] AP SYSRET MSR workers done %u/4\n", (u64)done);
         return;
     }
-    if (g_ap_sysret_ok == 0) {
-        kprintf("      [FAIL] no AP with STAR/LSTAR/EFER.SCE programmed\n");
+    for (i = 0; i < 4; i++) {
+        if (!g_ap_sysret_ok[i]) {
+            kprintf("      [FAIL] CPU%u STAR/LSTAR/EFER.SCE+NXE/current AS\n",
+                    (u64)g_ap_sysret_cpu[i]);
+            return;
+        }
+        if (g_ap_sysret_cpu[i] != 0) saw_ap = 1;
+    }
+    if (!saw_ap) {
+        kprintf("      [FAIL] no AP SYSRET MSR worker observed\n");
         return;
     }
-    kprintf("      [PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE on CPU%u\n",
-            (u64)g_ap_sysret_cpu);
+    kprintf("      [PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE+NXE/current AS\n");
 }

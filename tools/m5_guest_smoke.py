@@ -69,6 +69,19 @@ def main():
         # Keep the expensive compiler smoke separate from boot's monitor window.
         if 'interactive shell still running after 30 s monitor window' not in transcript:
             wait('interactive shell still running after 30 s monitor window')
+        # The monitor precedes AP release in kmain. Wait for actual SMP
+        # initialization/selftests, not just the shell grace-period marker,
+        # so the compiler workload genuinely exercises the online APs.
+        if 'System idle. Yielding for IRQ-driven TTY/net I/O.' not in transcript:
+            wait('System idle. Yielding for IRQ-driven TTY/net I/O.')
+        platform_pass = ('[PASS] AP SYSRET MSRs: skipped (-smp 1)'
+                         if args.smp == 1 else
+                         '[PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE+NXE/current AS')
+        assert platform_pass in transcript, 'missing AP MSR/address-space regression'
+        platform_fails = [line for line in transcript.splitlines()
+                          if '[FAIL]' in line and re.search(
+                              r'SYSRET|STAR/LSTAR|EFER|current AS', line)]
+        assert not platform_fails, platform_fails
         if args.require_process_selftests:
             verify_process_selftests(transcript)
         vm.send('export FAKECC_RTCACHE=0')

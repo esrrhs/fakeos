@@ -113,7 +113,22 @@ static u32 private_faults;
 
 /* The address space currently installed in CR3; 0 while the kernel runs on
  * its bootstrap root. */
-static struct address_space *current_as;
+/* CR3 and the matching fault-dispatch address space are CPU-local. A single
+ * global pointer lets an idle switch on an AP erase the BSP's active COW AS. */
+enum { AS_MAX_CPUS = 8 };              /* matches scheduler/SMP CPU limit */
+static struct address_space *current_as_cpu[AS_MAX_CPUS];
+extern u32 smp_cpuid(void);
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+
+static u32 as_cpu_index(void) {
+    u32 cpu = smp_cpuid();
+    return cpu < AS_MAX_CPUS ? cpu : 0;
+}
+
+static struct address_space *as_current(void) {
+    return current_as_cpu[as_cpu_index()];
+}
 
 extern void kprintf(const char *fmt, ...);
 
@@ -218,12 +233,14 @@ void as_init(struct address_space *as) {
 }
 
 void as_activate(struct address_space *as) {
-    current_as = as;
+    u64 flags = cpu_irq_save();
+    current_as_cpu[as_cpu_index()] = as;
     if (as) {
         cr3_write(as->pml4);
     } else {
         cr3_write(vmm_kernel_root());
     }
+    cpu_irq_restore(flags);
 }
 
 /* Reserve an anonymous demand-paged range (page aligned). shared!=0 marks
@@ -557,7 +574,7 @@ void as_cow_clone(struct address_space *dst, struct address_space *src) {
      * now-shared pages straight through stale TLB entries (no fault, no COW),
      * silently corrupting the child's view (observed: a fork child's user
      * stack return address overwritten by the parent's later calls). */
-    if (current_as == src) {
+    if (as_current() == src) {
         tlb_flush();
     }
 }
@@ -643,21 +660,23 @@ void as_destroy(struct address_space *as) {
  * ------------------------------------------------------------------------- */
 
 u64 as_current_pml4(void) {
-    return current_as ? current_as->pml4 : vmm_kernel_root();
+    struct address_space *as = as_current();
+    return as ? as->pml4 : vmm_kernel_root();
 }
 
 /* Opaque "a user/process address space is installed" indicator for the
  * kernel #PF handler (the concrete struct stays private to this package). */
 u64 as_current_handle(void) {
-    return current_as ? 1 : 0;
+    return as_current() ? 1 : 0;
 }
 
 int as_dispatch_fault(u64 handle, u64 vaddr, u64 err) {
+    struct address_space *as = as_current();
     (void)handle;
-    if (current_as == 0) {
+    if (as == 0) {
         return 0;
     }
-    return as_handle_fault(current_as, vaddr, err);
+    return as_handle_fault(as, vaddr, err);
 }
 
 u64 as_translate(struct address_space *as, u64 vaddr) {

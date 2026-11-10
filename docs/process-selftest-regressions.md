@@ -60,18 +60,66 @@ Validation with the PR compiler:
   second selfhost byte-identical; actual boot/ap_tramp bin/ELF64 parity passes.
 - SMP1 strict guest smoke passes all seven, immediate external exec, embedded
   `/bin/fakecc` ping compile/execute, provenance, ELF64 and flat-bin assembly.
-- SMP2 historically passed all seven targeted boot tests, then the subsequent
-  guest compiler workload hit #DF at `sysretq` (`RIP=0xffffffff801055d5`,
-  `RSP=0x7f7ff0e8` already switched back to the user stack). Root cause:
-  SYSCALL/SYSRET MSRs are per-CPU, but `syscall_init()` ran only on the BSP.
-  A user thread stolen onto an AP, or a syscall that migrated mid-handler,
-  executed `sysretq` with STAR=0 and double-faulted. `sched_ap_enter()` now
-  programs STAR/LSTAR/SFMASK/EFER.SCE on each AP before its timer can steal
-  user work; a boot selftest checks those MSRs from an AP worker. After this
-  change the original sysretq #DF is gone and the AP MSR selftest passes, but
-  the SMP2 guest compiler workload still does not complete: the first user
-  process (pid 24) takes a ring-3 #PF at RIP=0x400215, CR2=RSP=0x7f7ff0e8,
-  error=0xc (non-present, read, user, reserved-bit), then pid 1 is killed by
-  a later write-protect #PF. That leftover is not claimed fixed.
+## Follow-up: complete SMP2 compiler workload
+
+The earlier AP SYSRET fix (`9f659809`) was real but incomplete: it removed
+`sysretq` #DF without fixing all CPU-local execution state. On that commit,
+a diagnostic SMP2 boot reproduced the later failure and recorded:
+
+- CPU1 after `fork`: RIP `0x400215` is `ret` in the shell's `u_fork` stub;
+  CR2=RSP=`0x7f7ff0e8`, error `0xc`. EFER=`0x501` (NXE missing), hardware
+  CR3 and software root both `0x3a33000`. The hardware walk had present
+  ancestors `0x3a38027`, `0x3a3b027`, `0x3a3c027` and a present NX leaf
+  `0x8000000003a32065`. This is a reserved NX-bit fault, **not** an absent
+  stack page inferred from the printed error label. BSP EFER was `0xd01`.
+- CPU0 subsequently faulted writing the shell's COW data at `0x44e7d8`
+  (RIP `0x424feb`, error `7`): hardware CR3=`0x3a01000`, while the global
+  software active-AS pointer reported the kernel root `0x102000`. The AP's
+  idle switch had overwritten that pointer, so the BSP skipped its actual
+  process's COW fault handler and killed pid 1.
+
+Two minimal kernel corrections address the separate causes:
+
+1. Call the existing CPU-local `mem.vmm_init()` on every AP before enabling
+   its timer/user scheduling, setting EFER.NXE for the existing NX mappings.
+2. Track the installed address space per CPU, matching CR3; update the pointer
+   and CR3 together with IRQs disabled. Fault dispatch and COW TLB invalidation
+   select the calling CPU's address space, not another CPU's last activation.
+
+Regression coverage extends the AP worker check to EFER.SCE+NXE and matching
+software/hardware CR3, using independent result slots instead of a racy shared
+completion increment. The guest smoke now explicitly waits for AP startup and
+all final boot tests, requires that AP check, and still runs the actual embedded
+compiler compile/execute plus ELF64/bin assembly. It does not pin users to the
+BSP or disable SMP, skip the workload, or mask faults.
+
+Validation commands (from the fakeos checkout, preexisting released seed):
+
+```sh
+FCC=/tmp/fakecc-pr116-merge/build/fakecc \
+FAKECC_SRC=/tmp/fakecc-pr116-merge bash tools/m5_no_host_cc_smoke.sh
+python3 tools/m5_guest_smoke.py --require-process-selftests --smp 1
+python3 tools/m5_guest_smoke.py --require-process-selftests --smp 2
+```
+
+`/tmp/fakecc-pr116-merge` is a clean source tree at released fakecc
+`dfb1c7b649480e2acfef2a0a02e8168b5b28ee38`; the rebuilt seed and embedded
+compiler hash is `147b2dd2339e142d74830f6bc4086c519bfd0c6230577a639ba20af11c39e9bb`.
+Detailed diagnostics/logs are retained outside the build directory under
+`/tmp/fakeos-smp2-pf-investigation/`.
+
+Validation results on the fresh clean image (not cached incremental objects):
+
+- Clean deny-tools smoke passed: zero denied invocations, all 34 embedded
+  modules/provenance verified, second selfhost byte-identical, actual boot
+  ELF64 and AP flat-bin assembly/seed parity passed.
+- SMP1: 1/1 full strict guest smoke passed.
+- SMP2: 3/3 independent fresh-VM full strict guest smokes passed (plus one
+  earlier incremental-image confirmation). Each completed ping compile/run,
+  provenance and ELF64/bin assembly after AP startup; all seven original
+  regressions and the AP check passed. No FAIL lines or post-boot unhandled
+  exceptions appeared in those four clean-image runs.
+- Saved clean logs: `clean-smp1.log`, `clean-smp2-run1.log` through
+  `clean-smp2-run3.log` under `/tmp/fakeos-smp2-pf-investigation/`.
 
 The historical full in-OS kbuild restage pin remains outside this work.

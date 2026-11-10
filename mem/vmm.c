@@ -118,7 +118,8 @@ static u64 ensure_pd(u64 root, u64 vaddr, u64 leaf_flags) {
  * ------------------------------------------------------------------------- */
 
 void vmm_init(void) {
-    /* Enable the No-Execute feature so VMM_NX leaf bits are valid. */
+    /* CPU-local setup: call on BSP and each AP before loading user mappings.
+     * Enable No-Execute so present VMM_NX leaf bits are not reserved bits. */
     u64 efer = msr_read(IA32_EFER);
     msr_write(IA32_EFER, efer | EFER_NXE);
 }

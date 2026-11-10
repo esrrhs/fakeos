@@ -4228,6 +4228,9 @@ void sched_ap_enter(u32 cpu) {
      * or finishes a pre-emption-migrated syscall executes sysretq with
      * STAR=0 while RSP is already the user stack, which double-faults. */
     syscall_init();
+    /* EFER.NXE is also per-CPU. Existing user stack/data PTEs carry NX;
+     * without this, a perfectly present NX leaf faults with RSVD on the AP. */
+    mem.vmm_init();
     lapic_ap_init();
     lapic_ap_timer_enable();
 
