@@ -94,6 +94,10 @@ static volatile u64 g_completed;
 static volatile u64 g_spin_counts[SPINNERS];
 static volatile u64 g_spin_done;
 static volatile u64 g_spin_deadline;
+static volatile u32 g_spin_ready;
+static volatile u32 g_spin_start;
+extern void sched_sleep_cli(u64 chan);
+extern void sched_wakeup(u64 chan);
 
 /* Worker threads: under a spinlock, each adds WORK_EACH to the shared counter
  * and explicitly yields after every critical section. */
@@ -115,6 +119,19 @@ static void lock_worker(u64 id) {
  * the APIC timer preemptively migrates the CPU across all three threads. */
 static void spinner(u64 id) {
     u64 n = 0;
+    /* This test runs on BSP before AP scheduler release. Sleep until all
+     * workers have entered: idle-only slot 0 must be able to create the rest.
+     * A runnable/yielding barrier would starve that bootstrap context. */
+    arch.cpu_cli();
+    g_spin_ready++;
+    if (g_spin_ready == SPINNERS) {
+        g_spin_deadline = sched_tick_count() + 30;
+        g_spin_start = 1;
+        sched_wakeup((u64)&g_spin_start);
+    }
+    while (!g_spin_start) sched_sleep_cli((u64)&g_spin_start);
+    arch.cpu_sti();
+    /* The measured phase still never yields. */
     while (sched_tick_count() < g_spin_deadline) {
         n++;
     }
@@ -173,12 +190,18 @@ static int test_preemptive_spinners(void) {
     for (i = 0; i < SPINNERS; i++) {
         g_spin_counts[i] = 0;
     }
-    /* Deadline ~300 ms of ticks beyond the current tick. */
-    g_spin_deadline = sched_tick_count() + 30;
+    g_spin_ready = 0;
+    g_spin_start = 0;
+    /* Last worker starts the original 30-tick measured window. */
 
     for (i = 0; i < SPINNERS; i++) {
         if (kthread_create((u64)(&spinner), i) == 0xFFFFFFFF) {
             kprintf("      [FAIL] could not create spinner %u\n", i);
+            arch.cpu_cli();
+            g_spin_deadline = sched_tick_count();
+            g_spin_start = 1;
+            sched_wakeup((u64)&g_spin_start);
+            arch.cpu_sti();
             return 0;
         }
     }

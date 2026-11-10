@@ -100,6 +100,7 @@ enum {
     TTY_ISIG   = 0x00000001,
     TTY_ICANON = 0x00000002,
     TTY_ECHO   = 0x00000008,
+    TTY_TOSTOP = 0x00000100,
     TTY_ICRNL  = 0x00000100,
     TTY_OPOST  = 0x00000001,
     TTY_ONLCR  = 0x00000004,
@@ -269,6 +270,13 @@ u64 tty_jobctl_read_wait(void) {
 }
 
 u64 tty_jobctl_write_wait(void) {
+    /* Unlike reads/tcsetpgrp, background writes are allowed by default.
+     * Even with TOSTOP, an ignored SIGTTOU permits writing (not EIO).
+     * Otherwise a fast fork/exec can lose its first output before the
+     * parent's tcsetpgrp, or a normal background writer prints nothing. */
+    if ((tty_lflag & TTY_TOSTOP) == 0 || sched_sig_ignored(SIGTTOU_N)) {
+        return 0;
+    }
     for (;;) {
         u32 g = tty_jobctl_gate(SIGTTOU_N);
         if (g == 0) {

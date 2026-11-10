@@ -26,7 +26,7 @@ extern u32 ext2_close(u32 fh);
 
 extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
-extern void switch_context(u64 *prev_rsp, u64 next_rsp);
+extern void switch_context(u64 *prev_rsp, u64 next_rsp, u64 prev_id);
 extern void msr_write(u32 msr, u64 value);
 extern void syscall_init(void);
 
@@ -56,6 +56,8 @@ enum {
     TCB_DEAD     = 2,
     TCB_SLEEPING = 3,
     TCB_STOPPED  = 4,
+    TCB_RETIRED  = 5, /* non-waitable exit, freed after stack handoff */
+    TCB_RESERVED = 6, /* creator owns the slot, not runnable yet */
 
     MAX_THREADS  = 32,
     STACK_ORDER  = 2,                 /* 4 frames = 16 KiB per kernel stack  */
@@ -2100,12 +2102,30 @@ static void cwd_copy_from(struct tcb *dst, const char *src) {
 
 static u32 alloc_slot(void) {
     u32 i;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
     for (i = 1; i < MAX_THREADS; i++) {
         if (threads[i].state == TCB_FREE) {
+            threads[i].state = TCB_RESERVED;
+            threads[i].pid = 0;
+            threads[i].is_user = 0;
+            threads[i].on_cpu = SCHED_CPU_NONE;
+            spin_unlock(&sched_run_lock);
+            cpu_irq_restore(flags);
             return i;
         }
     }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
     return 0xFFFFFFFF;
+}
+
+static void unreserve_slot(u32 i) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    threads[i].state = TCB_FREE;
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
 }
 
 u32 kthread_create(u64 entry, u64 arg) {
@@ -2116,6 +2136,7 @@ u32 kthread_create(u64 entry, u64 arg) {
 
     u64 stack_phys = pmm_alloc_pages(STACK_ORDER);
     if (stack_phys == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
     /* Kernel stacks are accessed through the HHDM direct map. */
@@ -2174,6 +2195,7 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
 
     u64 stack_phys = pmm_alloc_pages(STACK_ORDER);
     if (stack_phys == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
     u64 top = 0xFFFF800000000000ULL + stack_phys + STACK_BYTES;
@@ -2248,6 +2270,7 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
 
     u64 stack_phys = pmm_alloc_pages(STACK_ORDER);
     if (stack_phys == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
     u64 top = 0xFFFF800000000000ULL + stack_phys + STACK_BYTES;
@@ -2365,14 +2388,17 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
         return 0xFFFFFFFF;
     }
     if (threads[sched_cur()].as_h == 0 || threads[sched_cur()].is_user == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
     if (fn == 0 || user_stack == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
 
     u64 stack_phys = pmm_alloc_pages(STACK_ORDER);
     if (stack_phys == 0) {
+        unreserve_slot(i);
         return 0xFFFFFFFF;
     }
     u64 top = 0xFFFF800000000000ULL + stack_phys + STACK_BYTES;
@@ -2468,6 +2494,29 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
  * ring-transition stack (TSS RSP0 for user-mode traps, SYSCALL entry stack)
  * and address space, then hand the CPU over. Both kernel stacks and kernel
  * text live in the shared higher half, so switching CR3 mid-path is safe. */
+/* Called by switch_context with IRQs off, on the target stack and still
+ * holding run_lock. No reader/creator can reuse the outgoing slot or stack
+ * until all writes to its saved RSP have finished. Never sleep here. */
+void sched_finish_switch(u64 prev_id) {
+    u32 prev = (u32)prev_id;
+    threads[prev].on_cpu = SCHED_CPU_NONE;
+    if (threads[prev].state == TCB_DEAD || threads[prev].state == TCB_RETIRED) {
+        u64 sp = threads[prev].stack_phys;
+        threads[prev].stack_phys = 0;
+        threads[prev].kstack_top = 0;
+        threads[prev].rsp = 0;
+        if (sp != 0) pmm_free_pages(sp, STACK_ORDER);
+        if (threads[prev].state == TCB_RETIRED) {
+            threads[prev].pid = 0;
+            threads[prev].tid = 0;
+            threads[prev].ppid = 0;
+            threads[prev].is_user = 0;
+            threads[prev].state = TCB_FREE;
+        }
+    }
+    spin_unlock(&sched_run_lock);
+}
+
 static void schedule_tail(u32 prev, u32 next) {
     u32 cpu = sched_cpu_index();
     u64 top = threads[next].kstack_top;
@@ -2482,10 +2531,9 @@ static void schedule_tail(u32 prev, u32 next) {
     /* Per-thread TLS: install next FS base before the stack switch so the
      * resumed thread sees its arch_prctl value (0 clears FS). */
     msr_write((u32)MSR_FS_BASE, threads[next].fs_base);
-    /* Drop the run lock before the stack swap so a freshly trampolined
-     * thread is not born holding sched_run_lock. */
-    spin_unlock(&sched_run_lock);
-    switch_context(&threads[prev].rsp, threads[next].rsp);
+    /* Assembly invokes sched_finish_switch on the NEW stack before unlocking.
+     * Releasing here lets another CPU run/reap prev before its RSP is saved. */
+    switch_context(&threads[prev].rsp, threads[next].rsp, (u64)prev);
 }
 
 /* Caller must hold sched_run_lock (IRQs off). On return the lock is released. */
@@ -2497,7 +2545,6 @@ static void sched_switch_to(u32 next) {
         return;
     }
     prev = sched_cur();
-    threads[prev].on_cpu = SCHED_CPU_NONE;
     threads[next].on_cpu = cpu;
     if (threads[next].rq_cpu != cpu) {
         cfs_migrate_locked(next, cpu);
@@ -2548,6 +2595,18 @@ void sched_sleep_cli(u64 chan) {
     threads[sched_cur()].wait_chan = chan;
     cfs_dequeue_locked(sched_cur());
     threads[sched_cur()].state = TCB_SLEEPING;
+    sched_switch_to(pick_next(sched_cur()));
+}
+
+/* IRQs off; caller holds its condition lock. Publish sleep while holding
+ * run_lock BEFORE dropping that lock, so a remote producer cannot lose wakeup.
+ * Lock order: condition -> run_lock. Returns with IRQs still off. */
+void sched_sleep_unlock_spin(u64 chan, volatile u32 *condition_lock) {
+    spin_lock(&sched_run_lock);
+    threads[sched_cur()].wait_chan = chan;
+    cfs_dequeue_locked(sched_cur());
+    threads[sched_cur()].state = TCB_SLEEPING;
+    spin_unlock(condition_lock);
     sched_switch_to(pick_next(sched_cur()));
 }
 
@@ -2840,8 +2899,8 @@ void sched_tick(void) {
 
 /* Terminate the sched_cur() thread. Does not return. */
 void kthread_exit(void) {
-    /* No preemption after this point: the stack we stand on is about to be
-     * returned to the buddy allocator. */
+    /* Retire under run_lock; only the new-stack handoff callback may reclaim
+     * this stack. Freeing the stack we still stand on is unsafe on SMP. */
     arch.cpu_cli();
     spin_lock(&sched_run_lock);
 
@@ -2858,23 +2917,10 @@ void kthread_exit(void) {
         free_slot = 1;
     }
     cfs_dequeue_locked(self);
-    threads[self].state = free_slot ? TCB_FREE : TCB_DEAD;
-    if (free_slot) {
-        threads[self].pid = 0;
-        threads[self].tid = 0;
-        threads[self].ppid = 0;
-        threads[self].is_user = 0;
-    }
-    u64 sp = threads[self].stack_phys;
-    threads[self].stack_phys = 0;
-    threads[self].rsp = 0;
-    if (sp != 0) {
-        pmm_free_pages(sp, STACK_ORDER);
-    }
+    threads[self].state = free_slot ? TCB_RETIRED : TCB_DEAD;
 
     u32 next = pick_next(self);
     if (next == self) {
-        threads[self].on_cpu = SCHED_CPU_NONE;
         spin_unlock(&sched_run_lock);
         for (;;) {
             arch.cpu_sti();
@@ -2884,7 +2930,6 @@ void kthread_exit(void) {
     }
     {
         u32 cpu = sched_cpu_index();
-        threads[self].on_cpu = SCHED_CPU_NONE;
         threads[next].on_cpu = cpu;
         threads[next].rq_cpu = cpu;
         sched_set_cur(next);
@@ -3139,7 +3184,11 @@ u64 sched_current_as_h(void) {
 /* execve() swaps the address space of the running thread in place. CR3 is
  * switched by the caller; subsequent context switches use the new handle. */
 void sched_replace_as(u64 new_as_h) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
     threads[sched_cur()].as_h = new_as_h;
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
 }
 
 /* Called from the timer ISR path when a tick was taken while the interrupted
@@ -3519,12 +3568,35 @@ u32 sched_pid_threads(u32 pid) {
     return n == 0 ? 1 : n;
 }
 
-u64 sched_pid_as_h(u32 pid) {
-    u32 id = tcb_of_user_pid(pid);
-    if (id == 0xFFFFFFFF) {
-        return 0;
+/* Do not export a borrowed AS pointer: exec/exit on another CPU can free it.
+ * These bounded, non-allocating formatters finish under the same lock used by
+ * sched_replace_as, so detach/swap precedes any destruction by the owner. */
+u64 sched_pid_vma_kb(u32 pid) {
+    u32 id;
+    u64 n = 0;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    id = tcb_of_user_pid(pid);
+    if (id != 0xFFFFFFFF && threads[id].as_h != 0) {
+        n = mem.as_vma_kb_h(threads[id].as_h);
     }
-    return threads[id].as_h;
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    return n;
+}
+
+u64 sched_pid_maps(u32 pid, char *buf, u64 cap) {
+    u32 id;
+    u64 n = 0;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
+    id = tcb_of_user_pid(pid);
+    if (id != 0xFFFFFFFF && threads[id].as_h != 0) {
+        n = mem.as_format_maps_h(threads[id].as_h, buf, cap);
+    }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
+    return n;
 }
 
 /* Linux-ish short state letter for /proc/pid/status and ps. */
@@ -3668,8 +3740,11 @@ u32 sched_is_live_child(u32 ppid, u32 pid) {
  * was already freed in kthread_exit; only the slot identity remains. */
 u32 sched_reap_dead(u32 pid) {
     u32 i;
+    u64 flags = cpu_irq_save();
+    spin_lock(&sched_run_lock);
     for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid == pid && threads[i].state == TCB_DEAD) {
+        if (threads[i].pid == pid && threads[i].state == TCB_DEAD
+            && threads[i].on_cpu == SCHED_CPU_NONE && threads[i].stack_phys == 0) {
             threads[i].state = TCB_FREE;
             threads[i].pid = 0;
             threads[i].tid = 0;
@@ -3683,9 +3758,13 @@ u32 sched_reap_dead(u32 pid) {
             threads[i].sig_ignore = 0;
             threads[i].stop_sig = 0;
             threads[i].stop_notify = 0;
+            spin_unlock(&sched_run_lock);
+            cpu_irq_restore(flags);
             return 1;
         }
     }
+    spin_unlock(&sched_run_lock);
+    cpu_irq_restore(flags);
     return 0;
 }
 

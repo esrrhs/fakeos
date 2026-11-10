@@ -98,6 +98,9 @@ def main():
                 'M5_ELF_END', 'M5_ELF:0')
         command('/bin/fakecc -f bin -o /tmp/m5.bin /tmp/m5.asm; echo M5_BIN:$?; echo M5_BIN_END',
                 'M5_BIN_END', 'M5_BIN:0')
+        failures = [line for line in transcript.splitlines()
+                    if '[FAIL]' in line or '[FATAL]' in line]
+        assert not failures, failures
         print('PASS: guest C compile/exec, provenance, ELF64 and flat binary; smp=' + str(args.smp))
     finally:
         Path(args.log).write_text(transcript, errors='surrogateescape')

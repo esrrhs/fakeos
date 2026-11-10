@@ -351,10 +351,10 @@ void proc_terminate(u64 code) {
         sched_fd_close_all();
         as_h = sched_current_as_h();
         mem.as_activate_h(0);
+        sched_replace_as(0);
         if (as_h != 0) {
             mem.as_release_h(as_h);
         }
-        sched_replace_as(0);
         kthread_exit();
         for (;;) {
         }
@@ -386,6 +386,8 @@ void proc_terminate(u64 code) {
     sched_fd_close_all();
     as_h = sched_current_as_h();
     mem.as_activate_h(0);
+    /* Detach before release: /proc must never inspect a freed zombie AS. */
+    sched_replace_as(0);
     if (as_h != 0) {
         mem.as_release_h(as_h);
     }

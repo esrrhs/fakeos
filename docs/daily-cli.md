@@ -71,6 +71,44 @@ also uses this path instead of leaking its re-acquired mutex on a sleep retry.
 Each boot now verifies 32 immediately successive input/output token commands,
 with no retries or timing sleeps to conceal lost/reordered bytes.
 
+### Process lifetime follow-up
+
+Expanded SMP2 ps/free coverage caught a second real fault: `/proc/<pid>/status`
+read `VmSize` through a borrowed address-space pointer while the other CPU
+exec'd or freed it. Zombies also retained that freed pointer. `/proc` now formats
+VMA data under the scheduler lock shared with AS replacement; exit detaches its
+TCB's AS before freeing it. The formatters do not allocate or sleep under this
+lock. This protects lifetime, not a transactional snapshot of every proc field.
+
+`wait4` could consume its exit record before the child reached DEAD, so reaping
+missed the slot permanently. Exit records are now serialized, and consumption
+requires successful DEAD-slot reaping under the scheduler lock. Pending teardown
+is yielded to (or returns 0 for WNOHANG), not reported as already reaped.
+`m5_daily_proc_smoke.py` now races ps against 20 background exec/exits, checks
+child maps, and requires no zombies after each wait. It also waits for the whole
+UART job notification before parsing the PID (reads may split mid-line).
+
+Review also found a stack handoff hazard: DEAD/FREE publication and stack
+freeing preceded the actual RSP swap, and run_lock was dropped before saving
+RSP. Another CPU could select/reap/reuse the outgoing context too soon. The
+assembly switch now completes ownership and stack reclamation on the **new**
+stack under run_lock; creators atomically reserve FREE slots. `wait4` arms its
+sleep before releasing the exit-record condition lock (local CLI alone cannot
+exclude remote exit producers).
+
+An expanded run failed the old spinner assertion (`spinner 1 never got
+scheduled`). Its deadline began before workers had even entered. Workers now
+sleep until the last arrival starts the original 30-tick never-yielding window.
+The last worker, not idle-only bootstrap slot 0, releases the barrier; all
+original progress/completion assertions remain. Failed earlier runs remain
+failures, not acceptance evidence.
+
+Foreground launch probes also exposed silent stdout loss: console writes
+incorrectly applied SIGTTOU even with default TOSTOP disabled, returning EIO
+when that signal was ignored. Background writes now proceed unless TOSTOP is
+set and SIGTTOU is not ignored. The daily smoke requires actual output from an
+external background printf, not just its exit status.
+
 ## Next concrete gaps
 
 1. Safe file copying: inspect/test copying onto the same inode (including hard

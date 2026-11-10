@@ -38,6 +38,14 @@ struct exit_record {
 };
 
 static struct exit_record exit_table[MAX_EXIT];
+static volatile u32 exit_lock;
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void sched_yield(void);
+extern void sched_sleep_unlock_spin(u64 chan, volatile u32 *condition_lock);
+
 
 /* sched.c */
 extern u32 sched_current_pid(void);
@@ -75,7 +83,7 @@ extern void tty_set_fg(u32 pid);
 extern u32 tty_get_fg(void);
 extern u64 tty_jobctl_tcsetpgrp_check(void);
 
-void proc_record_exit(u32 pid, u32 ppid, u64 code) {
+static void proc_record_exit_locked(u32 pid, u32 ppid, u64 code) {
     u32 i;
     for (i = 0; i < MAX_EXIT; i++) {
         if (!exit_table[i].used) {
@@ -89,8 +97,17 @@ void proc_record_exit(u32 pid, u32 ppid, u64 code) {
     kprintf("[PROC] exit record table full, pid %u status lost\n", (u64)pid);
 }
 
+void proc_record_exit(u32 pid, u32 ppid, u64 code) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&exit_lock);
+    proc_record_exit_locked(pid, ppid, code);
+    spin_unlock(&exit_lock);
+    cpu_irq_restore(flags);
+}
+
+
 /* Re-point orphaned exit records when a parent terminates first. */
-void proc_reparent_exits(u32 old_ppid, u32 new_ppid) {
+static void proc_reparent_exits_locked(u32 old_ppid, u32 new_ppid) {
     u32 i;
     for (i = 0; i < MAX_EXIT; i++) {
         if (exit_table[i].used && exit_table[i].ppid == old_ppid) {
@@ -99,14 +116,26 @@ void proc_reparent_exits(u32 old_ppid, u32 new_ppid) {
     }
 }
 
+void proc_reparent_exits(u32 old_ppid, u32 new_ppid) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&exit_lock);
+    proc_reparent_exits_locked(old_ppid, new_ppid);
+    spin_unlock(&exit_lock);
+    cpu_irq_restore(flags);
+}
+
+
 /* Fetch and clear a matching record for parent ppid. want_pid == (u32)-1
  * accepts any child (wait4(-1, ...)). Returns 1 when one was consumed. */
-static u32 take_exit(u32 want_pid, u32 ppid, u32 *out_pid, u32 *out_code) {
+static u32 take_exit_locked(u32 want_pid, u32 ppid, u32 *out_pid, u32 *out_code) {
     u32 i;
     for (i = 0; i < MAX_EXIT; i++) {
         struct exit_record *r = &exit_table[i];
         if (r->used && r->ppid == ppid
             && (want_pid == (u32)(-1) || r->pid == want_pid)) {
+            /* Exit records precede cleanup. Do not consume status before
+             * the child has switched off its stack and is actually DEAD. */
+            if (!sched_reap_dead(r->pid)) continue;
             *out_pid = r->pid;
             *out_code = r->code;
             r->used = 0;
@@ -116,8 +145,19 @@ static u32 take_exit(u32 want_pid, u32 ppid, u32 *out_pid, u32 *out_code) {
     return 0;
 }
 
+static u32 take_exit(u32 want_pid, u32 ppid, u32 *out_pid, u32 *out_code) {
+    u64 flags = cpu_irq_save();
+    u32 result;
+    spin_lock(&exit_lock);
+    result = take_exit_locked(want_pid, ppid, out_pid, out_code);
+    spin_unlock(&exit_lock);
+    cpu_irq_restore(flags);
+    return result;
+}
+
+
 /* Non-consuming existence check for a matching exit record. */
-static u32 exit_exists(u32 want_pid, u32 ppid) {
+static u32 exit_exists_locked(u32 want_pid, u32 ppid) {
     u32 i;
     for (i = 0; i < MAX_EXIT; i++) {
         struct exit_record *r = &exit_table[i];
@@ -128,6 +168,17 @@ static u32 exit_exists(u32 want_pid, u32 ppid) {
     }
     return 0;
 }
+
+static u32 exit_exists(u32 want_pid, u32 ppid) {
+    u64 flags = cpu_irq_save();
+    u32 result;
+    spin_lock(&exit_lock);
+    result = exit_exists_locked(want_pid, ppid);
+    spin_unlock(&exit_lock);
+    cpu_irq_restore(flags);
+    return result;
+}
+
 
 /* wait4(pid, &status, options, ruspace):
  *   pid > 0  wait that exact child
@@ -176,8 +227,15 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
                 volatile u64 *sp = (volatile u64 *)status_u;
                 *sp = (u64)got_code << 8;
             }
-            sched_reap_dead(got_pid);
             return (u64)got_pid;
+        }
+        /* A recorded exit still finishing teardown is not waitable yet.
+         * Yield rather than burning a CPU or consuming its status too early.
+         * The normal no-record path below retains blocking wait semantics. */
+        if (exit_exists(want, parent)) {
+            if (options & WNOHANG) return 0;
+            sched_yield();
+            continue;
         }
         /* No matching record: if no live child exists either, the caller
          * has nothing to wait for. */
@@ -187,23 +245,25 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
         if (options & WNOHANG) {
             return 0;
         }
-        /* Close the lost-wakeup window: re-check under cli, then sleep
-         * without dropping IRQs until after the thread is marked sleeping. */
+        /* IRQ masking alone does not exclude a producer on another CPU.
+         * Hold the exit condition lock until run_lock has armed this sleep. */
         {
             u64 chan = sched_wait4_chan(parent);
             arch.cpu_cli();
-            if (exit_exists(want, parent)
+            spin_lock(&exit_lock);
+            if (exit_exists_locked(want, parent)
                 || ((options & WUNTRACED) && sched_stopped_exists(parent, want))
                 || ((options & WCONTINUED) && sched_continued_exists(parent, want))) {
+                spin_unlock(&exit_lock);
                 arch.cpu_sti();
                 continue;
             }
             if (!sched_has_live_child(parent)) {
+                spin_unlock(&exit_lock);
                 arch.cpu_sti();
                 return (u64)(-1);
             }
-            /* sched_sleep_cli: mark sleeping + switch; returns with IRQs off. */
-            sched_sleep_cli(chan);
+            sched_sleep_unlock_spin(chan, &exit_lock);
             arch.cpu_sti();
             if (sched_should_eintr()) {
                 return (u64)-4;         /* EINTR */

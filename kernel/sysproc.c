@@ -639,7 +639,8 @@ extern u64 sched_environ_copy(char *buf, u64 cap);
 extern u32 sched_pid_visible(u32 pid);
 extern u32 sched_pid_ppid(u32 pid);
 extern u32 sched_pid_threads(u32 pid);
-extern u64 sched_pid_as_h(u32 pid);
+extern u64 sched_pid_vma_kb(u32 pid);
+extern u64 sched_pid_maps(u32 pid, char *buf, u64 cap);
 extern char sched_pid_state_char(u32 pid);
 extern u64 sched_cmdline_copy_pid(u32 pid, char *buf, u64 cap);
 extern u64 sched_environ_copy_pid(u32 pid, char *buf, u64 cap);
@@ -730,8 +731,8 @@ u64 procfs_gen_status_for(char *buf, u64 cap, u32 pid) {
     at = proc_put(buf, cap, at, "\nThreads:\t");
     at = proc_put_u32(buf, cap, at, pid != 0 ? sched_pid_threads(pid)
                                             : sched_current_threads());
-    vmkb = mem.as_vma_kb_h(pid != 0 ? sched_pid_as_h(pid)
-                                    : sched_current_as_h());
+    vmkb = pid != 0 ? sched_pid_vma_kb(pid)
+                     : mem.as_vma_kb_h(sched_current_as_h());
     at = proc_put(buf, cap, at, "\nVmSize:\t");
     at = proc_put_u32(buf, cap, at, (u32)vmkb);
     at = proc_put(buf, cap, at, " kB\n");
@@ -747,7 +748,8 @@ u64 procfs_gen_maps_for(char *buf, u64 cap, u32 pid) {
     if (pid != 0 && !sched_pid_visible(pid)) {
         return 0;
     }
-    as_h = pid != 0 ? sched_pid_as_h(pid) : sched_current_as_h();
+    if (pid != 0) return sched_pid_maps(pid, buf, cap);
+    as_h = sched_current_as_h();
     return mem.as_format_maps_h(as_h, buf, cap);
 }
 

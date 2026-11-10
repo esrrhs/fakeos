@@ -6,6 +6,7 @@
 default rel
 
 extern kthread_exit
+extern sched_finish_switch
 
 global switch_context
 global thread_trampoline
@@ -18,7 +19,7 @@ section .text
 
 ; ------------------------------------------------------------------------------
 ; Cooperative/preemptive context switch (SysV AMD64 callee-saved convention)
-;   void switch_context(u64 *prev_rsp [RDI], u64 next_rsp [RSI])
+;   void switch_context(u64 *prev_rsp [RDI], u64 next_rsp [RSI], u64 prev_id [RDX])
 ;
 ; Saves the six callee-saved registers on the current stack, persists RSP into
 ; *prev_rsp, loads next_rsp and restores the target's frame. A freshly created
@@ -35,6 +36,11 @@ switch_context:
     push    r15
     mov     [rdi], rsp
     mov     rsp, rsi
+    ; Complete ownership/reclamation on the new stack, with run_lock held.
+    sub     rsp, 8
+    mov     rdi, rdx
+    call    sched_finish_switch
+    add     rsp, 8
     pop     r15
     pop     r14
     pop     r13

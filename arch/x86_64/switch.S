@@ -2,7 +2,7 @@
     .text
     .globl switch_context, thread_trampoline
     .globl spin_lock, spin_unlock, cpu_irq_save, cpu_irq_restore
-    .extern kthread_exit
+    .extern kthread_exit, sched_finish_switch
 
 switch_context:
     push %rbp
@@ -13,6 +13,11 @@ switch_context:
     push %r15
     mov %rsp, (%rdi)
     mov %rsi, %rsp
+    /* Target frame is 8 mod 16. Align for the C handoff callback. */
+    sub $8, %rsp
+    mov %rdx, %rdi
+    call sched_finish_switch
+    add $8, %rsp
     pop %r15
     pop %r14
     pop %r13
