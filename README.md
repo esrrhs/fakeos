@@ -489,6 +489,17 @@ flowchart TD
 
 ## 🛠️ 构建与运行
 
+### fakecc-only 的边界与验证
+
+默认 `make` 的**目标工具链**（内核、用户态、boot/trampoline 汇编、链接，以及嵌入的 `/bin/fakecc`）只需已有的 fakecc seed 和匹配的 `FAKECC_SRC/v0`；不是“整台构建机只装 fakecc”。仍需 make、bash、Python 3 和常用 Unix 文件工具，QEMU 用于运行验证。首次取得 seed 是独立的 bootstrap 步骤，可用已有 fakecc 自举，或在普通 make 之外使用 CMake/宿主 C 编译器。
+
+```bash
+FCC=../fakecc/build/fakecc bash tools/m5_no_host_cc_smoke.sh
+python3 tools/m5_guest_smoke.py --smp 1
+```
+
+前者删除 build 后以 deny wrappers 禁止宿主 C/汇编/链接工具，校验实际 seed 与源码哈希，并用新嵌入编译器再次自举，要求字节不动点；相同 seed/output **不是失败**。普通 make 会生成并嵌入 `/etc/fakecc.provenance.json`：含源码 revision（如有 git）、原始与 Linux scratch 有效输入 SHA-256、模块集、seed 与产物哈希。revision 本身不代表干净树或语义一致性，内容哈希可用于核对具体来源。后者验证 guest 内 C 编译执行与 `-f bin`/`-f elf64`，不把其它启动自测的既有 FAIL 冒充通过。M5 全内核重建的历史 restage pin 仍见下方文档，未由此 smoke 解除。
+
 ### 依赖环境
 - [fakecc](https://github.com/esrrhs/fakecc) **seed 可执行文件**（建议 `../fakecc/build/fakecc`；需含 `-T` / `--kernel-multiboot`（#112）与 `-f bin`/`-f elf64` NASM 子集（#113））。普通 `make` 用该 seed 编译内核/用户态，并用它自举嵌入镜像的 `/bin/fakecc`（编译 `FAKECC_SRC` 的已检入 `v0/*.c`），**不再调用 CMake / cc / gcc / clang / cpp / GNU as·ld·objcopy / nasm**。
 - 一份 fakecc 源码树（默认 `../fakecc`，`FAKECC_SRC=...` 可覆盖；**已检入 `v0/` 必须与 `src/` 模块对齐**，含 `as_nasm` 与 `-f bin`/`-f elf64` 接线——见 [fakecc#114](https://github.com/esrrhs/fakecc/pull/114)；`m5_build_fakecc.sh` 对缺失模块 fail-fast，不再静默丢弃。M5 tip 回归可钉 `2c1f4525`，见 Makefile 注释）

@@ -298,3 +298,31 @@ if printf '%s\n' $MODULES | grep -qx as_nasm; then
         echo "[m5] capability OK: embed -f elf64 boot.o + -f bin ap_tramp.bin ($(wc -c <"$CAP/ap_tramp.bin") bytes)"
     fi
 fi
+
+# Record exact inputs actually compiled (including Linux scratch adaptations).
+# Git revision is advisory; content hashes also cover dirty/non-git source trees.
+python3 - "$FAKECC_SRC" "$SCRATCH" "$S0" "$OUT" "$DROP" $MODULES <<'PYPROV'
+import hashlib, json, pathlib, subprocess, sys
+source, scratch, seed, output, drop, *modules = sys.argv[1:]
+def digest(p):
+    return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+def files(root):
+    root = pathlib.Path(root)
+    return {str(p.relative_to(root)): digest(p)
+            for directory in ('src', 'v0', 'runtime', 'include')
+            for p in sorted((root / directory).rglob('*'))
+            if p.is_file() and p.suffix in ('.c', '.h')}
+try:
+    revision = subprocess.check_output(
+        ['git', '-C', source, 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL,
+        text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    revision = None
+manifest = dict(schema=1, source_revision=revision, source_sha256=files(source),
+                effective_sha256=files(scratch), modules=modules,
+                dropped_backend=drop, seed_sha256=digest(seed),
+                artifact_sha256=digest(output))
+pathlib.Path(output + '.provenance.json').write_text(
+    json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+print('[m5] provenance: ' + output + '.provenance.json')
+PYPROV

@@ -50,6 +50,7 @@ FAKECC_SRC="$FAKECC_SRC" FCC="${FCC:-}" bash "$SCRIPT_DIR/m5_build_fakecc.sh" "$
 # recompiles disagree with the host reference objects. Read the embedded usage
 # string instead; it is present in the binary regardless of the build host.
 mkdir -p "$STAGE/etc"
+mv "$STAGE/bin/fakecc.provenance.json" "$STAGE/etc/fakecc.provenance.json"
 if grep -qa -- '--target' "$STAGE/bin/fakecc"; then
     echo '--target=x86_64-linux' > "$STAGE/etc/fakecc.flags"
     REF_TARGET_FLAG='--target=x86_64-linux'
