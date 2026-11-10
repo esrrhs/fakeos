@@ -24,6 +24,7 @@ extern void slab_selftest(void);
 extern void sched_selftest(void);
 extern void sched_steal_selftest(void);
 extern void sched_balance_selftest(void);
+extern void sched_ap_sysret_selftest(void);
 extern types.uint32_t sched_smp_start(void);
 extern void uproc_selftest(void);
 extern void vfs_selftest(void);
@@ -172,6 +173,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     sched_smp_start();
     sched_steal_selftest();
     sched_balance_selftest();
+    sched_ap_sysret_selftest();
 
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");

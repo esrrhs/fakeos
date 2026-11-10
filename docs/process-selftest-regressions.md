@@ -4,9 +4,9 @@
 
 The seven failures below reproduce on fakeos `ca6a92aba9fec8ecd58441e107596cfd9325b5c5`
 built with released fakecc `027e78655763651849220929430bae3a8b5cb0ce`.
-The implementation fix is **unmerged** fakecc [PR #116](https://github.com/esrrhs/fakecc/pull/116),
-head `dfb1c7b649480e2acfef2a0a02e8168b5b28ee38`.
-Default released fakecc is therefore not yet claimed fixed. No kernel test was
+The implementation fix landed on fakecc master as
+[PR #116](https://github.com/esrrhs/fakecc/pull/116)
+(`dfb1c7b649480e2acfef2a0a02e8168b5b28ee38`, local fast-forward). No kernel test was
 removed, weakened, or bypassed, and no speculative pipe/reparent kernel change
 is needed for these seven regressions.
 
@@ -60,13 +60,18 @@ Validation with the PR compiler:
   second selfhost byte-identical; actual boot/ap_tramp bin/ELF64 parity passes.
 - SMP1 strict guest smoke passes all seven, immediate external exec, embedded
   `/bin/fakecc` ping compile/execute, provenance, ELF64 and flat-bin assembly.
-- SMP2 passes all seven targeted boot tests and immediate external exec, but
-  the subsequent guest compiler workload **fails** in two runs: #DF at
-  `RIP=0xffffffff801055d5`, with user-range `RSP=0x7f7ff0e8` (one run also
-  reports a user stack write #PF). The helper exits nonzero waiting for
-  `M5_C_END`. Its cause is not established here; complete SMP2 compiler smoke
-  is **not green**, and this is not presented as a fully completed default
-  release fix.
+- SMP2 historically passed all seven targeted boot tests, then the subsequent
+  guest compiler workload hit #DF at `sysretq` (`RIP=0xffffffff801055d5`,
+  `RSP=0x7f7ff0e8` already switched back to the user stack). Root cause:
+  SYSCALL/SYSRET MSRs are per-CPU, but `syscall_init()` ran only on the BSP.
+  A user thread stolen onto an AP, or a syscall that migrated mid-handler,
+  executed `sysretq` with STAR=0 and double-faulted. `sched_ap_enter()` now
+  programs STAR/LSTAR/SFMASK/EFER.SCE on each AP before its timer can steal
+  user work; a boot selftest checks those MSRs from an AP worker. After this
+  change the original sysretq #DF is gone and the AP MSR selftest passes, but
+  the SMP2 guest compiler workload still does not complete: the first user
+  process (pid 24) takes a ring-3 #PF at RIP=0x400215, CR2=RSP=0x7f7ff0e8,
+  error=0xc (non-present, read, user, reserved-bit), then pid 1 is killed by
+  a later write-protect #PF. That leftover is not claimed fixed.
 
-The historical full in-OS kbuild restage pin remains outside this fix. No
-unrelated PR, CI repair, or compiler master merge is included.
+The historical full in-OS kbuild restage pin remains outside this work.

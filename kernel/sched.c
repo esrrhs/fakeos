@@ -28,6 +28,7 @@ extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
 extern void switch_context(u64 *prev_rsp, u64 next_rsp);
 extern void msr_write(u32 msr, u64 value);
+extern void syscall_init(void);
 
 enum { MSR_FS_BASE = 0xC0000100 };
 
@@ -4222,6 +4223,11 @@ void sched_ap_enter(u32 cpu) {
     idt_load();
     gdt_load_cpu_tss(cpu);
     cpu_enable_sse();
+    /* SYSCALL/SYSRET MSRs are per-CPU. uproc_selftest() programs them only
+     * on the BSP; without a matching AP setup, a user thread that is stolen
+     * or finishes a pre-emption-migrated syscall executes sysretq with
+     * STAR=0 while RSP is already the user stack, which double-faults. */
+    syscall_init();
     lapic_ap_init();
     lapic_ap_timer_enable();
 

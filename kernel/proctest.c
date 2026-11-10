@@ -35,6 +35,8 @@ extern u64 sched_steal_on_cpu(u32 cpu);
 extern u64 sched_steal_kernel_total(void);
 extern u64 sched_balance_remote_total(void);
 extern u64 sched_ipi_resched_total(void);
+extern u64 msr_read(u32 msr);
+extern void syscall_entry(void);
 
 /* Sleeping-lock APIs (layouts match kernel/sched.c). */
 struct kmutex {
@@ -1350,4 +1352,77 @@ void sched_balance_selftest(void) {
     }
     kprintf("      [PASS] IPI resched balance: remote=%u ipi=%u hits0=%u hits1=%u\n",
             bal1 - bal0, ipi1 - ipi0, g_bal_hits[0], g_bal_hits[1]);
+}
+
+/* Confirm each AP programmed the per-CPU SYSCALL/SYSRET MSRs. A missing
+ * STAR on the AP is the sysretq #DF path that used to kill a stolen
+ * user compiler workload after RSP had already switched back to user. */
+enum {
+    MSR_EFER  = 0xC0000080,
+    MSR_STAR  = 0xC0000081,
+    MSR_LSTAR = 0xC0000082
+};
+
+static volatile u32 g_ap_sysret_ok;
+static volatile u32 g_ap_sysret_cpu;
+static volatile u32 g_ap_sysret_done;
+
+static void ap_sysret_msr_worker(u64 unused) {
+    u32 c = smp_cpuid();
+    u64 star = msr_read(MSR_STAR);
+    u64 lstar = msr_read(MSR_LSTAR);
+    u64 efer = msr_read(MSR_EFER);
+    (void)unused;
+    if (c != 0
+        && star == (((u64)0x10 << 48) | ((u64)0x08 << 32))
+        && lstar == (u64)(&syscall_entry)
+        && (efer & 1ull) != 0) {
+        g_ap_sysret_ok = 1;
+        g_ap_sysret_cpu = c;
+    }
+    g_ap_sysret_done = g_ap_sysret_done + 1;
+    kthread_exit();
+}
+
+void sched_ap_sysret_selftest(void) {
+    u32 i;
+    u32 ncpu = smp_cpu_count();
+
+    kprintf("\n[SCHED] AP SYSCALL/SYSRET MSR self-test...\n");
+    if (ncpu < 2) {
+        kprintf("      [PASS] AP SYSRET MSRs: skipped (-smp 1)\n");
+        return;
+    }
+
+    g_ap_sysret_ok = 0;
+    g_ap_sysret_cpu = 0;
+    g_ap_sysret_done = 0;
+    arch.cpu_sti();
+    for (i = 0; i < 4; i++) {
+        if (kthread_create((u64)(&ap_sysret_msr_worker), i) == 0xFFFFFFFFu) {
+            kprintf("      [FAIL] AP SYSRET MSR worker create %u\n", (u64)i);
+            arch.cpu_cli();
+            return;
+        }
+    }
+    {
+        u64 deadline = sched_tick_count() + 800;
+        while (g_ap_sysret_done != 4 && sched_tick_count() < deadline) {
+            sched_yield();
+        }
+    }
+    arch.pit_busy_wait_ms(20);
+    arch.cpu_cli();
+
+    if (g_ap_sysret_done != 4) {
+        kprintf("      [FAIL] AP SYSRET MSR workers done %u/4\n",
+                (u64)g_ap_sysret_done);
+        return;
+    }
+    if (g_ap_sysret_ok == 0) {
+        kprintf("      [FAIL] no AP with STAR/LSTAR/EFER.SCE programmed\n");
+        return;
+    }
+    kprintf("      [PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE on CPU%u\n",
+            (u64)g_ap_sysret_cpu);
 }
