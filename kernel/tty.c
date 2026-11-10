@@ -592,9 +592,8 @@ static void tty_hist_apply(int view) {
  * ---------------------------------------------------------------------- */
 enum {
     TAB_MATCH_MAX = 24,
-    TAB_NAME_MAX = 28,
-    TAB_PATH_MAX = 128,
-    TAB_DENT_RECLEN = 48,
+    TAB_NAME_MAX = 256,
+    TAB_PATH_MAX = 512,
     TAB_DENT_BUF = 1920,
     TAB_DT_DIR = 4
 };
@@ -695,6 +694,8 @@ static u64 tab_getdents(u32 fh, char *buf, u64 len) {
 
 static char tab_dent_buf[TAB_DENT_BUF];
 
+extern u32 dirent_record_size(const char *p, u64 avail);
+
 static void tab_scan_dir(const char *dirpath, const char *pfx, u32 pfx_n) {
     u32 fh;
     u64 n;
@@ -705,20 +706,22 @@ static void tab_scan_dir(const char *dirpath, const char *pfx, u32 pfx_n) {
         n = tab_getdents(fh, tab_dent_buf, TAB_DENT_BUF);
         if (n == 0 || n == (u64)(-1)) break;
         off = 0;
-        while (off + TAB_DENT_RECLEN <= n) {
+        while (off < n) {
+            u32 reclen = dirent_record_size(tab_dent_buf + off, n - off);
+            if (!reclen) { tab_close_fh(fh); return; }
             char *name = tab_dent_buf + off + 19;
             u8 dtype = (u8)tab_dent_buf[off + 18];
             if (name[0] == '.' && (name[1] == 0
                 || (name[1] == '.' && name[2] == 0))) {
                 if (!(pfx_n > 0 && pfx[0] == '.')) {
-                    off += TAB_DENT_RECLEN;
+                    off += reclen;
                     continue;
                 }
             }
             if (tab_startswith(name, pfx, pfx_n)) {
                 tab_add_match(name, dtype == TAB_DT_DIR);
             }
-            off += TAB_DENT_RECLEN;
+            off += reclen;
         }
     }
     tab_close_fh(fh);
@@ -1049,6 +1052,12 @@ static void tty_tab_complete(void) {
         return;
     }
     tab_list_pending = 0;
+    /* Do not insert a clipped filename when the editable line is full. */
+    if (tty_editing + (common > pfx_n ? common - pfx_n : 0)
+        + (tab_nmatch == 1 && tab_isdir[0] ? 1 : 0) >= LINE_MAX) {
+        tty_beep();
+        return;
+    }
     if (common > pfx_n) {
         tty_insert_range(tab_matches[0], pfx_n, common);
     }

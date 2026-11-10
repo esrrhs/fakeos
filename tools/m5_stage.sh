@@ -97,6 +97,7 @@ done
 
 # In-OS demo source.
 cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
+cp "$ROOT/user/progs/dirent_check.c" "$STAGE/src/dirent_check.c"
 
 # Host reference objects.
 #

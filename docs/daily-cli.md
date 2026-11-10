@@ -42,6 +42,7 @@ These are executable acceptance checks, not a daily-driver certification:
 | File workspace | `tools/m5_persistent_files_smoke.py --smp 2`: fresh private 4 MiB ext2 image, two boots; create nested dirs, append with piped `ed`, copy/rename/delete, recursive copy, byte comparisons, >12-block file, source saved script, mode/size/mtime preserved across relaunch; RAM `/tmp` not preserved |
 | Relaunch contract | Guest `sync`, then shell `exit 0`, then QEMU process shutdown/relaunch on that same disposable image; **not** guest reboot(2), power-loss safety, or a full journal guarantee |
 | Memory under SMP | Post-AP buddy/slab worker canaries, allocation/free interleaving; allocator locks preserve local IRQ state, lock order heap -> PMM |
+| Lossless directory names | `tools/m5_dirent_smoke.py --smp 1` and `--smp 2`: colliding 29/30/31-byte prefixes, Ramfs31/Ext2255-byte limits, variable records and buffer/cookie boundaries, exact nested bytes, listing/copy/removal, read-error propagation and two-boot persistence |
 | Ramfs growth | `tools/m5_ramfs_growth_smoke.py --smp 1` and `--smp 2`: real writes beyond 4 MiB, exact 16 MiB, zero extension/full hashes, copy/shrink/regrow, retained data on size-limit and real allocation-pressure failures, recovery after freeing a block |
 | Programs / compiler | `tools/m5_guest_smoke.py --require-process-selftests --smp 1` and repeated `--smp 2`: seven pipe/signal/orphan regressions, AP SYSRET/NXE/current-AS, guest C exec, provenance, ELF64/flat binary |
 | Build | `FCC=/tmp/fakecc-pr116-merge/build/fakecc FAKECC_SRC=/tmp/fakecc-pr116-merge tools/m5_no_host_cc_smoke.sh`: clean deny-tools build and compiler fixed point |
@@ -169,9 +170,11 @@ directory read errors. Cleanup tests retain original source/outside-file bytes.
 Existing identical symlinks are idempotent; other existing entries for a copied
 link are refused (unless -n skips them). This is intentionally conservative,
 not full GNU cp -H/-L semantics or adversarial concurrent-rename protection.
-Fixed utility bounds remain: 128-byte joined paths and 64 child names per
-directory; over-limit joined paths/entry counts fail. Longer filename handling
-through the fixed getdents ABI is not certified by this acceptance.
+The original recursive acceptance used 128-byte joined paths. The lossless-name
+increment below coordinates 512-byte pathname buffers; cp/rm/mv/chmod still
+snapshot at most 64 child names per directory and reject overflow rather than
+silently omitting names. chmod recursion remains limited to16 levels, ls to8;
+find/du retain128-entry snapshots (now heap-backed, not32KiB per stack frame).
 
 ### Group-worker test admission
 
@@ -289,14 +292,77 @@ an obsolete VFS bound and over-cap cleanup argv; they were corrected, not
 counted as passing. Contiguous allocation, 16 MiB per-file and resource limits
 remain; this is not general daily-driver or full in-OS kbuild acceptance.
 
+### Lossless directory records and populated Ext2 directories
+
+A real probe on11107d2 created distinct29/30/31-byte names sharing29 bytes:
+`cp -r` returned0 but omitted the30/31-byte files. Records now retain every
+supported byte: Ramfs31 and Ext2255, plus NUL and zero padding. Linux getdents64
+field offsets remain; records are8-byte aligned, minimum48 bytes and maximum280.
+Consumers must validate and advance by `d_reclen`, never a fixed48-byte stride.
+Too-small buffers return an error for the pending record, or complete earlier
+records first; entry cookies do not consume the pending name. Unmapped/wrapped output ranges are rejected before enumeration advances.
+The existing VMA validator requires the output buffer to fit one VMA; this is
+not certification of arbitrary concurrent remapping or read-only-buffer recovery. Corruption/I/O is an error, not false EOF;
+cp/rm propagate directory read and close errors. The released fakecc runtime's
+existing variable-record iterator is exercised unchanged.
+
+Maximum-name testing also exposed independent Ext2 data loss: scanning a full
+first block shrank an existing two-block directory to one block, then cleared
+its populated second block as if newly allocated. Insertion now preserves the
+original size while scanning and grows only at true EOF. Native regression
+`tools/test_ext2_dir_add.py` compiles the actual insertion core with fakecc and
+private block I/O; it requires later-file retention, real EOF extension, and
+255-byte acceptance/256-byte rejection. Ext2 component bounds are checked
+before copying into256-byte name arrays.
+
+The new two-boot acceptance requires all root/nested bytes before and after
+copy, recursive chmod, removal and relaunch on its own disposable16MiB disk. A250-level directory exercises heap-backed
+find/du and rm;511-byte paths exercise full verbose-copy output and rejection
+of512-byte paths without truncating the retained file. It also
+injects one malformed directory record offline into that image only: cp, rm,
+ls, find and du must fail while retaining an unrelated file. Native writer /
+kernel-libc decoder tests cover exact/short buffers, canaries, NUL/padding and
+malformed records. This does not promise atomic backup, concurrent-directory
+snapshots or power-loss recovery. Syscall/utility paths are bounded to511 bytes
+plus NUL; exec still allows only eight argv slots and127 bytes per argument,
+so long names are operated on through short root operands and directory walks.
+TTY input remains255 editable bytes; completion refuses a name that cannot fit
+instead of inserting a truncated path. Other programs may retain smaller bounds.
+The511-byte fixture exposed a separate off-by-one in `copy_user_cstring`:
+callers reserved one NUL byte but the core rejected the terminator at the exact
+max-character index. The corrected contract accepts max characters plus NUL
+and rejects max+1. `tools/test_user_cstring.py` compiles the actual core with
+private page-validation stubs, checking0/127/255/511 boundaries, destination
+canaries and a terminator across a page boundary; no argv count cap was raised.
+
+### Lossless-name final-image acceptance
+
+On2026-11-11 (Asia/Shanghai), the fresh uninstrumented image SHA256
+`501dbe3449f70164a41f52593bfd304c426dedbf6e50fcde6807d9fa5ceda333`
+passed all18 audited boots: name/deep-path/corruption tests both boots SMP1/2;
+growth, recursive copy/ENOSPC and ps/churn SMP1/2; persistence both boots
+SMP1/2; strict process+compiler SMP1 and SMP2 three times. All18 UARTs have
+zero FAIL/FATAL, all seven pipe/signal/orphan passes, large/concurrent allocator
+canaries and the unchanged nested fairness assertion. All ten SMP2 boots
+sampled AP CPUs1/1/1/1. The linked deadline `0xffffffff83a70000`
+remains16KiB aligned; no scheduler algorithm/window/tolerance changed.
+Clean deny-tools build, zero denied invocations, released dfb1c7b provenance,
+byte-identical self-host fixed point and ELF64/flat asm passed. Earlier
+multi-block, cross-FS fixture-oracle and exact-path failures were corrected,
+not relabeled passing. This is bounded workflow evidence, not daily-driver,
+security-hardening, power-loss or historical full in-OS kbuild certification.
+
 ## Next concrete gaps
 
-1. Script launching: shell ignores script argv and execve has no shebang
-   handling; only source/. is tested. Exec also has an eight-slot argv limit.
-2. Long directory-entry names: the fixed 48-byte getdents ABI cannot represent
-   all names accepted by the filesystems. Probe prefix collisions and prevent
-   silent recursive copy omission before claiming lossless backup workflows.
-   Atomic copy replacement/metadata UX also remain incomplete.
+1. Cross-filesystem mv safety: an isolated native probe of the actual
+   copy_file+copy_unlink core returned success and unlinked the source after
+   a partial read followed by an injected I/O error. Reproduce in a disposable
+   guest and correct file read/close handling next; passing ordinary moves
+   does not certify failure safety. Atomic copy replacement/metadata remain
+   incomplete.
+2. Script launching: shell ignores script argv and execve has no shebang
+   handling; only source/. is tested. Exec has eight argv slots and127-byte
+   arguments; lossless enumeration does not remove those operand limits.
 3. SMP timekeeping: a controlled SMP2 observation saw `sleep 20` complete in
    about 10 host seconds; global scheduler ticks currently advance on every
    CPU while clock/sleep conversion assumes 100 Hz. Reproduce SMP1/2 timing

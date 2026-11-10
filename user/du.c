@@ -12,7 +12,10 @@ package user;
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern void *malloc(unsigned long n);
+extern void free(void *p);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_lstat(const char *path, void *statbuf);
 extern int strcmp(const char *a, const char *b);
 extern unsigned long strlen(const char *s);
@@ -27,11 +30,10 @@ enum {
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
-    PATH_CAP = 128,
+    PATH_CAP = 512,
     DENT_BUF = 1920,
-    DENT_REC = 48,
     NAME_OFF = 19,
-    NAME_LEN = 30,
+    NAME_LEN = 256,
     MAX_NAMES = 128,
     MAX_ARGS = 8
 };
@@ -79,6 +81,11 @@ static unsigned long to_kib(unsigned long bytes) {
 
 static void join_path(char *out, unsigned long cap, const char *dir,
                       const char *name) {
+    unsigned long dl = strlen(dir);
+    unsigned long nl = strlen(name);
+    unsigned long need = dl + nl + 1 + (dl && dir[dl - 1] != '/' ? 1 : 0);
+    if (dir[0] == '.' && dir[1] == 0) need = nl + 1;
+    if (need > cap) { if (cap) out[0] = 0; return; }
     unsigned long i = 0;
     unsigned long j = 0;
     if (cap < 2) {
@@ -141,7 +148,7 @@ static unsigned long du_path(const char *path, int depth);
 static unsigned long du_dir(const char *path, unsigned long self_bytes, int depth) {
     char dent[DENT_BUF];
     char child[PATH_CAP];
-    char names[MAX_NAMES][NAME_LEN];
+    char *names;
     int nnames;
     long fd;
     long n;
@@ -154,12 +161,19 @@ static unsigned long du_dir(const char *path, unsigned long self_bytes, int dept
         err_rc = 1;
         return self_bytes;
     }
+    names = (char *)malloc(MAX_NAMES * NAME_LEN);
+    if (!names) { err_rc = 1; u_close(fd); return total; }
     nnames = 0;
     for (;;) {
         long off;
         n = u_getdents(fd, dent, sizeof(dent));
-        if (n <= 0) break;
-        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+        if (n == -4) continue;
+        if (n < 0) { err_rc = 1; u_close(fd); free(names); return total; }
+        if (n == 0) break;
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dent + off, n - off);
+            if (reclen < 0) { err_rc = 1; u_close(fd); free(names); return total; }
             char name[NAME_LEN];
             unsigned long k = 0;
             while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
@@ -173,21 +187,23 @@ static unsigned long du_dir(const char *path, unsigned long self_bytes, int dept
                 printf("du: %s: too many entries\n", path);
                 err_rc = 1;
                 u_close(fd);
+                free(names);
                 return total;
             }
-            strcpy(names[nnames], name);
+            strcpy((names + nnames * NAME_LEN), name);
             nnames++;
         }
     }
     u_close(fd);
 
     for (i = 0; i < nnames; i++) {
-        join_path(child, PATH_CAP, path, names[i]);
-        if (child[0] == 0) continue;
+        join_path(child, PATH_CAP, path, (names + i * NAME_LEN));
+        if (child[0] == 0) { err_rc = 1; continue; }
         total += du_path(child, depth + 1);
     }
 
     if (emit_ok(depth)) emit(total, path);
+    free(names);
     return total;
 }
 

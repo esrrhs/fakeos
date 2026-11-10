@@ -212,7 +212,7 @@ u64 sys_munmap(u64 addr, u64 len) {
 
 /* chmod(2): update Ramfs/Ext2 permission bits (no ACL / capability model). */
 u64 sys_chmod(u64 upath, u64 mode) {
-    char path[128];
+    char path[512];
     extern u32 copy_user_path(char *dst, u64 upath);
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);
@@ -423,7 +423,7 @@ u64 sys_setgroups(u64 size, u64 list) {
 
 /* chown(2): update Ramfs/Ext2 owner; (u32)-1 leaves a field unchanged. */
 u64 sys_chown(u64 upath, u64 uid, u64 gid) {
-    char path[128];
+    char path[512];
     extern u32 copy_user_path(char *dst, u64 upath);
     if (!copy_user_path(path, upath)) {
         return (u64)(-1);

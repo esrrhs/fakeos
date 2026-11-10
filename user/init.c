@@ -25,6 +25,7 @@ extern long u_execve(const char *path, char **argv, char **envp);
 extern void u_exit(long code);
 extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_getdents(long fd, void *buf, unsigned long len);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_chdir(const char *path);
 extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
@@ -434,7 +435,7 @@ static void mmap_test(void) {
     }
 }
 
-/* Fixed dirent layout emitted by the kernel: 48-byte records, name at +19. */
+/* getdents64: name at +19, validated d_reclen controls each record. */
 static u64 rec_u64(const char *p) {
     u64 v = 0;
     int i;
@@ -465,7 +466,10 @@ static void dirent_test(void) {
     }
     for (i = 0; i < 5; i++) {
         int found = 0;
-        for (off = 0; off + 48 <= n; off += 48) {
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(buf + off, n - off);
+            if (reclen < 0) { puts("[U][FAIL] malformed dirent"); return; }
             const char *name = buf + off + 19;
             const char *w = want[i];
             int k = 0;
@@ -1109,7 +1113,10 @@ static void proc_self_test(void) {
 
 static int dent_has_name(const char *buf, long n, const char *want) {
     long off;
-    for (off = 0; off + 48 <= n; off += 48) {
+    long reclen;
+    for (off = 0; off < n; off += reclen) {
+        reclen = u_dirent_reclen(buf + off, n - off);
+        if (reclen < 0) return 0;
         const char *name = buf + off + 19;
         int k = 0;
         while (want[k] != 0 && name[k] == want[k]) {

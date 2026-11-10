@@ -12,11 +12,11 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 
 enum {
-    DENT_RECLEN = 48,
     NAME_OFF = 19,
     MAX_PIDS = 32,
     PATH_CAP = 64,
@@ -222,7 +222,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     while ((n = u_getdents(fd, dents, sizeof(dents))) > 0) {
-        for (off = 0; off + DENT_RECLEN <= n; off += DENT_RECLEN) {
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dents + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
             const char *nm = dents + off + NAME_OFF;
             int k = 0;
             if (!is_digits(nm)) {

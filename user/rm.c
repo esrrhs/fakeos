@@ -10,6 +10,7 @@ extern long u_rmdir(const char *path);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_lstat(const char *path, void *statbuf);
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern int strcmp(const char *a, const char *b);
@@ -23,14 +24,13 @@ enum {
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
-    PATH_CAP = 128,
+    PATH_CAP = 512,
     DENT_BUF = 1920,
-    DENT_REC = 48,
     NAME_OFF = 19,
     TYPE_OFF = 18,
     DT_DIR = 4,
     MAX_NAMES = 64,
-    NAME_LEN = 30
+    NAME_LEN = 256
 };
 
 static unsigned int load_u32(const char *p) {
@@ -91,7 +91,10 @@ static int rm_dir_rec(const char *path, int verbose) {
             return 1;
         }
         if (n == 0) break;
-        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dent + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
             char name[NAME_LEN];
             unsigned long k = 0;
             while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
@@ -110,7 +113,10 @@ static int rm_dir_rec(const char *path, int verbose) {
             nnames++;
         }
     }
-    u_close(fd);
+    if (u_close(fd) < 0) {
+        printf("rm: directory close failed\n");
+        return 1;
+    }
 
     for (i = 0; i < nnames; i++) {
         if (join_path(child, PATH_CAP, path, names[i]) < 0) {

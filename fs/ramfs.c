@@ -79,7 +79,6 @@ enum {
     CONSOLE_FH     = 1,            /* permanent slot, fd 0/1/2 point at it */
     FH_BAD         = 0,
 
-    DENT_RECLEN = 48,             /* fixed-size getdents64 record */
 
     /* Dynamic files are kmalloc-backed; cap bounds worst-case buddy
      * pressure (tool outputs are a few hundred KB, margin for growth). */
@@ -1634,19 +1633,10 @@ u64 fs_lseek_h(u32 fh, u64 off, u32 whence) {
     return no;
 }
 
-/* Emit fixed 48-byte dirent records:
- *   0..7   d_ino   (u64)
- *   8..15  d_off   (u64, index of the NEXT entry)
- *   16..17 d_reclen(u16 = 48)
- *   18     d_type  (u8: DT_REG / DT_DIR)
- *   19..47 d_name  (29 bytes, NUL padded)
- * Records are assembled bytewise so callers need no alignment guarantees. */
-static void put_u64(char *p, u64 v) {
-    u32 i;
-    for (i = 0; i < 8; i++) {
-        p[i] = (char)(v >> (i * 8));
-    }
-}
+/* Variable aligned getdents64 records, emitted by fs/dirent.c. */
+extern u32 dirent_size(u32 nlen);
+extern u32 dirent_write(char *out, u64 room, u64 ino, u64 next, u32 type,
+                        const char *name, u32 nlen);
 
 u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
     struct inode *dp;
@@ -1659,35 +1649,32 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
     if (dp->type != INO_DIR || !opens[fh].readable) {
         return (u64)(-1);
     }
-    if (len < DENT_RECLEN) {
-        return (u64)(-1);             /* caller cannot distinguish from EOF */
-    }
+    if (len < 48) return (u64)(-1);
     idx = (u32)opens[fh].off;
-    while (idx < dp->ndent && produced + DENT_RECLEN <= len) {
+    while (idx < dp->ndent) {
         struct dent *de = &dp->dents[idx];
-        char *r = kbuf + produced;
-        u32 k;
-        for (k = 0; k < DENT_RECLEN; k++) {
-            r[k] = 0;
+        u32 nlen = 0;
+        u32 n;
+        u32 type = DT_CHR;
+        while (nlen < NAME_LEN && de->name[nlen]) nlen++;
+        if (!nlen || nlen == NAME_LEN || de->ino == 0 || de->ino >= MAX_INODES) {
+            opens[fh].off = idx;
+            return produced ? produced : (u64)(-1);
         }
-        put_u64(r, de->ino);
-        put_u64(r + 8, (u64)idx + 1);
-        r[16] = (char)(DENT_RECLEN & 0xFF);
-        r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
-        if (inodes[de->ino].type == INO_DIR) {
-            r[18] = (char)DT_DIR;
-        } else if (inodes[de->ino].type == INO_SYMLINK) {
-            r[18] = (char)DT_LNK;
-        } else if (inodes[de->ino].type == INO_FILE
-                   || inode_is_proc(inodes[de->ino].type)) {
-            r[18] = (char)DT_REG;
-        } else {
-            r[18] = (char)DT_CHR;     /* console/null/zero */
+        n = dirent_size(nlen);
+        if (n > len - produced) {
+            opens[fh].off = idx;
+            return produced ? produced : (u64)(-1);
         }
-        for (k = 0; k < NAME_LEN && de->name[k] != 0 && k < 29; k++) {
-            r[19 + k] = de->name[k];
+        if (inodes[de->ino].type == INO_DIR) type = DT_DIR;
+        else if (inodes[de->ino].type == INO_SYMLINK) type = DT_LNK;
+        else if (inodes[de->ino].type == INO_FILE || inode_is_proc(inodes[de->ino].type)) type = DT_REG;
+        if (!dirent_write(kbuf + produced, len - produced, de->ino,
+                          (u64)idx + 1, type, de->name, nlen)) {
+            opens[fh].off = idx;
+            return produced ? produced : (u64)(-1);
         }
-        produced += DENT_RECLEN;
+        produced += n;
         idx++;
     }
     /* After real /proc dents, emit live numeric pid directories. */
@@ -1696,34 +1683,29 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         u32 pids[PROC_PID_SLOTS];
         u32 np = sched_pid_list(pids, PROC_PID_SLOTS);
         u32 pidx = idx - dp->ndent;
-        while (pidx < np && produced + DENT_RECLEN <= len) {
-            char *r = kbuf + produced;
+        while (pidx < np) {
             char nm[12];
             u32 nlen = 0;
-            u32 k;
             u32 dino;
-            u32 pid = pids[pidx];
-            dino = proc_bind_pid(pid);
-            if (dino == 0) {
-                break;
+            u32 n;
+            u32_to_dec(pids[pidx], nm, &nlen);
+            n = dirent_size(nlen);
+            if (n > len - produced) {
+                opens[fh].off = idx;
+                return produced ? produced : (u64)(-1);
             }
-            u32_to_dec(pid, nm, &nlen);
-            for (k = 0; k < DENT_RECLEN; k++) {
-                r[k] = 0;
+            dino = proc_bind_pid(pids[pidx]);
+            if (!dino || !dirent_write(kbuf + produced, len - produced, dino,
+                                      (u64)idx + 1, DT_DIR, nm, nlen)) {
+                opens[fh].off = idx;
+                return produced ? produced : (u64)(-1);
             }
-            put_u64(r, dino);
-            put_u64(r + 8, (u64)idx + 1);
-            r[16] = (char)(DENT_RECLEN & 0xFF);
-            r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
-            r[18] = (char)DT_DIR;
-            for (k = 0; k < nlen && k < 29; k++) {
-                r[19 + k] = nm[k];
-            }
-            produced += DENT_RECLEN;
+            produced += n;
             idx++;
             pidx++;
         }
     }
+
     opens[fh].off = idx;
     return produced;
 }

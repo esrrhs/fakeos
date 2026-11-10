@@ -208,11 +208,16 @@ void vfs_selftest(void) {
     saw_dyn = 0;
     if (n <= sizeof(recs)) {
         u32 k;
-        for (k = 0; k + T_DENT_RECLEN <= (u32)n; k += T_DENT_RECLEN) {
+        u32 entry = 0;
+        u32 reclen;
+        for (k = 0; k < (u32)n; k += reclen) {
+            reclen = fs.dirent_record_size(recs + k, n - k);
+            if (!reclen) { vfs_expect(0, "valid bounded dirent record"); break; }
+            entry++;
             char *r = &recs[k];
             u64 dino = get_u64(r);
             u64 doff = get_u64(r + 8);
-            vfs_expect(dino != 0 && doff == (u64)(k / T_DENT_RECLEN + 1),
+            vfs_expect(dino != 0 && doff == (u64)entry,
                        "dirent ino nonzero and offsets sequential");
             if (rec_name_is(r, "etc")) {
                 saw_etc = 1;

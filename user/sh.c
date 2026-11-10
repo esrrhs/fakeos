@@ -44,6 +44,7 @@ extern long u_rmdir(const char *path);
 extern long u_stat(const char *path, void *statbuf);
 extern long u_lstat(const char *path, void *statbuf);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_getcwd(char *buf, unsigned long len);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_link(const char *oldpath, const char *newpath);
@@ -274,11 +275,10 @@ enum {
     SH_S_IRANY = 0x124,
     SH_S_IWANY = 0x92,
     SH_S_IXANY = 0x49,
-    SH_PATH_CAP = 128,
+    SH_PATH_CAP = 512,
     SH_DENT_BUF = 1920,
-    SH_DENT_REC = 48,
     SH_NAME_OFF = 19,
-    SH_NAME_LEN = 30,
+    SH_NAME_LEN = 256,
     SH_MAX_NAMES = 64,
     SH_CHMOD_DEPTH = 16
 };
@@ -485,6 +485,10 @@ static long eval_dbracket(char **argv) {
 
 static void sh_join_path(char *out, unsigned long cap, const char *dir,
                          const char *name) {
+    unsigned long dl = strlen(dir);
+    unsigned long nl = strlen(name);
+    unsigned long need = dl + nl + 1 + (dl && dir[dl - 1] != '/' ? 1 : 0);
+    if (need > cap) { if (cap) out[0] = 0; return; }
     unsigned long i = 0;
     unsigned long j = 0;
     if (cap < 2) {
@@ -625,8 +629,13 @@ static int sh_chmod_dir_rec(const char *path, unsigned int mode, int verbose,
     for (;;) {
         long off;
         n = u_getdents(fd, dent, sizeof(dent));
-        if (n <= 0) break;
-        for (off = 0; off + SH_DENT_REC <= n; off += SH_DENT_REC) {
+        if (n == -4) continue;
+        if (n < 0) { u_close(fd); return 1; }
+        if (n == 0) break;
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dent + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
             char name[SH_NAME_LEN];
             unsigned long k = 0;
             while (k + 1 < SH_NAME_LEN && dent[off + SH_NAME_OFF + k] != 0) {
@@ -649,7 +658,7 @@ static int sh_chmod_dir_rec(const char *path, unsigned int mode, int verbose,
 
     for (i = 0; i < nnames; i++) {
         sh_join_path(child, SH_PATH_CAP, path, names[i]);
-        if (child[0] == 0) continue;
+        if (child[0] == 0) { rc = 1; continue; }
         if (sh_chmod_path(child, mode, 1, verbose, depth + 1) != 0) rc = 1;
     }
     if (u_chmod(path, (long)mode) != 0) {
@@ -4289,7 +4298,9 @@ static long run_builtin(char **tokens, long rc_in, char *in_path, char *out_path
         }
         while (off + 1 < EVAL_BUF) {
             n = u_read(fd, filebuf + off, (unsigned long)(EVAL_BUF - 1 - off));
-            if (n <= 0) break;
+            if (n == -4) continue;
+            if (n < 0) { u_close(fd); return 1; }
+            if (n == 0) break;
             off += n;
         }
         u_close(fd);

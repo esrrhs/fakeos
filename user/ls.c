@@ -21,7 +21,9 @@ extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern unsigned long strlen(const char *s);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_newfstatat(long dfd, const char *path, void *statbuf, long flags);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern void printf(const char *fmt, ...);
@@ -52,7 +54,7 @@ enum {
     MAX_PATHS = 8,
     MAX_SUBDIRS = 32,
     MAX_RDEPTH = 8,
-    PATH_CAP = 96
+    PATH_CAP = 512
 };
 
 static unsigned int load_u32(const char *p) {
@@ -73,6 +75,11 @@ static unsigned long load_u64(const char *p) {
 
 static void join_dir_name(char *out, unsigned long cap, const char *dir,
                           const char *name) {
+    unsigned long dl = strlen(dir);
+    unsigned long nl = strlen(name);
+    unsigned long need = dl + nl + 1 + (dl && dir[dl - 1] != '/' ? 1 : 0);
+    if (dir[0] == '.' && dir[1] == 0) need = nl + 1;
+    if (need > cap) { if (cap) out[0] = 0; return; }
     unsigned long i = 0;
     unsigned long j = 0;
     if (cap < 2) {
@@ -307,7 +314,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                     int show_inode, int show_human, int print_header, int depth) {
     char buf[1920];
     char stbuf[ST_SIZE_BYTES];
-    char subnames[MAX_SUBDIRS][32];
+    char subnames[MAX_SUBDIRS][256];
     int nsub = 0;
     long fd;
     long n;
@@ -373,15 +380,18 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
     for (;;) {
         long off;
         n = u_getdents(fd, buf, sizeof(buf));
-        if (n <= 0) {
-            break;
-        }
-        for (off = 0; off + 48 <= n; off += 48) {
-            char name[32];
+        if (n == -4) continue;
+        if (n < 0) { u_close(fd); return 1; }
+        if (n == 0) break;
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(buf + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
+            char name[256];
             char full[PATH_CAP];
             unsigned long k = 0;
             int is_dir = 0;
-            while (k < 29 && buf[off + 19 + k] != 0) {
+            while (k < 255 && buf[off + 19 + k] != 0) {
                 name[k] = buf[off + 19 + k];
                 k++;
             }
@@ -400,6 +410,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                     is_dir = ((em & S_IFMT) == S_IFDIR);
                     if (longfmt) {
                         join_dir_name(full, sizeof(full), path, name);
+                        if (!full[0]) { rc = 1; continue; }
                         print_name_long(full, name, stbuf, show_inode, show_human);
                     } else if (classify) {
                         print_name_short(ino, show_inode, name,
@@ -424,9 +435,10 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
                 print_name_short(0, 0, name, 0);
                 if (buf[off + 18] == 4) is_dir = 1;
             }
+            if (recurse && is_dir && nsub >= MAX_SUBDIRS) { rc = 1; continue; }
             if (recurse && is_dir && nsub < MAX_SUBDIRS) {
                 unsigned long j = 0;
-                while (name[j] != 0 && j + 1 < 32) {
+                while (name[j] != 0 && j + 1 < 256) {
                     subnames[nsub][j] = name[j];
                     j++;
                 }
@@ -441,7 +453,7 @@ static int list_one(const char *path, int longfmt, int dir_as_file,
         for (si = 0; si < nsub; si++) {
             char child[PATH_CAP];
             join_dir_name(child, sizeof(child), path, subnames[si]);
-            if (child[0] == 0) continue;
+            if (child[0] == 0) { rc = 1; continue; }
             u_write(1, "\n", 1);
             if (list_one(child, longfmt, 0, show_all, almost_all, classify,
                          recurse, show_inode, show_human, 1, depth + 1) != 0) {

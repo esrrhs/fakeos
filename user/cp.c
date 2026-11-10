@@ -29,6 +29,7 @@ extern long u_readlink(const char *path, char *buf, unsigned long n);
 extern long u_symlink(const char *target, const char *path);
 extern long u_exit(long code);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
 extern char *strcpy(char *dst, const char *src);
@@ -47,11 +48,10 @@ enum {
     S_IFDIR = 0x4000,
     S_IFREG = 0x8000,
     S_IFLNK = 0xA000,
-    PATH_CAP = 128,
+    PATH_CAP = 512,
     DENT_BUF = 1920,
-    DENT_REC = 48,
     NAME_OFF = 19,
-    NAME_LEN = 30,
+    NAME_LEN = 256,
     MAX_NAMES = 64
 };
 
@@ -336,7 +336,10 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
             return 1;
         }
         if (n == 0) break;
-        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dent + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
             char name[NAME_LEN];
             unsigned long k = 0;
             while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
@@ -355,7 +358,10 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
             nnames++;
         }
     }
-    u_close(fd);
+    if (u_close(fd) < 0) {
+        printf("cp: directory close failed\n");
+        return 1;
+    }
 
     for (i = 0; i < nnames; i++) {
         if (join_dir_base(child_src, PATH_CAP, src, names[i]) < 0

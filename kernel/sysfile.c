@@ -19,10 +19,10 @@ typedef types.int32_t s32;
  * ------------------------------------------------------------------------- */
 
 enum {
-    PATH_KMAX  = 128,
-    CWD_LEN    = 128,
+    PATH_KMAX  = 512,
+    CWD_LEN    = 512,
     IO_CHUNK   = 4096,
-    DENT_CHUNK = 1920,             /* 40 x 48-byte dirent records */
+    DENT_CHUNK = 1920,             /* bounded variable-dirent staging buffer */
     FD_BAD     = 0xFFFFFFFF,
 
     O_RDONLY = 0,
@@ -199,12 +199,14 @@ u32 copy_user_cstring(char *dst, u64 uva, u32 maxlen) {
         return 0;
     }
     p = (volatile char *)uva;
-    while (i < maxlen) {
+    /* maxlen counts non-NUL bytes; dst has maxlen+1 capacity. */
+    for (;;) {
         char c = p[i];
         if (c == 0) {
             dst[i] = 0;
             return 1;
         }
+        if (i == maxlen) return 0; /* no terminator within the caller's cap */
         dst[i] = c;
         i++;
         if (((uva + i) & 0xFFF) == 0) {
@@ -213,7 +215,6 @@ u32 copy_user_cstring(char *dst, u64 uva, u32 maxlen) {
             }
         }
     }
-    return 0;                        /* no NUL within maxlen */
 }
 
 
@@ -804,7 +805,7 @@ u64 sys_getcwd(u64 ubuf, u64 len) {
     return ubuf;
 }
 
-/* getdents64: stream fixed 48-byte records from a directory descriptor.
+/* getdents64: stream complete variable-length records from a directory descriptor.
  * The fs layer owns the per-file enumeration offset. */
 u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
     u64 as = sched_current_as_h();
@@ -819,6 +820,11 @@ u64 sys_getdents64(u64 fd, u64 ubuf, u64 len) {
         return (u64)(-1);
     }
     if (fs.ext2_fh_is(fh) ? !fs.ext2_file_is_dir(fh) : !fs.fs_file_is_dir(fh)) {
+        return (u64)(-1);
+    }
+    /* Validate before enumeration advances its cookie. Faulting destinations
+     * must not silently consume entries; include overflow and empty buffers. */
+    if (len < 48 || ubuf + len < ubuf || !mem.as_user_range_ok(as, ubuf, len)) {
         return (u64)(-1);
     }
     while (done < len) {

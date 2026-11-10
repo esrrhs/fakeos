@@ -96,6 +96,7 @@ static const struct mod_entry modules[] = {
     { "mem",    "slab" },
     { "mem",    "as" },
     { "fs",     "ramfs" },
+    { "fs",     "dirent" },
     { "fs",     "ext2" },
     { "kernel",  "memtest" },
     { "kernel",  "sched" },

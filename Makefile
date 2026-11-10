@@ -131,6 +131,7 @@ OBJS := \
 	$(BUILD_DIR)/slab.o \
 	$(BUILD_DIR)/as.o \
 	$(BUILD_DIR)/ramfs.o \
+	$(BUILD_DIR)/dirent.o \
 	$(BUILD_DIR)/ext2.o \
 	$(BUILD_DIR)/memtest.o \
 	$(BUILD_DIR)/sched.o \
@@ -469,6 +470,11 @@ $(BUILD_DIR)/as.o: mem/as.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/ramfs.o: fs/ramfs.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/dirent.o: fs/dirent.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@

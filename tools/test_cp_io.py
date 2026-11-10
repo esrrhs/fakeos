@@ -13,11 +13,13 @@ static int truncates;
 static int closes;
 static int bad_write;
 static int write_calls;
+static int dir_reads;
 static int cwd_reads, cwd_changes, exits, links;
 static long fake_stat(const char *p,void *buf,int nofollow) {
  char *b=(char *)buf;int i;int ino=11;int dev=1;int mode=0x40;
  if(scenario<100)return -1;
- if(scenario>=115) {
+ if(scenario>=200) { if(strcmp(p,"/src")==0)ino=10;else if(strcmp(p,"/")==0)ino=1; }
+ else if(scenario>=115) {
   if(scenario==115 || scenario==116 || scenario==121 || scenario==122)return -1;
   mode=scenario==117?0x80:0xA0;
  } else if(strcmp(p,"/src")==0) {
@@ -69,7 +71,20 @@ long u_symlink(const char *t,const char *p) {
  if(strcmp(t,"..")!=0 || strcmp(p,"dst")!=0)bad_write=1;
  return scenario==121?-1:0;
 }
-long u_getdents(long fd,void *p,unsigned long n) { return -1; }
+long u_getdents(long fd,void *p,unsigned long n) {
+ char *b=(char *)p;int i;dir_reads++;
+ if(scenario<200 || scenario==200)return -1;
+ if(scenario==201)return dir_reads==1?-4:-1;
+ if(scenario==207 || scenario==208)return 0;
+ if(scenario==202 && dir_reads>1)return -1;
+ for(i=0;i<56;i++)b[i]=0;
+ b[16]=48; b[19]='c'; b[20]=0;
+ if(scenario==203)b[16]=0;
+ if(scenario==204)b[16]=56;
+ if(scenario==205)for(i=19;i<48;i++)b[i]='x';
+ if(scenario==206)b[16]=47;
+ return scenario==209?49:48;
+}
 long u_fstat(long fd,void *buf) {
  char *b=(char *)buf; int i;
  if(scenario==7 && fd==4) return -1;
@@ -78,7 +93,7 @@ long u_fstat(long fd,void *buf) {
  return 0;
 }
 long u_ftruncate(long fd,unsigned long n) { truncates++; return scenario==8 ? -1 : 0; }
-long u_close(long fd) { closes++; return scenario==9 && fd==4 ? -1 : 0; }
+long u_close(long fd) { closes++; return (scenario==9 && fd==4) || scenario==207 ? -1 : 0; }
 long u_read(long fd,void *buf,unsigned long n) {
  char *b=(char *)buf; int i; reads++;
  if(scenario==2)return -1;
@@ -99,7 +114,8 @@ long u_write(long fd,const void *buf,unsigned long n) {
  return (long)n;
 }
 int main(int argc,char **argv) {
- int i; int rc; int errors=0;
+ int i; int rc; int errors=0; char overlong[PATH_CAP + 8];
+ for(i=0;i<PATH_CAP+7;i++)overlong[i]='a'; overlong[0]='/';overlong[PATH_CAP+7]=0;
  for(i=1;i<=11;i++) {
   scenario=i; reads=0;written_total=0;truncates=0;closes=0;bad_write=0;write_calls=0;
   rc=copy_file("src","dst",0,1);
@@ -111,7 +127,7 @@ int main(int argc,char **argv) {
  /* Resolver failures must fail closed and restore the utility's cwd. */
  for(i=100;i<=114;i++) {
   scenario=i;cwd_reads=0;cwd_changes=0;exits=0;
-  rc=directory_target_safe("/src",i==113?"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/new":(i==114?"":"/outside/new"));
+  rc=directory_target_safe("/src",i==113?overlong:(i==114?"":"/outside/new"));
   if(rc!=((i==100 || i==110 || i==112)?1:0))errors++;
   if(i==107 && exits!=1)errors++;
   if(i!=107 && exits)errors++;
@@ -125,6 +141,13 @@ int main(int argc,char **argv) {
   if(rc!=((i==118 || i==120 || i==122)?0:1))errors++;
   if(links!=((i==121 || i==122)?1:0) || bad_write)errors++;
  }
+ for(i=200;i<=209;i++) {
+  scenario=i;cwd_reads=0;cwd_changes=0;closes=0;dir_reads=0;
+  rc=copy_dir_rec("/src","/dst",0,0);
+  if(rc!=(i==208?0:1) || closes!=1)errors++;
+  if(i==201 && dir_reads!=2)errors++;
+  if(i==202 && dir_reads!=2)errors++;
+ }
  return errors;
 }
 '''
@@ -134,11 +157,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix='fakeos-cp-unit-') as tmp:
         src = Path(tmp) / 'cp_unit.c'
         code = (ROOT / 'user/cp.c').read_text().replace('int main(int argc, char **argv)', 'int cp_main(int argc, char **argv)')
-        src.write_text(code + HARNESS)
+        decoder = (ROOT / 'user/libc.c').read_text().split('/* Validated getdents64 decoder:', 1)[1]
+        decoder = decoder[decoder.index('long u_dirent_reclen'):]
+        src.write_text(code + decoder + HARNESS)
         exe = Path(tmp) / 'cp_unit'
         subprocess.run([compiler, str(src), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
-    print('PASS: real cp: identity/I/O/EINTR/close errors; physical descendant/alias/cross-device resolution; fail-closed cwd restoration; link overwrite/create failures')
+    print('PASS: real cp: identity/I/O/EINTR/close errors; physical descendant/alias/cross-device resolution; fail-closed cwd restoration; link overwrite/create failures; ten directory read/record/close error scenarios')
 
 if __name__ == '__main__':
     main()

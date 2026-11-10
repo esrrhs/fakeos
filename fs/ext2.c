@@ -70,7 +70,6 @@ enum {
     SEEK_CUR        = 1,
     SEEK_END        = 2,
 
-    DENT_RECLEN     = 48,
 
     I_MODE          = 0,
     I_UID           = 2,
@@ -1391,6 +1390,7 @@ static void inode_clear_data_block(u8 *raw, u32 file_block) {
 }
 
 static u32 dir_find(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
+    if (!nlen || nlen > NAME_MAX) return 0;
     u32 size;
     u32 fblk;
     u32 mode;
@@ -1407,7 +1407,8 @@ static u32 dir_find(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
             u32 ino = rd32(blk_buf + pos);
             u16 reclen = rd16(blk_buf + pos + 4);
             u8 namelen = blk_buf[pos + 6];
-            if (reclen < 8 || pos + reclen > sb.block_size) break;
+            if (reclen < 8 || (reclen & 3) || pos + reclen > sb.block_size
+                || namelen > (u32)reclen - 8) return 0;
             if (ino != 0 && name_eq((const char *)(blk_buf + pos + 8),
                                     namelen, name, nlen)) {
                 *out_ino = ino;
@@ -1458,8 +1459,10 @@ static u32 dir_add(u32 dir_ino, const char *name, u32 nlen, u32 child, u8 ftype)
             u8 namelen = blk_buf[pos + 6];
             u16 real;
             u16 remain;
-            if (reclen < 8 || pos + reclen > sb.block_size) break;
+            if (reclen < 8 || (reclen & 3) || pos + reclen > sb.block_size
+                || namelen > (u32)reclen - 8) return 0;
             real = (u16)((8 + namelen + 3) & ~3u);
+            if (real > reclen) return 0;
             if (ino == 0 && reclen >= need) {
                 u32 k;
                 wr32(blk_buf + pos, child);
@@ -1488,20 +1491,16 @@ static u32 dir_add(u32 dir_ino, const char *name, u32 nlen, u32 child, u8 ftype)
             }
             pos += reclen;
         }
-        if (!new_block) {
-            /* This block was full; extend size so next iteration allocates. */
-            size = (fblk + 1) * sb.block_size;
-            wr32(ino_raw + I_SIZE_LO, size);
-            if (!inode_write(dir_ino, ino_raw)) return 0;
-        } else {
-            /* Fresh block should always have had space. */
-            return 0;
-        }
+        /* A full earlier block is NOT EOF. Never shrink size here: doing
+         * so misclassified an already populated later block as new and
+         * zeroed its existing entries. Only the true EOF branch grows it. */
+        if (new_block) return 0; /* A fresh block must fit a valid name. */
         fblk++;
     }
 }
 
 static u32 dir_remove(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
+    if (!nlen || nlen > NAME_MAX) return 0;
     u32 size;
     u32 fblk;
     if (!inode_read(dir_ino, ino_raw)) return 0;
@@ -1516,7 +1515,8 @@ static u32 dir_remove(u32 dir_ino, const char *name, u32 nlen, u32 *out_ino) {
             u32 ino = rd32(blk_buf + pos);
             u16 reclen = rd16(blk_buf + pos + 4);
             u8 namelen = blk_buf[pos + 6];
-            if (reclen < 8 || pos + reclen > sb.block_size) break;
+            if (reclen < 8 || (reclen & 3) || pos + reclen > sb.block_size
+                || namelen > (u32)reclen - 8) return 0;
             if (ino != 0 && name_eq((const char *)(blk_buf + pos + 8),
                                     namelen, name, nlen)) {
                 *out_ino = ino;
@@ -1580,6 +1580,7 @@ static u32 walk_rel_from_flags(u32 start_ino, const char *rel, u32 *is_dir,
         if (rel[i] == 0) break;
         n = 0;
         while (rel[i + n] != 0 && rel[i + n] != '/') n++;
+        if (n > NAME_MAX) return 0;
         j = i + n;
         while (rel[j] == '/') j++;
         is_last = (rel[j] == 0) ? 1 : 0;
@@ -1660,6 +1661,7 @@ static u32 walk_parent(const char *rel, char *last, u32 *last_n) {
             i++;
             n++;
         }
+        if (!n || n > NAME_MAX) return 0; /* before copying into last[256] */
         saw = 1;
         if (rel[i] == 0) {
             /* final component */
@@ -2582,80 +2584,67 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
     return done;
 }
 
+extern u32 dirent_size(u32 nlen);
+extern u32 dirent_write(char *out, u64 room, u64 ino, u64 next, u32 type,
+                        const char *name, u32 nlen);
+
+/* Cookies count entries, never bytes: variable records must not make a short
+ * buffer skip or repeat the pending entry. Corruption/I/O is not EOF. */
 u64 ext2_getdents(u32 fh, char *kbuf, u64 len) {
     u32 s;
     u8 raw[128];
     u32 size;
     u32 fblk;
     u64 produced = 0;
+    u64 emitted = 0;
     u64 skip;
-    if (!ext2_fh_is(fh)) return (u64)(-1);
+    u32 error = 0;
+    if (!ext2_fh_is(fh) || !kbuf || len < 48) return (u64)(-1);
     s = fh_slot(fh);
     if (s >= MAX_OPEN || !opens[s].used) return (u64)(-1);
     if ((opens[s].mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return (u64)(-1);
     if (!inode_read(opens[s].ino, raw)) return (u64)(-1);
     size = rd32(raw + I_SIZE_LO);
     skip = opens[s].off;
-
-    for (fblk = 0; fblk * sb.block_size < size; fblk++) {
+    for (fblk = 0; (u64)fblk * sb.block_size < size && !error; fblk++) {
         u32 phys = inode_get_block(raw, fblk);
         u32 pos = 0;
-        if (phys == 0) continue;
-        if (!bread(phys, blk_buf)) return (u64)(-1);
-        while (pos + 8 <= sb.block_size) {
-            u32 ino = rd32(blk_buf + pos);
-            u16 reclen = rd16(blk_buf + pos + 4);
-            u8 namelen = blk_buf[pos + 6];
-            u8 ftype = blk_buf[pos + 7];
-            if (reclen < 8 || pos + reclen > sb.block_size) break;
-            if (ino != 0) {
-                if (skip > 0) {
-                    skip--;
-                } else {
-                    u32 k;
-                    if (produced + DENT_RECLEN > len) {
-                        opens[s].off += produced / DENT_RECLEN;
-                        return produced;
+        if (!phys || !bread(phys, blk_buf)) { error = 1; break; }
+        while (pos < sb.block_size) {
+            u32 ino;
+            u16 reclen;
+            u32 namelen;
+            u32 ftype;
+            if (pos + 8 > sb.block_size) { error = 1; break; }
+            ino = rd32(blk_buf + pos);
+            reclen = rd16(blk_buf + pos + 4);
+            namelen = blk_buf[pos + 6];
+            ftype = blk_buf[pos + 7];
+            if (reclen < 8 || (reclen & 3) || pos + reclen > sb.block_size
+                || (u64)fblk * sb.block_size + pos + reclen > size
+                || namelen > (u32)reclen - 8 || ino > sb.inodes_count) {
+                error = 1; break;
+            }
+            if (ino) {
+                if (skip) skip--;
+                else {
+                    u32 n = dirent_size(namelen);
+                    u32 type = ftype == EXT2_FT_DIR ? 4 : (ftype == EXT2_FT_SYMLINK ? 10 : 8);
+                    if (!n || n > len - produced) { error = 1; break; }
+                    if (!dirent_write(kbuf + produced, len - produced, ino,
+                                      opens[s].off + emitted + 1, type,
+                                      (const char *)blk_buf + pos + 8, namelen)) {
+                        error = 1; break;
                     }
-                    /* Match Ramfs getdents64 layout used by /bin/ls:
-                     * ino:u64@0, off:u64@8, reclen:u16@16=48, type:u8@18,
-                     * name@19 (29 bytes NUL-padded). */
-                    {
-                        u32 t;
-                        for (k = 0; k < DENT_RECLEN; k++) {
-                            kbuf[produced + k] = 0;
-                        }
-                        /* d_ino little-endian u64 */
-                        kbuf[produced + 0] = (char)(ino & 0xFF);
-                        kbuf[produced + 1] = (char)((ino >> 8) & 0xFF);
-                        kbuf[produced + 2] = (char)((ino >> 16) & 0xFF);
-                        kbuf[produced + 3] = (char)((ino >> 24) & 0xFF);
-                        /* d_off = next index (cookie); approximate with produced */
-                        t = (u32)(opens[s].off + produced / DENT_RECLEN + 1);
-                        kbuf[produced + 8] = (char)(t & 0xFF);
-                        kbuf[produced + 9] = (char)((t >> 8) & 0xFF);
-                        kbuf[produced + 10] = (char)((t >> 16) & 0xFF);
-                        kbuf[produced + 11] = (char)((t >> 24) & 0xFF);
-                        kbuf[produced + 16] = (char)(DENT_RECLEN & 0xFF);
-                        kbuf[produced + 17] = (char)((DENT_RECLEN >> 8) & 0xFF);
-                        if (ftype == EXT2_FT_DIR) {
-                            kbuf[produced + 18] = (char)4;
-                        } else if (ftype == EXT2_FT_SYMLINK) {
-                            kbuf[produced + 18] = (char)10;
-                        } else {
-                            kbuf[produced + 18] = (char)8;
-                        }
-                        for (k = 0; k < namelen && k < 29; k++) {
-                            kbuf[produced + 19 + k] = (char)blk_buf[pos + 8 + k];
-                        }
-                    }
-                    produced += DENT_RECLEN;
+                    produced += n;
+                    emitted++;
                 }
             }
             pos += reclen;
         }
     }
-    opens[s].off += produced / DENT_RECLEN;
+    opens[s].off += emitted;
+    if (error && !produced) return (u64)(-1);
     return produced;
 }
 

@@ -249,7 +249,8 @@ static long vformat(char *buf, const char *fmt, va_list ap) {
 }
 
 void printf(const char *fmt, ...) {
-    char buf[512];
+    /* Two maximum511-byte utility paths plus labels/numbers fit together. */
+    char buf[2048];
     va_list ap;
     long n;
     va_start(ap, fmt);
@@ -1385,4 +1386,18 @@ int pthread_detach(pthread_t thread) {
     }
     /* Live or already DEAD: join disabled; create reclaims DEAD stacks. */
     return 0;
+}
+
+/* Validated getdents64 decoder: record length or -1, never a truncated name. */
+long u_dirent_reclen(const char *p, unsigned long avail) {
+    unsigned long n;
+    unsigned long i;
+    if (!p || avail < 24) return -1;
+    n = (unsigned long)(unsigned char)p[16] | ((unsigned long)(unsigned char)p[17] << 8);
+    if (n < 24 || (n & 7) || n > avail) return -1;
+    for (i = 19; i < n && i < 275; i++) {
+        if (!p[i]) return i > 19 ? (long)n : -1;
+        if (p[i] == '/') return -1;
+    }
+    return -1;
 }

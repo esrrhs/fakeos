@@ -12,7 +12,9 @@ package user;
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern unsigned long strlen(const char *s);
 extern long u_getdents(long fd, void *buf, unsigned long n);
+extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern long u_lstat(const char *path, void *statbuf);
 extern long u_chmod(const char *path, long mode);
 extern int strcmp(const char *a, const char *b);
@@ -26,11 +28,10 @@ enum {
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
     MODE_BITS = 0xFFF, /* 07777 */
-    PATH_CAP = 128,
+    PATH_CAP = 512,
     DENT_BUF = 1920,
-    DENT_REC = 48,
     NAME_OFF = 19,
-    NAME_LEN = 30,
+    NAME_LEN = 256,
     MAX_NAMES = 64,
     MAX_DEPTH = 16
 };
@@ -48,6 +49,10 @@ static int is_dir_mode(unsigned int mode) {
 
 static void join_path(char *out, unsigned long cap, const char *dir,
                       const char *name) {
+    unsigned long dl = strlen(dir);
+    unsigned long nl = strlen(name);
+    unsigned long need = dl + nl + 1 + (dl && dir[dl - 1] != '/' ? 1 : 0);
+    if (need > cap) { if (cap) out[0] = 0; return; }
     unsigned long i = 0;
     unsigned long j = 0;
     if (cap < 2) {
@@ -113,8 +118,13 @@ static int chmod_dir_rec(const char *path, unsigned int mode, int verbose,
     for (;;) {
         long off;
         n = u_getdents(fd, dent, sizeof(dent));
-        if (n <= 0) break;
-        for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
+        if (n == -4) continue;
+        if (n < 0) { u_close(fd); return 1; }
+        if (n == 0) break;
+        long reclen;
+        for (off = 0; off < n; off += reclen) {
+            reclen = u_dirent_reclen(dent + off, n - off);
+            if (reclen < 0) { u_close(fd); return 1; }
             char name[NAME_LEN];
             unsigned long k = 0;
             while (k + 1 < NAME_LEN && dent[off + NAME_OFF + k] != 0) {
@@ -137,7 +147,7 @@ static int chmod_dir_rec(const char *path, unsigned int mode, int verbose,
 
     for (i = 0; i < nnames; i++) {
         join_path(child, PATH_CAP, path, names[i]);
-        if (child[0] == 0) continue;
+        if (child[0] == 0) { rc = 1; continue; }
         if (chmod_path(child, mode, 1, verbose, depth + 1) != 0) rc = 1;
     }
     if (u_chmod(path, (long)mode) != 0) {

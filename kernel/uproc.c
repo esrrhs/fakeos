@@ -55,7 +55,7 @@ enum {
     EXEC_MAX_ARGC    = 8,
     EXEC_MAX_ENVC    = 8,               /* envp cap (same slot size)  */
     EXEC_ARG_SLOT    = 128,             /* fixed per-arg/env kernel slot */
-    EXEC_PATH_MAX    = 128,
+    EXEC_PATH_MAX    = 512,
     EXEC_INO_FILE    = 1                /* fs INO_FILE (enum not exported) */
 };
 
