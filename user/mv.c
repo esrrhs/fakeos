@@ -17,9 +17,17 @@ extern long u_read(long fd, void *buf, unsigned long n);
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern long u_unlink(const char *path);
 extern long u_rename(const char *oldpath, const char *newpath);
+extern long u_getcwd(char *buf, unsigned long size);
+extern long u_chdir(const char *path);
+extern void u_exit(long code);
+extern long u_lstat(const char *path, void *statbuf);
+extern long u_readlink(const char *path, char *buf, unsigned long size);
+extern long u_symlink(const char *target, const char *path);
 extern long u_stat(const char *path, void *statbuf);
 extern long u_mkdir(const char *path);
 extern long u_rmdir(const char *path);
+extern long u_fstat(long fd, void *statbuf);
+extern long u_ftruncate(long fd, unsigned long size);
 extern long u_getdents(long fd, void *buf, unsigned long n);
 extern long u_dirent_reclen(const char *p, unsigned long avail);
 extern unsigned long strlen(const char *s);
@@ -36,6 +44,8 @@ enum {
     ST_SIZE_BYTES = 144,
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
+    S_IFREG = 0x8000,
+    S_IFLNK = 0xA000,
     PATH_CAP = 512,
     DENT_BUF = 1920,
     NAME_OFF = 19,
@@ -60,7 +70,7 @@ static int is_dir(const char *path) {
 
 static int path_exists(const char *path) {
     char st[ST_SIZE_BYTES];
-    return u_stat(path, st) == 0;
+    return u_lstat(path, st) == 0;
 }
 
 static const char *basename_of(const char *path) {
@@ -104,33 +114,144 @@ static int is_under(const char *ancestor, const char *child) {
     return child[al] == '/';
 }
 
+/* Compare OPEN descriptor identities before any destination truncation. */
+static int same_identity(const char *a, const char *b) {
+    int i;
+    for (i = 0; i < 16; i++) if (a[i] != b[i]) return 0; /* st_dev + st_ino */
+    return 1;
+}
+
+/* Resolve the existing destination (or its parent) through physical cwd,
+ * then compare every ancestor's identity, including /mnt versus /home aliases.
+ * This is a single-threaded utility; always restore cwd before returning.
+ * Refuse unresolved/oversize paths instead of making a guessed-safe copy. */
+static int directory_target_safe(const char *src, const char *dst) {
+    char source[ST_SIZE_BYTES];
+    char st[ST_SIZE_BYTES];
+    char parent[PATH_CAP];
+    char oldcwd[PATH_CAP];
+    char physical[PATH_CAP];
+    unsigned long n = strlen(dst);
+    unsigned long i;
+    long got;
+    if (n == 0 || n >= PATH_CAP || u_stat(src, source) < 0) return 0;
+    strcpy(parent, dst);
+    if (!is_dir(dst)) {
+        while (n > 1 && parent[n - 1] == '/') parent[--n] = 0;
+        while (n > 0 && parent[n - 1] != '/') n--;
+        if (n == 0) strcpy(parent, ".");
+        else if (n == 1) parent[1] = 0;
+        else parent[n - 1] = 0;
+    }
+    if (u_getcwd(oldcwd, sizeof(oldcwd)) < 0 || u_chdir(parent) < 0) return 0;
+    got = u_getcwd(physical, sizeof(physical));
+    if (u_chdir(oldcwd) < 0) {
+        /* Continuing a multi-source copy with the wrong cwd risks data loss. */
+        printf("mv: cannot restore working directory\n");
+        u_exit(1);
+        return 0;
+    }
+    if (got < 0 || physical[0] != '/') return 0;
+    /* getcwd is physical; a symlink here indicates failed kernel resolution.
+     * Fail closed rather than following a lexical fallback into our source. */
+    for (i = 1; physical[i] != 0; i++) {
+        if (physical[i] == '/') {
+            physical[i] = 0;
+            got = u_lstat(physical, st);
+            physical[i] = '/';
+            if (got < 0 || (load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) return 0;
+        }
+    }
+    if (u_lstat(physical, st) < 0
+        || (load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) return 0;
+    for (;;) {
+        if (u_stat(physical, st) < 0 || same_identity(source, st)) return 0;
+        n = strlen(physical);
+        if (n == 1 && physical[0] == '/') break;
+        while (n > 1 && physical[n - 1] != '/') n--;
+        if (n <= 1) physical[1] = 0;
+        else physical[n - 1] = 0;
+    }
+    return 1;
+}
+
+
 static int copy_file(const char *src, const char *dst) {
     char buf[1024];
+    char src_st[ST_SIZE_BYTES];
+    char dst_st[ST_SIZE_BYTES];
     long in;
     long out;
     long n;
+    int rc = 0;
 
     in = u_open(src, O_RDONLY, 0);
     if (in < 0) {
         printf("mv: %s: cannot open\n", src);
         return 1;
     }
-    out = u_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (u_fstat(in, src_st) < 0
+        || (load_u32(src_st + ST_MODE) & S_IFMT) != S_IFREG) {
+        printf("mv: %s: cannot copy regular file\n", src);
+        u_close(in);
+        return 1;
+    }
+    /* Rename may fail without EXDEV. Never truncate a same-inode alias, and
+     * never unlink a source after copying to an unsupported special device. */
+    out = u_open(dst, O_WRONLY | O_CREAT, 0x1A4);
     if (out < 0) {
         printf("mv: %s: cannot create\n", dst);
         u_close(in);
         return 1;
     }
-    while ((n = u_read(in, buf, 1024)) > 0) {
-        if (u_write(out, buf, (unsigned long)n) != n) {
-            printf("mv: write error\n");
-            u_close(in);
-            u_close(out);
-            return 1;
+    if (u_fstat(out, dst_st) < 0
+        || (load_u32(dst_st + ST_MODE) & S_IFMT) != S_IFREG) {
+        printf("mv: %s: cannot copy regular file\n", dst);
+        rc = 1;
+    } else if (same_identity(src_st, dst_st)) {
+        printf("mv: %s and %s are the same file\n", src, dst);
+        rc = 1;
+    } else if (u_ftruncate(out, 0) < 0) {
+        printf("mv: %s: cannot truncate\n", dst);
+        rc = 1;
+    }
+    while (rc == 0) {
+        long off = 0;
+        n = u_read(in, buf, sizeof(buf));
+        if (n == -4) continue; /* EINTR is not EOF. */
+        if (n < 0) { printf("mv: %s: read failed\n", src); rc = 1; break; }
+        if (n == 0) break;
+        while (off < n) {
+            long written = u_write(out, buf + off, (unsigned long)(n - off));
+            if (written == -4) continue;
+            if (written <= 0 || written > n - off) {
+                printf("mv: %s: write failed\n", dst);
+                rc = 1;
+                break;
+            }
+            off += written;
         }
     }
-    u_close(in);
-    u_close(out);
+    /* copy_unlink / move_one may remove the source ONLY after every read,
+     * write and both closes succeeded. Partial destinations can remain. */
+    if (u_close(in) < 0) rc = 1;
+    if (u_close(out) < 0) rc = 1;
+    return rc;
+}
+
+/* Cross-FS traversal copies links themselves, never their outside targets.
+ * Existing entries are refused conservatively; no-clobber skips them earlier. */
+static int copy_link(const char *src, const char *dst) {
+    char target[PATH_CAP];
+    char st[ST_SIZE_BYTES];
+    long n = u_readlink(src, target, PATH_CAP - 1);
+    if (n <= 0 || n >= PATH_CAP - 1) return 1;
+    target[n] = 0;
+    if (u_lstat(dst, st) == 0) {
+        printf("mv: %s: refusing to replace existing entry with symbolic link\n", dst);
+        return 1;
+    }
+    if (u_symlink(target, dst) < 0) return 1;
     return 0;
 }
 
@@ -192,7 +313,7 @@ static int copy_dir_rec(const char *src, const char *dst) {
             nnames++;
         }
     }
-    u_close(fd);
+    if (u_close(fd) < 0) return 1;
 
     for (i = 0; i < nnames; i++) {
         if (join_dir_base(child_src, PATH_CAP, src, names[i]) < 0
@@ -207,9 +328,12 @@ static int copy_dir_rec(const char *src, const char *dst) {
 }
 
 static int copy_path(const char *src, const char *dst) {
-    if (is_dir(src)) {
-        return copy_dir_rec(src, dst);
-    }
+    char st[ST_SIZE_BYTES];
+    unsigned int mode;
+    if (u_lstat(src, st) < 0) return 1;
+    mode = load_u32(st + ST_MODE) & S_IFMT;
+    if (mode == S_IFLNK) return copy_link(src, dst);
+    if (mode == S_IFDIR) return copy_dir_rec(src, dst);
     return copy_file(src, dst);
 }
 
@@ -257,7 +381,7 @@ static int rm_dir_rec(const char *path) {
             nnames++;
         }
     }
-    u_close(fd);
+    if (u_close(fd) < 0) return 1;
 
     for (i = 0; i < nnames; i++) {
         if (join_dir_base(child, PATH_CAP, path, names[i]) < 0) {
@@ -275,7 +399,9 @@ static int rm_dir_rec(const char *path) {
 }
 
 static int rm_path(const char *path) {
-    if (is_dir(path)) {
+    char st[ST_SIZE_BYTES];
+    if (u_lstat(path, st) < 0) return 1;
+    if ((load_u32(st + ST_MODE) & S_IFMT) == S_IFDIR) {
         return rm_dir_rec(path);
     }
     if (u_unlink(path) != 0) {
@@ -300,6 +426,10 @@ static void announce(const char *src, const char *dst) {
 
 static int move_one(const char *src, const char *dst, int noclobber, int verbose) {
     int rc;
+    char source_st[ST_SIZE_BYTES];
+    unsigned int source_type;
+    if (u_lstat(src, source_st) < 0) return 1;
+    source_type = load_u32(source_st + ST_MODE) & S_IFMT;
     if (is_under(src, dst)) {
         printf("mv: %s: cannot move a directory into itself\n", src);
         return 1;
@@ -307,12 +437,31 @@ static int move_one(const char *src, const char *dst, int noclobber, int verbose
     if (noclobber && path_exists(dst)) {
         return 0;
     }
+    /* Guard even the rename path: aliases hide descendants from lexical
+     * checks, and a failed rename must not become a recursive self-copy. */
+    if (source_type == S_IFDIR && !directory_target_safe(src, dst)) {
+        printf("mv: %s: cannot move a directory into itself\n", src);
+        return 1;
+    }
     if (u_rename(src, dst) == 0) {
         if (verbose) announce(src, dst);
         return 0;
     }
     /* EXDEV / unsupported: copy-tree then remove source. */
-    if (is_dir(src)) {
+    if (source_type == S_IFLNK) {
+        if (copy_link(src, dst) != 0) return 1;
+        rc = rm_path(src); /* lstat: unlink only this link, never its target */
+        if (rc == 0 && verbose) announce(src, dst);
+        return rc;
+    }
+    if (source_type == S_IFDIR) {
+        char dest_st[ST_SIZE_BYTES];
+        /* A failed rename must not silently merge/overwrite an existing tree.
+         * Cross-FS empty targets are also refused conservatively. */
+        if (u_lstat(dst, dest_st) == 0) {
+            printf("mv: %s: refusing directory merge after failed rename\n", dst);
+            return 1;
+        }
         if (copy_path(src, dst) != 0) return 1;
         rc = rm_path(src);
         if (rc == 0 && verbose) announce(src, dst);

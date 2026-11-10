@@ -352,14 +352,61 @@ multi-block, cross-FS fixture-oracle and exact-path failures were corrected,
 not relabeled passing. This is bounded workflow evidence, not daily-driver,
 security-hardening, power-loss or historical full in-OS kbuild certification.
 
+### Cross-filesystem move data-safety acceptance
+
+The next real probe exposed silent data loss: after a2292-byte Ext2 source
+hit a real second-block I/O error, mv returned0, unlinked the source and left
+only1024 bytes at the destination. The follow-up requires successful file
+reads, all short writes and both closes before source removal; EINTR is retried.
+Open descriptor device/inode comparison precedes destination truncation;
+unsupported special-file fallback is refused. Directory-close errors propagate.
+
+A second disposable-guest probe moved a directory symlink: mv returned1 but
+removed the outside target's file. Recursive copy/removal now classifies source
+entries with lstat and copies symbolic link text, never following it into an
+outside directory. Existing entries for a copied link are conservatively
+refused; -n also recognizes dangling destinations. Native44-case coverage and
+three-boot SMP1/2 acceptance cover failure retention, restoring original block
+pointers offline to verify full-byte recovery, ordinary moves both directions,
+root/file/directory/ancestor/dangling/cyclic links and retained outside canaries.
+An additional alias probe grew a `dup/sub/dup/...` tree after the kernel
+rejected a descendant rename. Directory moves now compare physical destination
+ancestors by device/inode before rename, restoring cwd on every resolver path.
+A failed rename cannot trigger a merge into an existing target tree (even an
+empty cross-FS target is conservatively refused). Source and destination data
+are checked separately after rejection; same-inode file aliases retain bytes.
+
+The first expanded link matrix genuinely failed a dereference check: existing
+VFS dispatch cannot follow an absolute Ramfs symlink into Ext2, although its
+stored link text is correct. Acceptance now explicitly records that current
+error, verifies outside bytes directly, and also requires working same-filesystem
+relative/local link dereference and the reverse destination-local case. No
+cross-mount symlink usability is inferred from lossless link copying. This
+remaining VFS gap needs its own correction, not a broad resolver rewrite hidden
+inside mv.
+
+On2026-11-11 (Asia/Shanghai), the final uninstrumented image SHA256
+`2ff66071c49ea7c3a88543301dac86f180fb1e36588c1bc40d0de4810842b694`
+passed all24 audited boots: the previous18-boot matrix plus three move
+retention/repair/recovery boots on each of SMP1 and SMP2. All24 UARTs retained
+all seven process checks, original nested fairness and allocator canaries;
+all13 SMP2 boots sampled AP CPUs1/1/1/1. Linked deadline
+`0xffffffff83a74000` is16KiB aligned. The clean released-dfb1c7b deny-tools
+build, compiler provenance/fixed point and ELF64/flat assembly checks passed.
+No scheduler algorithm, timing window or tolerance changed in this increment.
+The earlier failed cross-mount dereference check remains a documented existing
+VFS limitation, explicitly tested as such, not a claimed successful dereference.
+
+These moves are not atomic against concurrent pathname or source-content changes; failed copies may leave partial destinations. A copy
+failure prevents source removal; a later recursive cleanup failure can leave
+a partially removed source alongside the already complete destination. There
+is no all-or-nothing cross-filesystem move/rollback guarantee.
+
 ## Next concrete gaps
 
-1. Cross-filesystem mv safety: an isolated native probe of the actual
-   copy_file+copy_unlink core returned success and unlinked the source after
-   a partial read followed by an injected I/O error. Reproduce in a disposable
-   guest and correct file read/close handling next; passing ordinary moves
-   does not certify failure safety. Atomic copy replacement/metadata remain
-   incomplete.
+1. Cross-mount symlink dereference remains broken; atomic replacement/metadata
+   and rollback remain incomplete. Move acceptance is not a full VFS or backup
+   certification. Correct global resolution must preserve no-follow/create rules.
 2. Script launching: shell ignores script argv and execve has no shebang
    handling; only source/. is tested. Exec has eight argv slots and127-byte
    arguments; lossless enumeration does not remove those operand limits.
