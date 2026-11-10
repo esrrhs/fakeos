@@ -15,6 +15,19 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from test_qemu import VM
 
 
+def wait_job_pid(wait):
+    """Consume a complete job notice, including a UART-split CR/LF pair."""
+    notice = wait('[1] ', 20)
+    if not re.search(r'\[1\] \d+\r?\n', notice):
+        # The previous read may already end in CR. Waiting for a fresh CRLF
+        # would skip its LF and block until an unrelated later output line
+        # (for sleep, until it exits), invalidating the live-process snapshot.
+        notice += wait('\n', 20)
+    match = re.search(r'\[1\] (\d+)\r?\n', notice)
+    assert match, 'background job did not print [1] pid: ' + notice
+    return match.group(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smp', type=int, default=1)
@@ -76,14 +89,7 @@ def main():
         assert 'free: MemFree exceeds' not in out
 
         vm.send('/bin/sleep 20 &')
-        job = wait('[1] ', 20)
-        # UART reads can end immediately after the prefix or within the PID.
-        # Consume the complete notification line before parsing its digits.
-        if not re.search(r'\[1\] \d+\r?\n', job):
-            job += wait('\r\n', 20)
-        m = re.search(r'\[1\] (\d+)\r?\n', job)
-        assert m, 'background sleep did not print [1] pid: ' + job
-        job_pid = m.group(1)
+        job_pid = wait_job_pid(wait)
         transcript += vm.read_available(1)
 
         out = command('ps; echo PS_BG_END', 'PS_BG_END')
@@ -108,17 +114,13 @@ def main():
         # More than MAX_THREADS worth of launches catches leaked DEAD slots.
         for i in range(20):
             vm.send('/bin/true &')
-            job = wait('[1] ', 20)
-            if not re.search(r'\[1\] \d+\r?\n', job):
-                job += wait('\r\n', 20)
-            jm = re.search(r'\[1\] (\d+)\r?\n', job)
-            assert jm, job
+            churn_pid = wait_job_pid(wait)
             marker = 'CHURN_' + str(i) + '_END'
             command('ps; wait; echo ' + marker, marker)
             marker = 'REAP_' + str(i) + '_END'
             out = command('ps; echo ' + marker, marker)
             assert not re.search(r'(?m)^\d+\t\d+\tZ\t', out), out
-            assert not re.search(r'(?m)^' + jm.group(1) + r'\t', out), out
+            assert not re.search(r'(?m)^' + churn_pid + r'\t', out), out
         failures = [line for line in transcript.splitlines()
                     if '[FAIL]' in line or '[FATAL]' in line]
         assert not failures, failures

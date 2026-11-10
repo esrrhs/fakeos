@@ -83,6 +83,53 @@ def main():
             run('/bin/cp ' + base + '/missing ' + base + '/file', 1)
             run('/bin/cp ' + base + '/file ' + base + '/no-dir/target', 1)
             run('cmp /tmp/expected ' + base + '/file')
+        # Before the recursive fix, an alias into a source child created
+        # dup/sub/dup/... until path limits; links to ancestors were followed.
+        for base in ('/tmp/copy', '/home/copy'):
+            src = base + '/tree-src'
+            run('mkdir -p ' + src + '/sub')
+            run('/bin/cp /tmp/expected ' + src + '/note')
+            run('ln -s ' + src + '/sub ' + base + '/dir-alias')
+            run('/bin/cp -r ' + src + ' ' + base + '/dir-alias/dup', 1)
+            run('test ! -e ' + src + '/sub/dup')
+            run('cmp /tmp/expected ' + src + '/note')
+            run('/bin/cp -r ' + src + ' ' + src + '/./sub/dup', 1)
+            run('test ! -e ' + src + '/sub/dup')
+            if base.startswith('/home/'):
+                run('/bin/cp -r /mnt/copy/tree-src /home/copy/tree-src/sub/dup', 1)
+                run('test ! -e ' + src + '/sub/dup')
+            run('ln -s ' + src + ' ' + src + '/back')
+            run('ln -s absent ' + src + '/dangling')
+            run('ln -s cycle-b ' + src + '/cycle-a')
+            run('ln -s cycle-a ' + src + '/cycle-b')
+            run('mkdir ' + base + '/out')
+            run('/bin/cp -r ' + src + ' ' + base + '/out')
+            dest = base + '/out/tree-src'
+            run('cmp /tmp/expected ' + dest + '/note')
+            for name, target in (('back', src), ('dangling', 'absent'),
+                                 ('cycle-a', 'cycle-b'), ('cycle-b', 'cycle-a')):
+                run('test -L ' + dest + '/' + name)
+                out = run('readlink ' + dest + '/' + name)
+                assert re.search(r'(?m)^' + re.escape(target) + r'\r?$', out), out
+            run('test ! -e ' + dest + '/back/back/back/copied-garbage')
+            # Repeated tree copies are safe/idempotent for unchanged links.
+            run('/bin/cp -r ' + src + ' ' + base + '/out')
+            run('rm ' + dest + '/back')
+            run('/bin/cp /tmp/expected ' + dest + '/back')
+            run('/bin/cp -r ' + src + ' ' + base + '/out', 1)
+            run('cmp /tmp/expected ' + dest + '/back')
+            # Cleaning a copied tree must not follow back-links into source.
+            run('/bin/rm -r ' + base + '/out')
+            run('test ! -e ' + base + '/out')
+            run('cmp /tmp/expected ' + src + '/note')
+            run('mkdir ' + base + '/outside')
+            run('/bin/cp /tmp/expected ' + base + '/outside/saved')
+            run('mkdir ' + base + '/doomed')
+            run('ln -s ' + base + '/outside ' + base + '/doomed/ref')
+            run('ln -s absent ' + base + '/doomed/dangling')
+            run('/bin/rm -r ' + base + '/doomed')
+            run('test ! -e ' + base + '/doomed')
+            run('cmp /tmp/expected ' + base + '/outside/saved')
         for path, dev in (('/tmp/copy/file', 1), ('/home/copy/file', 2)):
             out = run("/bin/stat -c '%d' " + path)
             assert re.search(r'(?m)^' + str(dev) + r'\r?$', out), out
@@ -93,7 +140,7 @@ def main():
         run('/bin/cp /tmp/from-disk /home/copy/from-ram')
         run('cmp /tmp/expected /home/copy/from-ram')
         # Genuine write error on an isolated disk, not a stubbed success path.
-        # Ramfs contiguous growth currently fails above ~2 MiB. Keep the
+        # Ramfs cannot satisfy every declared-size contiguous growth. Keep the
         # source below that independent limit; two successful filler copies
         # leave insufficient space for the third. The tested failure must be
         # the destination's real ENOSPC, never a failed source setup.
@@ -113,7 +160,7 @@ def main():
         run('cmp /tmp/expected /home/copy/file')
         run('sync')
         assert not [s for s in transcript.splitlines() if '[FAIL]' in s or '[FATAL]' in s]
-        print('PASS: same-file/hardlink/symlink aliases, no-clobber, overwrite, cross-FS, ENOSPC + recovery; smp=' + str(args.smp), flush=True)
+        print('PASS: same-file/hardlink/symlink aliases, no-clobber, overwrite, cross-FS, recursive aliases/cycles, ENOSPC + recovery; smp=' + str(args.smp), flush=True)
     finally:
         (work / 'guest.log').write_text(transcript, errors='surrogateescape')
         vm.close()

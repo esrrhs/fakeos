@@ -1,5 +1,6 @@
 /* fakeos userland - rm: unlink files; -r/-R recursive; -f ignore missing;
  * -v announce each removed path (GNU).
+ * Symlinks (including directory/dangling links) are unlinked, never followed.
  * Glued -rfv/-frv/-rv etc. accepted. Directories still need -r even with -f.
  */
 package user;
@@ -9,7 +10,7 @@ extern long u_rmdir(const char *path);
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
 extern long u_getdents(long fd, void *buf, unsigned long n);
-extern long u_stat(const char *path, void *statbuf);
+extern long u_lstat(const char *path, void *statbuf);
 extern long u_write(long fd, const void *buf, unsigned long n);
 extern int strcmp(const char *a, const char *b);
 extern unsigned long strlen(const char *s);
@@ -42,30 +43,24 @@ static unsigned int load_u32(const char *p) {
 static int is_dir(const char *path) {
     char st[ST_SIZE_BYTES];
     unsigned int mode;
-    if (u_stat(path, st) != 0) return 0;
+    if (u_lstat(path, st) != 0) return 0;
     mode = load_u32(st + ST_MODE);
     return (mode & S_IFMT) == S_IFDIR;
 }
 
-static void join_path(char *out, unsigned long cap, const char *dir,
+static int join_path(char *out, unsigned long cap, const char *dir,
                       const char *name) {
-    unsigned long i = 0;
-    unsigned long j = 0;
-    if (cap < 2) {
-        out[0] = 0;
-        return;
-    }
-    while (dir[i] != 0 && i + 1 < cap) {
-        out[i] = dir[i];
-        i++;
-    }
-    if (i > 0 && out[i - 1] != '/' && i + 1 < cap) {
-        out[i++] = '/';
-    }
-    while (name[j] != 0 && i + 1 < cap) {
-        out[i++] = name[j++];
-    }
-    out[i] = 0;
+    unsigned long dl = strlen(dir);
+    unsigned long nl = strlen(name);
+    unsigned long i;
+    unsigned long at = 0;
+    int slash = dl == 0 || dir[dl - 1] != '/';
+    if (dl + nl + (unsigned long)slash + 1 > cap) return -1;
+    for (i = 0; i < dl; i++) out[at++] = dir[i];
+    if (slash) out[at++] = '/';
+    for (i = 0; i < nl; i++) out[at++] = name[i];
+    out[at] = 0;
+    return 0;
 }
 
 static int rm_path(const char *path, int recursive, int force, int verbose);
@@ -89,7 +84,13 @@ static int rm_dir_rec(const char *path, int verbose) {
     for (;;) {
         long off;
         n = u_getdents(fd, dent, sizeof(dent));
-        if (n <= 0) break;
+        if (n == -4) continue;
+        if (n < 0) {
+            printf("rm: %s: directory read failed\n", path);
+            u_close(fd);
+            return 1;
+        }
+        if (n == 0) break;
         for (off = 0; off + DENT_REC <= n; off += DENT_REC) {
             char name[NAME_LEN];
             unsigned long k = 0;
@@ -112,7 +113,11 @@ static int rm_dir_rec(const char *path, int verbose) {
     u_close(fd);
 
     for (i = 0; i < nnames; i++) {
-        join_path(child, PATH_CAP, path, names[i]);
+        if (join_path(child, PATH_CAP, path, names[i]) < 0) {
+            printf("rm: %s: child path too long\n", path);
+            rc = 1;
+            continue;
+        }
         if (rm_path(child, 1, 1, verbose) != 0) rc = 1;
     }
     if (u_rmdir(path) != 0) {
@@ -126,7 +131,7 @@ static int rm_dir_rec(const char *path, int verbose) {
 
 static int path_exists(const char *path) {
     char st[ST_SIZE_BYTES];
-    return u_stat(path, st) == 0;
+    return u_lstat(path, st) == 0;
 }
 
 static int rm_path(const char *path, int recursive, int force, int verbose) {

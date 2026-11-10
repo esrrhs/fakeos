@@ -13,14 +13,62 @@ static int truncates;
 static int closes;
 static int bad_write;
 static int write_calls;
+static int cwd_reads, cwd_changes, exits, links;
+static long fake_stat(const char *p,void *buf,int nofollow) {
+ char *b=(char *)buf;int i;int ino=11;int dev=1;int mode=0x40;
+ if(scenario<100)return -1;
+ if(scenario>=115) {
+  if(scenario==115 || scenario==116 || scenario==121 || scenario==122)return -1;
+  mode=scenario==117?0x80:0xA0;
+ } else if(strcmp(p,"/src")==0) {
+  if(scenario==111)return -1;
+  ino=10;
+ } else if(strcmp(p,"/outside/new")==0)return -1;
+ else if(strcmp(p,"/")==0)ino=1;
+ else if(scenario==109 && !nofollow)return -1;
+ else if(scenario==102 && strcmp(p,"/mnt/src")==0)ino=10;
+ else if(scenario==106 && strcmp(p,"/alias")==0)mode=0xA0;
+ else if(scenario==112) { ino=10;dev=2; }
+ for(i=0;i<144;i++)b[i]=0;
+ b[0]=(char)dev;b[8]=(char)ino;b[25]=(char)mode;
+ return 0;
+}
 void printf(const char *fmt, ...) { }
 unsigned long strlen(const char *s) { unsigned long n=0; while(s[n]) n++; return n; }
 int strcmp(const char *a,const char *b) { while(*a && *a==*b){a++;b++;} return (int)*a-(int)*b; }
 char *strcpy(char *d,const char *s) { char *r=d; while((*d++=*s++)){} return r; }
 long u_open(const char *p,long f,long m) { return strcmp(p,"src")==0 ? 3 : 4; }
-long u_stat(const char *p,void *b) { return -1; }
-long u_lstat(const char *p,void *b) { return -1; }
+long u_stat(const char *p,void *b) { return fake_stat(p,b,0); }
+long u_lstat(const char *p,void *b) { return fake_stat(p,b,1); }
 long u_mkdir(const char *p) { return -1; }
+long u_exit(long code) { exits++;return code; }
+long u_chdir(const char *p) {
+ cwd_changes++;
+ if(scenario==104 || (scenario==107 && cwd_changes==2))return -1;
+ return 0;
+}
+long u_getcwd(char *p,unsigned long n) {
+ const char *v="/outside";
+ cwd_reads++;
+ if(scenario==103 || (scenario==105 && cwd_reads==2))return -1;
+ if(cwd_reads==1)v="/original";
+ else if(scenario==101)v="/src/sub";
+ else if(scenario==102)v="/mnt/src";
+ else if(scenario==106)v="/alias/sub";
+ else if(scenario==108)v="relative";
+ else if(scenario==110)v="/";
+ strcpy(p,v);return (long)strlen(v)+1;
+}
+long u_readlink(const char *p,char *b,unsigned long n) {
+ if(scenario==115)return -1;
+ if(scenario==116)return (long)n;
+ strcpy(b,(scenario==119 && strcmp(p,"dst")==0)?"different":"..");return (long)strlen(b);
+}
+long u_symlink(const char *t,const char *p) {
+ links++;
+ if(strcmp(t,"..")!=0 || strcmp(p,"dst")!=0)bad_write=1;
+ return scenario==121?-1:0;
+}
 long u_getdents(long fd,void *p,unsigned long n) { return -1; }
 long u_fstat(long fd,void *buf) {
  char *b=(char *)buf; int i;
@@ -60,6 +108,23 @@ int main(int argc,char **argv) {
   if((i==1 || i==7) && (truncates || reads || written_total))errors++;
   if((i==3 || i==6 || i==10 || i==11) && written_total!=5)errors++;
  }
+ /* Resolver failures must fail closed and restore the utility's cwd. */
+ for(i=100;i<=114;i++) {
+  scenario=i;cwd_reads=0;cwd_changes=0;exits=0;
+  rc=directory_target_safe("/src",i==113?"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/new":(i==114?"":"/outside/new"));
+  if(rc!=((i==100 || i==110 || i==112)?1:0))errors++;
+  if(i==107 && exits!=1)errors++;
+  if(i!=107 && exits)errors++;
+  if((i==103 || i==111 || i==113 || i==114) && cwd_changes)errors++;
+  if(i==104 && cwd_changes!=1)errors++;
+  if(i==105 && cwd_changes!=2)errors++;
+ }
+ for(i=115;i<=122;i++) {
+  scenario=i;links=0;bad_write=0;
+  rc=copy_link("src","dst",i==120,0);
+  if(rc!=((i==118 || i==120 || i==122)?0:1))errors++;
+  if(links!=((i==121 || i==122)?1:0) || bad_write)errors++;
+ }
  return errors;
 }
 '''
@@ -73,7 +138,7 @@ def main():
         exe = Path(tmp) / 'cp_unit'
         subprocess.run([compiler, str(src), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
-    print('PASS: real cp with injected same-inode, read/stat/truncate/close failures, EINTR, short/zero/failed writes')
+    print('PASS: real cp: identity/I/O/EINTR/close errors; physical descendant/alias/cross-device resolution; fail-closed cwd restoration; link overwrite/create failures')
 
 if __name__ == '__main__':
     main()

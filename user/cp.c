@@ -4,7 +4,9 @@
  *   cp [-r|-R] [-nv] SRC... DIRECTORY
  * If DST/DIRECTORY exists as a directory, place each SRC under it as
  * DIRECTORY/basename(SRC). Refuse directory SRC without -r. Refuse cycles
- * (DST under SRC). -n skips existing destinations (quiet, exit 0). -v prints
+ * (DST under SRC, including physical aliases). -r preserves symbolic links
+ * without following cycles; existing different link destinations are refused.
+ * -n skips existing destinations (quiet, exit 0). -v prints
  * each successful copy as: 'SRC' -> 'DST' (GNU). Sticky clusters (-rnv/-nrv).
  * Compact argv for EXEC_MAX_ARGC=8. Not -p (needs utimensat — deferred).
  */
@@ -21,6 +23,11 @@ extern long u_lstat(const char *path, void *statbuf);
 extern long u_fstat(long fd, void *statbuf);
 extern long u_ftruncate(long fd, unsigned long length);
 extern long u_mkdir(const char *path);
+extern long u_chdir(const char *path);
+extern long u_getcwd(char *buf, unsigned long n);
+extern long u_readlink(const char *path, char *buf, unsigned long n);
+extern long u_symlink(const char *target, const char *path);
+extern long u_exit(long code);
 extern long u_getdents(long fd, void *buf, unsigned long n);
 extern unsigned long strlen(const char *s);
 extern int strcmp(const char *a, const char *b);
@@ -39,6 +46,7 @@ enum {
     S_IFMT = 0xF000,
     S_IFDIR = 0x4000,
     S_IFREG = 0x8000,
+    S_IFLNK = 0xA000,
     PATH_CAP = 128,
     DENT_BUF = 1920,
     DENT_REC = 48,
@@ -120,6 +128,93 @@ static int is_under(const char *ancestor, const char *child) {
 
 static void announce(const char *src, const char *dst) {
     printf("'%s' -> '%s'\n", src, dst);
+}
+
+/* Resolve the existing destination (or its parent) through physical cwd,
+ * then compare every ancestor's identity, including /mnt versus /home aliases.
+ * This is a single-threaded utility; always restore cwd before returning.
+ * Refuse unresolved/oversize paths instead of making a guessed-safe copy. */
+static int directory_target_safe(const char *src, const char *dst) {
+    char source[ST_SIZE_BYTES];
+    char st[ST_SIZE_BYTES];
+    char parent[PATH_CAP];
+    char oldcwd[PATH_CAP];
+    char physical[PATH_CAP];
+    unsigned long n = strlen(dst);
+    unsigned long i;
+    long got;
+    if (n == 0 || n >= PATH_CAP || u_stat(src, source) < 0) return 0;
+    strcpy(parent, dst);
+    if (!is_dir(dst)) {
+        while (n > 1 && parent[n - 1] == '/') parent[--n] = 0;
+        while (n > 0 && parent[n - 1] != '/') n--;
+        if (n == 0) strcpy(parent, ".");
+        else if (n == 1) parent[1] = 0;
+        else parent[n - 1] = 0;
+    }
+    if (u_getcwd(oldcwd, sizeof(oldcwd)) < 0 || u_chdir(parent) < 0) return 0;
+    got = u_getcwd(physical, sizeof(physical));
+    if (u_chdir(oldcwd) < 0) {
+        /* Continuing a multi-source copy with the wrong cwd risks data loss. */
+        printf("cp: cannot restore working directory\n");
+        u_exit(1);
+        return 0;
+    }
+    if (got < 0 || physical[0] != '/') return 0;
+    /* getcwd is physical; a symlink here indicates failed kernel resolution.
+     * Fail closed rather than following a lexical fallback into our source. */
+    for (i = 1; physical[i] != 0; i++) {
+        if (physical[i] == '/') {
+            physical[i] = 0;
+            got = u_lstat(physical, st);
+            physical[i] = '/';
+            if (got < 0 || (load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) return 0;
+        }
+    }
+    if (u_lstat(physical, st) < 0
+        || (load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) return 0;
+    for (;;) {
+        if (u_stat(physical, st) < 0 || same_identity(source, st)) return 0;
+        n = strlen(physical);
+        if (n == 1 && physical[0] == '/') break;
+        while (n > 1 && physical[n - 1] != '/') n--;
+        if (n <= 1) physical[1] = 0;
+        else physical[n - 1] = 0;
+    }
+    return 1;
+}
+
+/* Recursive copies preserve links; never follow directory/symlink cycles.
+ * Existing identical links are idempotent. Other existing entries are refused
+ * rather than unlinking user data before a potentially failing symlink call. */
+static int copy_link(const char *src, const char *dst, int noclobber, int verbose) {
+    char target[256];
+    char prior[256];
+    char st[ST_SIZE_BYTES];
+    long n = u_readlink(src, target, sizeof(target) - 1);
+    if (n < 0 || n >= (long)sizeof(target) - 1) {
+        printf("cp: %s: cannot read symbolic link\n", src);
+        return 1;
+    }
+    target[n] = 0;
+    if (u_lstat(dst, st) == 0) {
+        if (noclobber) return 0;
+        if ((load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) {
+            long k = u_readlink(dst, prior, sizeof(prior) - 1);
+            if (k >= 0 && k < (long)sizeof(prior) - 1) {
+                prior[k] = 0;
+                if (strcmp(target, prior) == 0) return 0;
+            }
+        }
+        printf("cp: %s: refusing to replace existing entry with symbolic link\n", dst);
+        return 1;
+    }
+    if (u_symlink(target, dst) < 0) {
+        printf("cp: %s: cannot create symbolic link\n", dst);
+        return 1;
+    }
+    if (verbose) announce(src, dst);
+    return 0;
 }
 
 static int copy_file(const char *src, const char *dst, int noclobber, int verbose) {
@@ -207,7 +302,7 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
 
     char src_st[ST_SIZE_BYTES];
     char dst_st[ST_SIZE_BYTES];
-    if (is_under(src, dst)
+    if (is_under(src, dst) || !directory_target_safe(src, dst)
         || (u_stat(src, src_st) == 0 && u_stat(dst, dst_st) == 0
             && same_identity(src_st, dst_st))) {
         printf("cp: %s: cannot copy a directory into itself\n", src);
@@ -276,6 +371,11 @@ static int copy_dir_rec(const char *src, const char *dst, int noclobber, int ver
 
 static int copy_path(const char *src, const char *dst, int recursive, int noclobber,
                      int verbose) {
+    char st[ST_SIZE_BYTES];
+    if (recursive && u_lstat(src, st) == 0
+        && (load_u32(st + ST_MODE) & S_IFMT) == S_IFLNK) {
+        return copy_link(src, dst, noclobber, verbose);
+    }
     if (is_dir(src)) {
         if (!recursive) {
             printf("cp: %s: is a directory (not copied)\n", src);

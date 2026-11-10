@@ -297,10 +297,38 @@ static int test_weighted_fair(void) {
  * each. The higher-share group must get roughly twice the CPU. */
 static volatile u64 g_tg_counts[4];
 static volatile u64 g_tg_done;
-static volatile u64 g_tg_deadline;
+/* These identical loops are a CPU-share oracle, not a memory benchmark.
+ * QEMU TCG indexes its direct-mapped software TLB by virtual page number.
+ * A deadline page aliasing one worker's stack counter made that worker run
+ * about 2.6x fewer iterations per host CPU second despite equal group time.
+ * STACK_ORDER=2 puts each counter on the last page of a 16 KiB stack; keep
+ * the deadline on the first page of a 16 KiB-aligned region so the low two
+ * page-index bits differ, independent of physical stack placement. This
+ * changes neither the hot loop nor any deadline/ratio/progress assertion. */
+static volatile u64 g_tg_deadline __attribute__((aligned(16384)));
+static volatile u32 g_tg_start;
+
+static void tg_start_window(u64 ticks) {
+    arch.cpu_cli();
+    g_tg_deadline = sched_tick_count() + ticks;
+    g_tg_start = 1;
+    sched_wakeup((u64)&g_tg_start);
+    arch.cpu_sti();
+}
+
+static void tg_abort_workers(void) {
+    tg_start_window(0);
+    /* BSP slot 0 is idle-only: yield until all released workers exit. */
+    sched_yield();
+}
 
 static void tg_spinner(u64 id) {
     u64 n = 0;
+    /* Creation publishes a runnable thread before the creator can attach
+     * its group. Park (do not busy-yield) until setup has fully completed. */
+    arch.cpu_cli();
+    while (!g_tg_start) sched_sleep_cli((u64)&g_tg_start);
+    arch.cpu_sti();
     while (sched_tick_count() < g_tg_deadline) {
         n++;
     }
@@ -319,24 +347,37 @@ static int test_tg_shares(void) {
     g_tg_done = 0;
     g_tg_counts[0] = 0;
     g_tg_counts[1] = 0;
-    g_tg_deadline = sched_tick_count() + 40;
+    g_tg_deadline = 0;
+    g_tg_start = 0;
 
     tga = sched_tg_create(2048);
     tgb = sched_tg_create(1024);
     if (tga == 0xFFFFFFFF || tgb == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create\n");
+        tg_abort_workers();
         return 0;
     }
     id0 = kthread_create((u64)(&tg_spinner), 0);
     id1 = kthread_create((u64)(&tg_spinner), 1);
     if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF) {
         kprintf("      [FAIL] could not create tg spinners\n");
+        tg_abort_workers();
+        return 0;
+    }
+    /* Deterministically exercise preemption before group attachment. All
+     * workers must park, not finish/lose their TCBs as the old fixture did. */
+    sched_yield();
+    if (g_tg_done != 0) {
+        kprintf("      [FAIL] task_group worker ran before admission\n");
+        tg_abort_workers();
         return 0;
     }
     if (!sched_tg_attach(id0, tga) || !sched_tg_attach(id1, tgb)) {
         kprintf("      [FAIL] sched_tg_attach\n");
+        tg_abort_workers();
         return 0;
     }
+    tg_start_window(40);
 
     {
         u64 deadline = sched_tick_count() + 400;
@@ -346,11 +387,13 @@ static int test_tg_shares(void) {
     }
     if (g_tg_done != 2) {
         kprintf("      [FAIL] tg spinners did not finish (%u)\n", g_tg_done);
+        tg_abort_workers();
         return 0;
     }
     if (g_tg_counts[0] == 0 || g_tg_counts[1] == 0) {
         kprintf("      [FAIL] tg spinner got zero work (A=%u B=%u)\n",
                 g_tg_counts[0], g_tg_counts[1]);
+        tg_abort_workers();
         return 0;
     }
     /* shares 2048:1024 => expect ~2:1; accept >=1.5x loose bound. */
@@ -359,6 +402,7 @@ static int test_tg_shares(void) {
     if (hi * 2 < lo * 3) {
         kprintf("      [FAIL] tg shares ratio too weak: A2048=%u B1024=%u\n",
                 hi, lo);
+        tg_abort_workers();
         return 0;
     }
     return 1;
@@ -379,12 +423,14 @@ static int test_tg_aggregate(void) {
     g_tg_counts[0] = 0;
     g_tg_counts[1] = 0;
     g_tg_counts[2] = 0;
-    g_tg_deadline = sched_tick_count() + 50;
+    g_tg_deadline = 0;
+    g_tg_start = 0;
 
     tga = sched_tg_create(1024);
     tgb = sched_tg_create(1024);
     if (tga == 0xFFFFFFFF || tgb == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create (aggregate)\n");
+        tg_abort_workers();
         return 0;
     }
     id0 = kthread_create((u64)(&tg_spinner), 0);
@@ -392,13 +438,24 @@ static int test_tg_aggregate(void) {
     id2 = kthread_create((u64)(&tg_spinner), 2);
     if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF || id2 == 0xFFFFFFFF) {
         kprintf("      [FAIL] could not create tg aggregate spinners\n");
+        tg_abort_workers();
+        return 0;
+    }
+    /* Deterministically exercise preemption before group attachment. All
+     * workers must park, not finish/lose their TCBs as the old fixture did. */
+    sched_yield();
+    if (g_tg_done != 0) {
+        kprintf("      [FAIL] task_group worker ran before admission\n");
+        tg_abort_workers();
         return 0;
     }
     if (!sched_tg_attach(id0, tga) || !sched_tg_attach(id1, tga)
         || !sched_tg_attach(id2, tgb)) {
         kprintf("      [FAIL] sched_tg_attach (aggregate)\n");
+        tg_abort_workers();
         return 0;
     }
+    tg_start_window(50);
 
     {
         u64 deadline = sched_tick_count() + 500;
@@ -409,18 +466,21 @@ static int test_tg_aggregate(void) {
     if (g_tg_done != 3) {
         kprintf("      [FAIL] tg aggregate spinners did not finish (%u)\n",
                 g_tg_done);
+        tg_abort_workers();
         return 0;
     }
     sum_a = g_tg_counts[0] + g_tg_counts[1];
     b = g_tg_counts[2];
     if (sum_a == 0 || b == 0) {
         kprintf("      [FAIL] tg aggregate zero work A=%u B=%u\n", sum_a, b);
+        tg_abort_workers();
         return 0;
     }
     /* Accept within 2x either way (TCG noise); equal shares => not 2:1 flat. */
     if (sum_a > b * 2 || b > sum_a * 2) {
         kprintf("      [FAIL] tg aggregate not balanced: A2=%u B1=%u\n",
                 sum_a, b);
+        tg_abort_workers();
         return 0;
     }
     return 1;
@@ -441,34 +501,49 @@ static int test_tg_nested_shares(void) {
     g_tg_done = 0;
     g_tg_counts[0] = 0;
     g_tg_counts[1] = 0;
-    g_tg_deadline = sched_tick_count() + 40;
+    g_tg_deadline = 0;
+    g_tg_start = 0;
 
     mid_a = sched_tg_create(2048);
     mid_b = sched_tg_create(1024);
     if (mid_a == 0xFFFFFFFF || mid_b == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create (nested mids)\n");
+        tg_abort_workers();
         return 0;
     }
     leaf_a = sched_tg_create_under(mid_a, 1024);
     leaf_b = sched_tg_create_under(mid_b, 1024);
     if (leaf_a == 0xFFFFFFFF || leaf_b == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create_under (nested leaves)\n");
+        tg_abort_workers();
         return 0;
     }
     if (sched_tg_parent(leaf_a) != mid_a || sched_tg_parent(leaf_b) != mid_b) {
         kprintf("      [FAIL] nested parent linkage\n");
+        tg_abort_workers();
         return 0;
     }
     id0 = kthread_create((u64)(&tg_spinner), 0);
     id1 = kthread_create((u64)(&tg_spinner), 1);
     if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF) {
         kprintf("      [FAIL] could not create nested share spinners\n");
+        tg_abort_workers();
+        return 0;
+    }
+    /* Deterministically exercise preemption before group attachment. All
+     * workers must park, not finish/lose their TCBs as the old fixture did. */
+    sched_yield();
+    if (g_tg_done != 0) {
+        kprintf("      [FAIL] task_group worker ran before admission\n");
+        tg_abort_workers();
         return 0;
     }
     if (!sched_tg_attach(id0, leaf_a) || !sched_tg_attach(id1, leaf_b)) {
         kprintf("      [FAIL] sched_tg_attach (nested shares)\n");
+        tg_abort_workers();
         return 0;
     }
+    tg_start_window(40);
 
     {
         u64 deadline = sched_tick_count() + 400;
@@ -479,11 +554,13 @@ static int test_tg_nested_shares(void) {
     if (g_tg_done != 2) {
         kprintf("      [FAIL] nested share spinners did not finish (%u)\n",
                 g_tg_done);
+        tg_abort_workers();
         return 0;
     }
     if (g_tg_counts[0] == 0 || g_tg_counts[1] == 0) {
         kprintf("      [FAIL] nested share zero work A=%u B=%u\n",
                 g_tg_counts[0], g_tg_counts[1]);
+        tg_abort_workers();
         return 0;
     }
     hi = g_tg_counts[0];
@@ -491,6 +568,7 @@ static int test_tg_nested_shares(void) {
     if (hi * 2 < lo * 3) {
         kprintf("      [FAIL] nested shares ratio too weak: A2048=%u B1024=%u\n",
                 hi, lo);
+        tg_abort_workers();
         return 0;
     }
     return 1;
@@ -513,12 +591,14 @@ static int test_tg_nested_aggregate(void) {
     g_tg_counts[0] = 0;
     g_tg_counts[1] = 0;
     g_tg_counts[2] = 0;
-    g_tg_deadline = sched_tick_count() + 50;
+    g_tg_deadline = 0;
+    g_tg_start = 0;
 
     mid_a = sched_tg_create(1024);
     mid_b = sched_tg_create(1024);
     if (mid_a == 0xFFFFFFFF || mid_b == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create (nested agg mids)\n");
+        tg_abort_workers();
         return 0;
     }
     leaf_a1 = sched_tg_create_under(mid_a, 1024);
@@ -527,6 +607,7 @@ static int test_tg_nested_aggregate(void) {
     if (leaf_a1 == 0xFFFFFFFF || leaf_a2 == 0xFFFFFFFF
         || leaf_b == 0xFFFFFFFF) {
         kprintf("      [FAIL] sched_tg_create_under (nested agg leaves)\n");
+        tg_abort_workers();
         return 0;
     }
     id0 = kthread_create((u64)(&tg_spinner), 0);
@@ -534,13 +615,24 @@ static int test_tg_nested_aggregate(void) {
     id2 = kthread_create((u64)(&tg_spinner), 2);
     if (id0 == 0xFFFFFFFF || id1 == 0xFFFFFFFF || id2 == 0xFFFFFFFF) {
         kprintf("      [FAIL] could not create nested agg spinners\n");
+        tg_abort_workers();
+        return 0;
+    }
+    /* Deterministically exercise preemption before group attachment. All
+     * workers must park, not finish/lose their TCBs as the old fixture did. */
+    sched_yield();
+    if (g_tg_done != 0) {
+        kprintf("      [FAIL] task_group worker ran before admission\n");
+        tg_abort_workers();
         return 0;
     }
     if (!sched_tg_attach(id0, leaf_a1) || !sched_tg_attach(id1, leaf_a2)
         || !sched_tg_attach(id2, leaf_b)) {
         kprintf("      [FAIL] sched_tg_attach (nested agg)\n");
+        tg_abort_workers();
         return 0;
     }
+    tg_start_window(50);
 
     {
         u64 deadline = sched_tick_count() + 500;
@@ -551,17 +643,20 @@ static int test_tg_nested_aggregate(void) {
     if (g_tg_done != 3) {
         kprintf("      [FAIL] nested agg spinners did not finish (%u)\n",
                 g_tg_done);
+        tg_abort_workers();
         return 0;
     }
     sum_a = g_tg_counts[0] + g_tg_counts[1];
     b = g_tg_counts[2];
     if (sum_a == 0 || b == 0) {
         kprintf("      [FAIL] nested agg zero work A=%u B=%u\n", sum_a, b);
+        tg_abort_workers();
         return 0;
     }
     if (sum_a > b * 2 || b > sum_a * 2) {
         kprintf("      [FAIL] nested agg not balanced: A2=%u B1=%u\n",
                 sum_a, b);
+        tg_abort_workers();
         return 0;
     }
     return 1;
@@ -1412,6 +1507,7 @@ static void ap_sysret_msr_worker(u64 id) {
 void sched_ap_sysret_selftest(void) {
     u32 i;
     u32 done;
+    u32 waited = 0;
     u32 saw_ap = 0;
     u32 ncpu = smp_cpu_count();
     u64 deadline;
@@ -1427,7 +1523,12 @@ void sched_ap_sysret_selftest(void) {
         g_ap_sysret_cpu[i] = 0;
         g_ap_sysret_done[i] = 0;
     }
-    arch.cpu_sti();
+    /* The old one-shot workers could all finish on BSP before an AP was
+     * dispatched, producing a false "no AP observed" despite working APs.
+     * Keep the BSP coordinator non-dispatchable during this remote-work
+     * handshake. An AP must execute all four real MSR/current-AS samples;
+     * absence of AP execution still fails, never substitutes BSP results. */
+    arch.cpu_cli();
     for (i = 0; i < 4; i++) {
         if (kthread_create((u64)(&ap_sysret_msr_worker), i) == 0xFFFFFFFFu) {
             kprintf("      [FAIL] AP SYSRET MSR worker create %u\n", (u64)i);
@@ -1439,8 +1540,11 @@ void sched_ap_sysret_selftest(void) {
     do {
         done = 0;
         for (i = 0; i < 4; i++) done += g_ap_sysret_done[i];
-        if (done != 4) sched_yield();
-    } while (done != 4 && sched_tick_count() < deadline);
+        if (done != 4) {
+            arch.pit_busy_wait_ms(1);
+            waited++;
+        }
+    } while (done != 4 && sched_tick_count() < deadline && waited < 8000);
     arch.cpu_cli();
 
     if (done != 4) {
@@ -1459,6 +1563,9 @@ void sched_ap_sysret_selftest(void) {
         kprintf("      [FAIL] no AP SYSRET MSR worker observed\n");
         return;
     }
+    kprintf("      AP SYSRET sample CPUs: %u/%u/%u/%u\n",
+            (u64)g_ap_sysret_cpu[0], (u64)g_ap_sysret_cpu[1],
+            (u64)g_ap_sysret_cpu[2], (u64)g_ap_sysret_cpu[3]);
     kprintf("      [PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE+NXE/current AS\n");
 }
 

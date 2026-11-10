@@ -129,21 +129,130 @@ and allow a later small copy after removing the partial file.
 `FCC=... python3 tools/test_cp_io.py` compiles the real copy implementation
 with fakecc and injected syscall outcomes: short writes, EINTR, read/stat/
 truncate/close errors, failed/zero writes, same inode and cross-device inode
-collisions. These are unit error-path checks, not substitutes for guest tests.
+collisions. Resolver/link cases also cover physical descendants, device aliases,
+cwd read/change/restore failures, fail-closed lexical symlinks, and conservative
+link overwrite/create errors. These checks are not substitutes for guest tests.
 
 Limits: not an atomic copy/rollback facility; failed copies can leave a partial
-destination. Concurrent unlink/rename, recursively following symlink cycles,
-metadata preservation and power-loss durability are not certified here.
+destination. Concurrent unlink/rename, metadata preservation and power-loss
+durability are not certified here.
 The first ENOSPC fixture also exposed a separate Ramfs contiguous-allocation
 limit: 5 MiB `dd` failed while preparing its source. The fixture now verifies
 an exact 1.5 MiB source before filling the disposable disk; larger Ramfs files
-remain a real unresolved daily-use gap, not a passing claim.
+remain a real unresolved daily-use gap, not a passing claim. A separate guest
+boundary probe confirmed that exactly 4 MiB succeeds, 5 MiB stops at 4 MiB,
+and appending one byte at offset 4 MiB fails without changing retained bytes,
+with 191820 kB free. `FILE_MAX` is 16 MiB, but Ramfs doubling calls contiguous
+kmalloc whose BIG_ORDER_MAX=10 supports only 4 MiB: this is an architectural
+growth/declared-capacity mismatch, not simply exhausted RAM.
+
+### Recursive copy safety
+
+A real guest probe of `cp -r src alias-into-src-subdir/dup` created a growing
+`dup/sub/dup/...` tree before failing at a path limit. An ancestor symlink was
+also followed repeatedly rather than copied. Directory copies now inspect the
+physical destination/parent and compare every ancestor's device+inode against
+the source **before mkdir**; this also catches `/mnt` versus `/home` aliases.
+Unresolved paths fail closed. `-r` copies symlinks as symlinks, including
+ancestor links, dangling links and two-link cycles, without following them.
+
+Expanded copy smoke checks rejection without creating `dup`, retained source
+bytes, normal recursive copies and link text on both filesystems, repeated
+copies, and refusal to replace existing user data with a different symlink.
+The expanded test also exposed `rm` using stat rather than lstat: plain rm
+refused a directory link, while recursive rm could walk outside its selected
+tree. rm now unlinks links themselves (including dangling/cyclic links),
+rejects overlong joined paths rather than truncating them, and propagates
+directory read errors. Cleanup tests retain original source/outside-file bytes.
+
+Existing identical symlinks are idempotent; other existing entries for a copied
+link are refused (unless -n skips them). This is intentionally conservative,
+not full GNU cp -H/-L semantics or adversarial concurrent-rename protection.
+Fixed utility bounds remain: 128-byte joined paths and 64 child names per
+directory; over-limit joined paths/entry counts fail. Longer filename handling
+through the fixed getdents ABI is not certified by this acceptance.
+
+### Group-worker test admission
+
+Strict boot acceptance exposed `sched_tg_attach` failing intermittently.
+A deterministic pre-attach yield reproduced the mechanism: both workers were
+FREE, done=2, and the original deadline had elapsed before attachment. Workers
+now sleep on a setup barrier until their group assignment is complete. Every
+group test deliberately yields before attachment and requires zero premature
+completions, then releases the original 40/50-tick measured window. All existing
+progress, completion, aggregate and ratio assertions are unchanged. Failure
+paths release/drain parked workers instead of leaving sleepers behind.
+
+AP MSR acceptance separately exposed a sampling problem: four one-shot
+workers all completed on BSP, so the unchanged "must observe an AP" assertion
+failed although AP timer, balance and allocator checks passed in that boot.
+The BSP now stays IRQ-masked during a bounded remote-work handshake, so the
+real workers must execute on APs. All four completion/MSR checks and the AP
+observation assertion remain; actual sampled CPU IDs are printed. The original
+800-tick deadline also has an 8 s PIT fallback if remote ticks stop advancing.
+
+### Fairness oracle: emulator layout, not scheduler hardening
+
+Earlier uninstrumented boots really failed the original 50-tick/2x nested
+aggregate check (including 16184546/5099895). Passing traced reruns did not
+resolve them. A failure-only readout subsequently captured 17156908/5442918
+with equal parent vruntime 25600/25600, shares 1024/1024, and all workers done
+at the original deadline. External host-service measurements on the exact
+failed ELF reproduced A/B=2.683 despite near-equal vCPU service (252.96 versus
+242.45 ms): the identical B loop had lower throughput per CPU second.
+
+QEMU 10 indexes its direct-mapped software TLB by virtual page number. In
+fresh sacrificial VMs, changing **only** the loop's deadline-load address to
+a scratch word holding the unchanged deadline isolated the address bias:
+
+| Deadline index | A/B iterations | A/B vCPU service | Original assertion |
+| --- | ---: | ---: | --- |
+| Matches B's actual stack counter | 2.623 | 1.021 | FAIL |
+| Flip one page-index bit; same stack addresses | 1.034 | 1.080 | PASS |
+| Matches A1 instead | 0.697 | 1.013 | Slow throughput moves to A1 |
+
+Local counters remained monotonic and equaled the published totals. These
+intervened probes are **diagnostics, not acceptance**. The fixture now aligns
+its deadline to 16 KiB: existing 16 KiB buddy-backed stacks place counters in
+a last page, while the aligned deadline occupies a first page, preventing
+that low-page-index collision. The final linked deadline was verified as
+`0xffffffff83a3c000`; the tick counter's page has low bits 1, not stack bits 3.
+No scheduler algorithm, hot loop, duration, ratio, progress check, or retry
+policy changed. The oldest unobserved failure cannot be retrospectively
+measured, and host-service sensitivity still exists.
+
+### Final-image acceptance and UART capture regression
+
+The uninstrumented image SHA256 was
+`425995cfa1ab64f043c3d6e0f34d176bdc674371d13efcbbfdb86ad4d9fa6102`.
+All twelve selected boot logs had no FAIL/FATAL: copy/removal SMP1/2,
+persistence both boots SMP1/2, process inspection/churn SMP1/2, and strict
+process + guest compiler SMP1 plus SMP2 three times. SMP2 AP samples were
+1/1/1/1. Clean fakecc-only deny build, compiler provenance at released
+dfb1c7b, byte-identical self-host fixed point and asm ELF/bin coverage passed.
+The 34 real-cp injected scenarios also passed.
+
+The first launcher **did stop** at a host ps-reader failure, not a clean exit:
+a job notice split between CR and LF made its second read wait for a fresh
+CRLF until the sleeper exited. A lossless forced split reproduced that exact
+failure; after correction it consumes the pending LF immediately and passes
+unchanged ps/maps/kill/reap and 20-launch churn checks. `test_proc_job_notice.py`
+covers every PID/line-ending split and rejects malformed notices. Acceptance
+continued with fresh SMP1/2 process runs and all strict compiler runs on the
+**same unchanged ELF**; the earlier failed log was retained, not relabeled green.
+No full in-OS kbuild or daily-driver readiness is inferred.
 
 ## Next concrete gaps
 
-1. Script launching: shell currently ignores script argv; only source/. is
-   tested. Add non-interactive script execution with meaningful exit status.
-2. Recursive copy symlink-cycle safety and atomic replacement/metadata UX
-   (`cp -p` / `touch -d`) still need work.
-3. Pager/named pipes and the historical full in-OS kbuild restage pin remain
-   unresolved. Desktop/network readiness is not established.
+1. Ramfs file growth: the reproduced 5 MiB source-setup failure requires a
+   bounded non-contiguous allocation strategy or honest size-limit handling.
+2. Script launching: shell currently ignores script argv; only source/. is
+   tested. Atomic copy replacement/metadata UX (`cp -p` / `touch -d`) also
+   remain incomplete.
+3. SMP timekeeping: a controlled SMP2 observation saw `sleep 20` complete in
+   about 10 host seconds; global scheduler ticks currently advance on every
+   CPU while clock/sleep conversion assumes 100 Hz. Reproduce SMP1/2 timing
+   before a separate correction; this increment does not fix clocks.
+
+Pager/named pipes and the historical full in-OS kbuild restage pin remain
+unresolved. Desktop/network readiness is not established.
