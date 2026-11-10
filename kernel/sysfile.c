@@ -50,7 +50,7 @@ extern void sched_cwd_set(const char *kpath);
 extern u64 tty_console_read(u64 ubuf, u64 len);
 extern u64 tty_jobctl_write_wait(void);
 extern u32 tty_input_pending(void);
-extern u64 sched_tick_count(void);
+extern u64 sched_clock_ticks(void);
 extern void sched_yield(void);
 extern void sched_sleep(u64 chan);
 extern void sched_wakeup(u64 chan);
@@ -63,7 +63,7 @@ static u32 select_wait_token;
 void select_kick(void) {
     sched_wakeup((u64)&select_wait_token);
 }
-extern u32 sched_should_eintr(void);
+extern u32 sched_should_eintr_timer(void);
 extern void sched_check_signals(void);
 extern u32 sock_can_read(u32 fh);
 extern u32 sock_can_write(u32 fh);
@@ -1305,20 +1305,20 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
         }
         sec = (i64)(*(volatile u64 *)timeout_u);
         usec = (i64)(*(volatile u64 *)(timeout_u + 8));
-        if (sec < 0 || usec < 0) {
+        if (sec < 0 || usec < 0 || usec >= 1000000) {
             return (u64)(-1);
         }
         if (sec == 0 && usec == 0) {
             block = 0;
-            deadline = sched_tick_count();
+            deadline = sched_clock_ticks();
         } else {
             block = 1;
             /* 100 Hz ticks */
-            ms = (u64)sec * 100u + (u64)usec / 10000u;
-            if (ms == 0) {
-                ms = 1;
-            }
-            deadline = sched_tick_count() + ms;
+            if ((u64)sec > (~0ULL - 101) / 100u) return (u64)(-1);
+            ms = (u64)sec * 100u + ((u64)usec + 9999u) / 10000u + 1;
+            deadline = sched_clock_ticks();
+            if (ms > ~0ULL - deadline) return (u64)(-1);
+            deadline += ms;
         }
     }
     (void)ebits;
@@ -1358,11 +1358,11 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
         if (!block) {
             break;
         }
-        if (timeout_u != 0 && sched_tick_count() >= deadline) {
+        if (timeout_u != 0 && sched_clock_ticks() >= deadline) {
             break;
         }
         sched_check_signals();
-        if (sched_should_eintr()) {
+        if (sched_should_eintr_timer()) {
             return EINTR_SEL;
         }
         /* Infinite block: channel-sleep. Finite timeout: yield so deadline
@@ -1408,12 +1408,11 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
     } else if (timeout_ms == 0) {
         block = 0;
     } else {
-        u64 ticks = timeout_ms / 10u;
-        if (ticks == 0) {
-            ticks = 1;
-        }
+        u64 ticks = timeout_ms / 10u + (timeout_ms % 10u != 0) + 1;
         block = 1;
-        deadline = sched_tick_count() + ticks;
+        deadline = sched_clock_ticks();
+        if (ticks > ~0ULL - deadline) return (u64)(-1);
+        deadline += ticks;
     }
 
     for (;;) {
@@ -1454,11 +1453,11 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
         if (!block) {
             return 0;
         }
-        if ((i64)timeout_ms >= 0 && sched_tick_count() >= deadline) {
+        if ((i64)timeout_ms >= 0 && sched_clock_ticks() >= deadline) {
             return 0;
         }
         sched_check_signals();
-        if (sched_should_eintr()) {
+        if (sched_should_eintr_timer()) {
             return EINTR_SEL;
         }
         if ((i64)timeout_ms < 0) {
@@ -1514,7 +1513,7 @@ u64 sys_utimensat(u64 dfd, u64 upath, u64 utimes, u64 flags) {
 
     omit = 0;
     if (utimes == 0) {
-        mtime_sec = (u32)(sched_tick_count() / 100);
+        mtime_sec = (u32)(sched_clock_ticks() / 100);
     } else {
         if (!mem.as_user_range_ok(as, utimes, 32)) {
             return (u64)(-1);
@@ -1526,7 +1525,7 @@ u64 sys_utimensat(u64 dfd, u64 upath, u64 utimes, u64 flags) {
             omit = 1;
             mtime_sec = 0;
         } else if (nsec == (i64)UTIME_NOW) {
-            mtime_sec = (u32)(sched_tick_count() / 100);
+            mtime_sec = (u32)(sched_clock_ticks() / 100);
         } else if (nsec < 0 || nsec >= 1000000000) {
             return EINVAL_NEG;
         } else if (sec < 0) {

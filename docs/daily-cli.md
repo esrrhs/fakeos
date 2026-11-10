@@ -47,6 +47,7 @@ These are executable acceptance checks, not a daily-driver certification:
 | Programs / compiler | `tools/m5_guest_smoke.py --require-process-selftests --smp 1` and repeated `--smp 2`: seven pipe/signal/orphan regressions, AP SYSRET/NXE/current-AS, guest C exec, provenance, ELF64/flat binary |
 | Build | `FCC=/tmp/fakecc-pr116-merge/build/fakecc FAKECC_SRC=/tmp/fakecc-pr116-merge tools/m5_no_host_cc_smoke.sh`: clean deny-tools build and compiler fixed point |
 | Inspection | `tools/m5_daily_proc_smoke.py`: real processes/memory via ps/free |
+| Elapsed clock | `tools/test_clock_io.py` and `tools/m5_clock_smoke.py --smp 1` (also2/4): accepted SMP1/2/4; real host/guest duration, timeout/grace, short waits, six signal/EINTR modes, mtime and cleanup |
 | Scripts | `source` / `. FILE` tested; `/bin/sh FILE` and shebang execution are **not implemented** |
 | Desktop/network | GUI, browser, general desktop and network robustness are **not proven** by any file or compiler smoke |
 
@@ -402,18 +403,71 @@ failure prevents source removal; a later recursive cleanup failure can leave
 a partially removed source alongside the already complete destination. There
 is no all-or-nothing cross-filesystem move/rollback guarantee.
 
+## Elapsed clock correction (accepted SMP1/2/4)
+
+A controlled private-guest probe measured `sleep 4` at4.041 host seconds on
+SMP1 but2.039 on SMP2; guest date advanced6seconds over2+4 requested sleep
+seconds in both, while SMP2 took only3 real seconds. The old counter counted
+all CPUs' timer interrupts, not elapsed100Hz time.
+
+The correction retains `sched_tick_count` as aggregate preemption events for
+unchanged scheduler tests (including50tick/2x fairness). A separate100Hz
+`sched_clock_ticks` is published only by the calibrated boot CPU. Every AP
+still charges runtime and preempts on every local IRQ. Clock/nanosleep,
+select/poll, filesystem mtime/utimens, network retransmit/DHCP/connect deadlines
+and the explicitly30-second boot monitor use the elapsed counter. Network
+routing to a corrected clock is not a new network reliability certification.
+
+Relative waits round up fractional ticks and include one tick of phase slack;
+zero waits stay immediate and overflowing budgets are rejected. EINTR remainder
+is bounded by the original request. A real timer signal probe also exposed
+caught SIGTERM being killed by an unframed kernel signal check. Such checks now
+preserve caught signals until a user frame can deliver them. Timer waits return
+EINTR even with SA_RESTART, without changing restartable pipe/read selection.
+The guest fixture uses a normal pure-fakecc naked text-section restorer, like
+libc, and checks real handler return, remainder and sender reaping.
+
+`tools/test_clock_io.py` compiles actual ISR/syscall/signal bodies with fakecc;
+`tools/m5_clock_smoke.py --smp 1|2|4` compares real guest waits against host
+monotonic time. The final pure-fakecc clean deny/fixed-point/provenance/asm
+build passed a 27-boot matrix (12 SMP1, 14 SMP2, 1 SMP4). Every UART retained
+all seven process regressions, unchanged nested fairness, allocation canaries
+and applicable AP SYSRET/NXE/current-AS checks; strict guest/compiler ran once
+on SMP1 and three times on SMP2. The audited image SHA256 is
+`14eb691730d92fbe2dc8ad918e2f94647e5cfdc96b8706fca1166365a67515a6`.
+Final host-monotonic `sleep 2` measurements were2.097/2.111/2.163seconds on
+SMP1/2/4, rather than scaling inversely with CPU count. These boots did not
+attach a NIC and therefore do not establish network transport correctness.
+The controlled probe also measured `timeout 2 sleep 4` at2.64–2.72seconds:
+its20-polls-per-second counter accumulated tick rounding and scheduling delay.
+Timeout now uses monotonic deadlines for both the initial limit and kill grace,
+retries interrupted waits and rejects overflowing integer durations.
+This is a10ms interrupt-driven **boot-relative** clock: REALTIME still has no
+RTC/calendar epoch, and long boot-CPU IRQ exclusion/host-delayed interrupts can
+stall it. No TSC catch-up, suspend, CPU-hotplug or high-resolution timer claim.
+Timed futex waits and alarm/setitimer are not implemented by this correction.
+An experimental writable/executable mmap restorer exposed an existing COW
+clone path setting NX on writable private pages after fork; that separate
+executable-mapping limitation is not silently claimed fixed by timer tests.
+
 ## Next concrete gaps
 
 1. Cross-mount symlink dereference remains broken; atomic replacement/metadata
    and rollback remain incomplete. Move acceptance is not a full VFS or backup
    certification. Correct global resolution must preserve no-follow/create rules.
-2. Script launching: shell ignores script argv and execve has no shebang
-   handling; only source/. is tested. Exec has eight argv slots and127-byte
-   arguments; lossless enumeration does not remove those operand limits.
-3. SMP timekeeping: a controlled SMP2 observation saw `sleep 20` complete in
-   about 10 host seconds; global scheduler ticks currently advance on every
-   CPU while clock/sleep conversion assumes 100 Hz. Reproduce SMP1/2 timing
-   before a separate correction; this increment does not fix clocks.
+2. Core networking: verify real VirtIO NIC DHCP/ARP/UDP/TCP against isolated
+   local host fixtures, including byte integrity under receive backpressure,
+   lifecycle/errors and retransmission. Existing loopback/code presence is
+   not an end-to-end transport certification; IPv6/TLS are not provided.
+3. Graphical desktop is not implemented: VGA80x25/PS2 keyboard and the QEMU
+   display window are a text console, not a pixel framebuffer, mouse/event
+   layer, window system or GUI applications.
+
+REALTIME still lacks an RTC epoch, timed futex waits are not wired, and
+writable-private executable mappings incorrectly gain NX during COW fork.
+Script argv/shebang also remain unsupported (only source/. is tested; exec
+has eight argv slots and127-byte arguments), but adding utilities/scripts is
+not the current priority over filesystem, network and desktop fundamentals.
 
 Pager/named pipes and the historical full in-OS kbuild restage pin remain
 unresolved. Desktop/network readiness is not established.

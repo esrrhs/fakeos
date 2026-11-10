@@ -19,6 +19,7 @@ extern long u_wait4(long pid, long *status, long options, long *rusage);
 extern long u_kill(long pid, long sig);
 extern long u_setpgid(long pid, long pgid);
 extern long u_nanosleep(const void *req, void *rem);
+extern long u_clock_gettime(long clockid, void *tp);
 extern void u_exit(long code);
 extern char *strcpy(char *dst, const char *src);
 extern int strcmp(const char *a, const char *b);
@@ -29,8 +30,7 @@ enum {
     WNOHANG = 1,
     SIGKILL = 9,
     SIG_MAX = 31,
-    EXIT_TIMEOUT = 124,
-    TICKS_PER_SEC = 20
+    EXIT_TIMEOUT = 124
 };
 
 static void usage(void) {
@@ -48,6 +48,7 @@ static int parse_secs(const char *s, long *out) {
     if (s[i] < '0' || s[i] > '9') return 0;
     while (s[i]) {
         if (s[i] < '0' || s[i] > '9') return 0;
+        if (v > (9223372036854775L - (s[i] - '0')) / 10) return 0;
         v = v * 10 + (s[i] - '0');
         i++;
     }
@@ -179,35 +180,53 @@ static int parse_opts(int argc, char **argv, long *sig_out, long *kill_after_out
     return ai;
 }
 
-static int wait_reap(long pid, long *status, long ticks) {
+/* Count elapsed monotonic time, not50ms polling iterations: preemption,
+ * tick rounding and EINTR must not stretch/shorten the requested budget. */
+static long clock_millis(void) {
+    long t[2];
+    if (u_clock_gettime(1, t) < 0 || t[0] < 0 || t[1] < 0
+        || t[1] >= 1000000000L || t[0] > (9223372036854775807L - 999) / 1000) return -1;
+    return t[0] * 1000 + t[1] / 1000000;
+}
+
+static int wait_reap(long pid, long *status, long millis) {
     long ts[2];
     long reaped;
-    long left = ticks;
-    while (left > 0) {
+    long now = clock_millis();
+    unsigned long deadline;
+    if (now < 0 || millis < 0) return -1;
+    deadline = (unsigned long)now + (unsigned long)millis;
+    for (;;) {
         reaped = u_wait4(pid, status, WNOHANG, 0);
         if (reaped == pid) return 1;
-        if (reaped < 0) return -1;
+        /* Even a sustained EINTR stream must still check the deadline. */
+        if (reaped < 0 && reaped != -4) return -1;
+        now = clock_millis();
+        if (now < 0) return -1;
+        if ((unsigned long)now >= deadline) return 0;
         ts[0] = 0;
         ts[1] = 50000000L;
-        u_nanosleep(ts, 0);
-        left--;
+        reaped = u_nanosleep(ts, 0);
+        if (reaped < 0 && reaped != -4) return -1;
     }
-    reaped = u_wait4(pid, status, WNOHANG, 0);
-    if (reaped == pid) return 1;
-    if (reaped < 0) return -1;
-    return 0;
+}
+
+static int wait_error(long pid, long target) {
+    long status;
+    long r;
+    u_write(2, "timeout: wait/clock failed\n", 27);
+    u_kill(target, SIGKILL);
+    do { r = u_wait4(pid, &status, 0, 0); } while (r == -4);
+    return 1;
 }
 
 int main(int argc, char **argv) {
     long sec;
     long pid;
     long status;
-    long reaped;
     char pathbuf[ARG_SLOT];
     char *envp[1];
-    long ts[2];
-    long ticks_left;
-    long grace_ticks;
+    long grace_millis;
     int ai;
     long sig;
     long kill_after;
@@ -256,47 +275,29 @@ int main(int argc, char **argv) {
         kill_target = pid;
     }
 
-    ticks_left = sec * TICKS_PER_SEC;
-    for (;;) {
-        reaped = u_wait4(pid, &status, WNOHANG, 0);
-        if (reaped == pid) {
-            return status_exit(status);
-        }
-        if (reaped < 0) {
-            u_write(2, "timeout: wait failed\n", 21);
-            return 1;
-        }
-        if (ticks_left <= 0) {
-            break;
-        }
-        ts[0] = 0;
-        ts[1] = 50000000L; /* 50ms */
-        u_nanosleep(ts, 0);
-        ticks_left--;
-    }
+    wr = wait_reap(pid, &status, sec * 1000);
+    if (wr == 1) return status_exit(status);
+    if (wr < 0) return wait_error(pid, kill_target);
 
     u_kill(kill_target, sig);
     if (kill_after >= 0) {
-        grace_ticks = kill_after * TICKS_PER_SEC;
-        if (grace_ticks == 0) grace_ticks = 1; /* one poll tick for -k0 */
+        grace_millis = kill_after * 1000;
+        if (grace_millis == 0) grace_millis = 50; /* one poll for -k0 */
     } else {
-        grace_ticks = 40; /* ~2s default short grace */
+        grace_millis = 2000; /* default short grace */
     }
-    wr = wait_reap(pid, &status, grace_ticks);
+    wr = wait_reap(pid, &status, grace_millis);
     if (wr == 1) return EXIT_TIMEOUT;
-    if (wr < 0) {
-        u_write(2, "timeout: wait failed\n", 21);
-        return 1;
-    }
+    if (wr < 0) return wait_error(pid, kill_target);
     if (sig != SIGKILL) {
         u_kill(kill_target, SIGKILL);
-        wr = wait_reap(pid, &status, 40);
+        wr = wait_reap(pid, &status, 2000);
         if (wr == 1) return EXIT_TIMEOUT;
-        if (wr < 0) {
-            u_write(2, "timeout: wait failed\n", 21);
-            return 1;
-        }
+        if (wr < 0) return wait_error(pid, kill_target);
     }
-    u_wait4(pid, &status, 0, 0);
+    {
+        long reaped;
+        do { reaped = u_wait4(pid, &status, 0, 0); } while (reaped == -4);
+    }
     return EXIT_TIMEOUT;
 }

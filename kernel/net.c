@@ -16,7 +16,7 @@ extern u32 virtio_net_rx(void *frame, u32 maxlen);
 extern void virtio_net_msix_selftest(void);
 extern void sched_yield(void);
 extern void select_kick(void);
-extern u64 sched_tick_count(void);
+extern u64 sched_clock_ticks(void);
 extern u64 sched_current_as_h(void);
 extern u32 sched_fd_alloc(void);
 extern void sched_fd_set(u32 idx, u32 fh);
@@ -165,7 +165,7 @@ struct sock {
     u32 shut_wr;       /* shutdown(SHUT_WR): no more TX / send FIN */
     u32 reuseaddr;     /* SO_REUSEADDR hint (bind helper) */
     /* Retransmit of last unacked segment (SYN or data). */
-    u32 rexmit_due;    /* sched_ticks deadline; 0 = idle */
+    u32 rexmit_due;    /* elapsed-clock deadline; 0 = idle */
     u32 rexmit_seq;
     u8  rexmit_flags;
     u16 rexmit_len;
@@ -190,7 +190,7 @@ static u32 dhcp_offer_gw;
 static u32 dhcp_offer_dns;
 static u32 dhcp_offer_lease;         /* option 51 seconds; 0 = default */
 static u32 dhcp_state;               /* 0 idle/static, 1 bound, 2 renew, 3 rebind */
-static u32 dhcp_t1_tick;             /* sched_ticks deadline for T1 */
+static u32 dhcp_t1_tick;             /* elapsed-clock deadline for T1 */
 static u32 dhcp_t2_tick;
 static u32 dhcp_exp_tick;            /* lease expiry */
 static u32 dhcp_next_xmit_tick;      /* renew/rebind retransmit pacing */
@@ -625,7 +625,7 @@ static void dhcp_parse_options(const u8 *opt, u32 len, u8 *msgtype_out) {
 
 static void dhcp_apply_static_fallback(void);
 static void dhcp_arm_lease_timers(u32 lease_secs) {
-    u32 now = (u32)sched_tick_count();
+    u32 now = (u32)sched_clock_ticks();
     u32 secs = lease_secs;
     if (secs < 60) secs = 60;                  /* floor for timer math */
     if (secs > 86400u * 7u) secs = 86400u * 7u;
@@ -784,7 +784,7 @@ static void tcp_arm_rexmit(struct sock *sk, u32 seq, u8 flags,
         sk->rexmit_buf[i] = payload[i];
     }
     /* ~500ms at 100Hz */
-    sk->rexmit_due = (u32)sched_tick_count() + 50;
+    sk->rexmit_due = (u32)sched_clock_ticks() + 50;
 }
 
 static void tcp_clear_rexmit(struct sock *sk) {
@@ -801,7 +801,7 @@ void net_tcp_timer(void) {
     if (!net_up) {
         return;
     }
-    now = (u32)sched_tick_count();
+    now = (u32)sched_clock_ticks();
     for (i = 0; i < MAX_SOCKS; i++) {
         struct sock *sk = &socks[i];
         if (!sk->used || sk->type != SOCK_STREAM) {
@@ -1535,7 +1535,7 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
     sk->snd_nxt = sk->iss + 1;
     tcp_arm_rexmit(sk, sk->iss, TCPF_SYN, 0, 0);
     {
-        u64 deadline = sched_tick_count() + 500; /* ~5s @ 100Hz */
+        u64 deadline = sched_clock_ticks() + 500; /* ~5s @ 100Hz */
         kmutex_lock(&sk->lock);
         for (;;) {
             cpu_cli();
@@ -1570,7 +1570,7 @@ u64 sys_connect(u64 fd, u64 uaddr, u64 ulen) {
                 kmutex_unlock(&sk->lock);
                 return (u64)(-1);
             }
-            if (sched_tick_count() >= deadline) {
+            if (sched_clock_ticks() >= deadline) {
                 cpu_sti();
                 tcp_clear_rexmit(sk);
                 sk->tcp_state = TCPS_CLOSED;
@@ -2383,7 +2383,7 @@ static void dhcp_timer_tick(void) {
     u32 blen;
     u32 now;
     if (!net_up || dhcp_state == 0) return;
-    now = (u32)sched_tick_count();
+    now = (u32)sched_clock_ticks();
     if (dhcp_state == 1 && now >= dhcp_t1_tick) {
         dhcp_state = 2;
         dhcp_pending = 1;
@@ -2433,7 +2433,7 @@ static void dhcp_run(void) {
     u32 tries;
     dhcp_pending = 1;
     dhcp_state = 0;
-    dhcp_xid = 0xFACE0001u ^ (u32)sched_tick_count();
+    dhcp_xid = 0xFACE0001u ^ (u32)sched_clock_ticks();
     if (dhcp_xid == 0) dhcp_xid = 0xFACE0001u;
     dhcp_got_offer = 0;
     dhcp_got_ack = 0;

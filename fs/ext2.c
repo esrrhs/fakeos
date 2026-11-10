@@ -9,7 +9,7 @@ typedef types.uint64_t u64;
 
 extern void kprintf(const char *fmt, ...);
 extern u32 sched_umask_get(void);
-extern u64 sched_tick_count(void);
+extern u64 sched_clock_ticks(void);
 extern u32 sched_current_euid(void);
 extern u32 sched_current_egid(void);
 
@@ -1935,7 +1935,7 @@ static u16 ext2_creat_mode(u32 ifmt, u32 creat_perm) {
 }
 
 static u32 now_sec(void) {
-    return (u32)(sched_tick_count() / 100);
+    return (u32)(sched_clock_ticks() / 100);
 }
 
 /* Stamp owner + atime/ctime/mtime on a freshly zeroed inode raw. */

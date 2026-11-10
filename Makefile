@@ -344,6 +344,7 @@ M5_REF_DEPS := $(filter-out $(BUILD_DIR)/userblob.o $(M5OBJ),$(OBJS))
 # m5blob incbins the staged tree AND the current userblob (the rebuilt
 # kernel must keep an equivalent userspace); userblob must be rebuilt first.
 $(M5ASM): $(M5_REF_DEPS) $(BUILD_DIR)/userblob.o user/progs/ping.c \
+	user/progs/dirent_check.c user/progs/clock_check.c \
 	tools/m5_stage.sh tools/m5_build_fakecc.sh
 	@mkdir -p $(M5STAGE)
 	@FAKECC_SRC=$(FAKECC_SRC) USE_FAKECC_ASM=$(USE_FAKECC_ASM) FCC='$(FCC)' bash tools/m5_stage.sh $(M5STAGE)

@@ -20,7 +20,7 @@ extern u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid);
 extern u32 sched_alloc_pid(void);
 extern void sched_yield(void);
 extern void kthread_exit(void);
-extern u64 sched_tick_count(void);
+extern u64 sched_clock_ticks(void);
 extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
 extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
 extern void sched_set_environ_envp(u32 envc, const char *envbuf);
@@ -424,7 +424,7 @@ static void uproc_monitor(u64 arg) {
     u64 start_ticks = (u64)arg;
 
     while (uproc_test_exits < UPROC_TEST_CHILDREN
-           && sched_tick_count() < start_ticks + MONITOR_PHASE1_TICKS) {
+           && sched_clock_ticks() < start_ticks + MONITOR_PHASE1_TICKS) {
         sched_yield();
     }
 
@@ -453,7 +453,7 @@ static void uproc_monitor(u64 arg) {
      * manual session the timeout simply releases kmain while the shell keeps
      * running on its own thread. */
     while (!uproc_pid1_done
-           && sched_tick_count() < start_ticks + MONITOR_PHASE2_TICKS) {
+           && sched_clock_ticks() < start_ticks + MONITOR_PHASE2_TICKS) {
         sched_yield();
     }
     if (uproc_pid1_done) {
@@ -516,7 +516,7 @@ void uproc_selftest(void) {
     kprintf("      Started pid %u from /bin/init (entry %p, stack top %p)\n",
             (u64)pid, entry, (u64)UPROC_STACK_TOP);
 
-    if (kthread_create((u64)(&uproc_monitor), sched_tick_count()) == 0xFFFFFFFF) {
+    if (kthread_create((u64)(&uproc_monitor), sched_clock_ticks()) == 0xFFFFFFFF) {
         kprintf("      [FAIL] could not create monitor thread\n");
         uproc_done = 1;
         return;

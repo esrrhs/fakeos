@@ -157,7 +157,11 @@ static volatile u64 sched_balance_remote;              /* enqueues onto remote R
 static volatile u64 sched_ipi_resched;                 /* resched IPIs sent */
 static u32 sched_bsp_cpu;            /* Logical CPU index of the BSP       */
 static u32 active;                   /* Scheduler online flag              */
+/* Aggregate preemption events retain the scheduler/selftest contract. They
+ * are NOT elapsed time: every CPU contributes one event per local IRQ. */
 static volatile u64 sched_ticks;
+/* One calibrated 100Hz source (the boot CPU), independent of AP count. */
+static volatile u64 clock_ticks;
 static u32 next_pid = 1;             /* User process id allocator          */
 static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
 static u64 cfs_min_vruntime;         /* min vruntime among runnable tasks  */
@@ -2032,6 +2036,7 @@ void sched_init(void) {
     sched_run_lock = 0;
     ap_sched_go = 0;
     sched_ticks = 0;
+    clock_ticks = 0;
     user_mode_ticks = 0;
     cfs_min_vruntime = 0;
     tg_init_root();
@@ -2892,6 +2897,9 @@ void sched_tick(void) {
     }
     spin_lock(&sched_run_lock);
     sched_ticks++;
+    /* APs still charge, preempt and pick_next on EVERY local timer IRQ.
+     * Only elapsed-time publication has one writer. run_lock serializes it. */
+    if (sched_cpu_index() == sched_bsp_cpu) clock_ticks++;
     cfs_charge(sched_cur(), VRUNTIME_SLICE);
     cfs_update_min();
     sched_switch_to(pick_next(sched_cur()));
@@ -3084,6 +3092,13 @@ u32 sched_tg_attach(u32 id, u32 tg) {
 
 u64 sched_tick_count(void) {
     return sched_ticks;
+}
+
+/* Tick-resolution boot-relative elapsed time, not aggregate CPU runtime.
+ * Aligned64-bit loads are atomic on x86-64. Timer IRQ exclusion can delay this
+ * clock, as on UP; no RTC/TSC catch-up or suspend/hotplug claim is made. */
+u64 sched_clock_ticks(void) {
+    return clock_ticks;
 }
 
 /* arch_prctl TLS: SET_FS updates TCB + live MSR; GET_FS reads TCB. */
@@ -3898,6 +3913,21 @@ u32 sched_should_eintr(void) {
     return 0;
 }
 
+/* nanosleep/select/poll are never restarted by SA_RESTART. Keep the
+ * restartable read/wait contract above unchanged. Delivery needs the actual
+ * user return frame; this helper only observes pending signals. */
+u32 sched_should_eintr_timer(void) {
+    u32 pend;
+    u32 sig;
+    if (!threads[sched_cur()].is_user) return 0;
+    if (sched_has_pending_fatal()) return 1;
+    pend = threads[sched_cur()].pending_sigs & ~threads[sched_cur()].sig_ignore;
+    for (sig = 1; sig <= 31; sig++) {
+        if ((pend & (1u << sig)) && threads[sched_cur()].sig_handler[sig] > 1) return 1;
+    }
+    return 0;
+}
+
 u32 sched_signal_send(u32 pid, u32 sig) {
     u32 i;
     u32 found = 0;
@@ -4273,6 +4303,10 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
         if ((pend & (1u << sig)) == 0) continue;
         if (sig == SIGKILL_N) continue;
         h = threads[sched_cur()].sig_handler[sig];
+        /* A kernel wait has no user frame to redirect. Preserve a caught
+         * signal for syscall exit, never substitute its default action or
+         * silently drop it. In particular caught TERM must not kill sleepers. */
+        if (h > 1 && f_rip == 0) continue;
 
         /* SIGSTOP cannot be caught or ignored. */
         if (sig == SIGSTOP_N) {

@@ -32,6 +32,7 @@ extern u32 sock_fh_is(u32 fh);
 extern void sched_sleep(u64 chan);
 extern u32 sched_wakeup_n(u64 chan, u32 n);
 extern u32 sched_should_eintr(void);
+extern u32 sched_should_eintr_timer(void);
 
 /* Fill one page for a VMA_FILE fault. Returns 1 on success (partial/EOF OK). */
 
@@ -511,7 +512,7 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
  * Interactive POSIX basics: getppid / uname / nanosleep / clock_gettime
  * ------------------------------------------------------------------------- */
 
-extern u64 sched_tick_count(void);
+extern u64 sched_clock_ticks(void);
 extern void sched_yield(void);
 extern void sched_check_signals(void);
 extern u32 sched_current_ppid(void);
@@ -565,7 +566,7 @@ static void ticks_to_timespec(u64 ticks, volatile u64 *sec_p, volatile u64 *nsec
     *nsec_p = (ticks % TICKS_PER_SEC) * NS_PER_TICK;
 }
 
-/* clock_gettime(2): REALTIME/MONOTONIC/BOOTTIME from 100 Hz sched ticks
+/* clock_gettime(2): REALTIME/MONOTONIC/BOOTTIME from 100 Hz elapsed ticks
  * (no RTC yet — REALTIME tracks boot-relative time like MONOTONIC). */
 u64 sys_clock_gettime(u64 clockid, u64 utp) {
     u64 as = sched_current_as_h();
@@ -577,7 +578,7 @@ u64 sys_clock_gettime(u64 clockid, u64 utp) {
         && clockid != CLOCK_BOOTTIME_ID) {
         return EINVAL_NEG;
     }
-    ticks = sched_tick_count();
+    ticks = sched_clock_ticks();
     ticks_to_timespec(ticks, (volatile u64 *)utp, (volatile u64 *)(utp + 8));
     return 0;
 }
@@ -605,22 +606,32 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
     if (sec == 0 && nsec == 0) {
         return 0;
     }
-    ticks = (u64)sec * TICKS_PER_SEC + (u64)nsec / NS_PER_TICK;
-    if (ticks == 0) {
-        ticks = 1;
-    }
-    deadline = sched_tick_count() + ticks;
+    /* Round UP, plus one tick for the unknown phase within the current
+     * tick. A positive relative wait must not expire before its request. */
+    if ((u64)sec > (~0ULL - 101) / TICKS_PER_SEC) return EINVAL_NEG;
+    ticks = (u64)sec * TICKS_PER_SEC
+          + ((u64)nsec + NS_PER_TICK - 1) / NS_PER_TICK + 1;
+    now = sched_clock_ticks();
+    if (ticks > ~0ULL - now) return EINVAL_NEG;
+    deadline = now + ticks;
     for (;;) {
-        now = sched_tick_count();
+        now = sched_clock_ticks();
         if (now >= deadline) {
             return 0;
         }
         sched_check_signals();
-        if (sched_should_eintr()) {
+        if (sched_should_eintr_timer()) {
             if (urem != 0) {
                 u64 left = deadline - now;
                 ticks_to_timespec(left, (volatile u64 *)urem,
                                   (volatile u64 *)(urem + 8));
+                /* Phase/round-up slack is not extra requested sleep time. */
+                if (*(volatile u64 *)urem > (u64)sec
+                    || (*(volatile u64 *)urem == (u64)sec
+                        && *(volatile u64 *)(urem + 8) > (u64)nsec)) {
+                    *(volatile u64 *)urem = (u64)sec;
+                    *(volatile u64 *)(urem + 8) = (u64)nsec;
+                }
             }
             return EINTR_NEG;
         }
