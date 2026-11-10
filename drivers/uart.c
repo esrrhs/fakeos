@@ -7,6 +7,12 @@ typedef types.uint16_t u16;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+static volatile u32 uart_rx_lock;
+
 /* Standard COM1. RX path can be polled or IRQ-driven (I/O APIC IRQ4);
  * received bytes land in a small ring that tty drains. */
 
@@ -61,7 +67,7 @@ static void uart_rx_push(char c) {
 }
 
 /* Called from isr_dispatch on the COM1 vector with interrupts masked. */
-void uart_irq(void) {
+static void uart_irq_locked(void) {
     u32 drained = 0;
     /* Drain the FIFO while LSR.DR is set. */
     while ((arch.inb(COM1 + 5) & 0x01) != 0) {
@@ -72,6 +78,14 @@ void uart_irq(void) {
     if (drained) {
         uart_irq_count++;
     }
+}
+
+void uart_irq(void) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&uart_rx_lock);
+    uart_irq_locked();
+    spin_unlock(&uart_rx_lock);
+    cpu_irq_restore(flags);
 }
 
 u64 uart_irq_count_total(void) {
@@ -102,7 +116,7 @@ void uart_puts(const char *s) {
 
 /* Non-blocking receive: prefer the IRQ ring, then fall back to LSR polling
  * so early-boot and no-APIC paths keep working. */
-int uart_getc_nonblock(void) {
+static int uart_getc_locked(void) {
     char c;
     if (uart_rx_count > 0) {
         c = uart_rx[uart_rx_head];
@@ -117,4 +131,14 @@ int uart_getc_nonblock(void) {
         return -1;
     }
     return (int)(arch.inb(COM1 + 0) & 0xFF);
+}
+
+int uart_getc_nonblock(void) {
+    int c;
+    u64 flags = cpu_irq_save();
+    spin_lock(&uart_rx_lock);
+    c = uart_getc_locked();
+    spin_unlock(&uart_rx_lock);
+    cpu_irq_restore(flags);
+    return c;
 }

@@ -1438,3 +1438,91 @@ void sched_ap_sysret_selftest(void) {
     }
     kprintf("      [PASS] AP SYSRET MSRs: STAR/LSTAR/EFER.SCE+NXE/current AS\n");
 }
+
+/* Alloc/free overlap used to corrupt shared buddy lists and slab free heads.
+ * Keep allocations live across yields so duplicate ownership changes canaries.
+ * Each worker owns its result cells (no non-atomic shared done++). */
+static volatile u32 g_alloc_done[4];
+static volatile u32 g_alloc_bad[4];
+static volatile u32 g_alloc_ap[4];
+
+static void allocator_worker(u64 worker) {
+    u64 pages[16];
+    u64 objects[16];
+    u64 sizes[16];
+    u32 round;
+    u32 i;
+    u64 tag = 0xA110CA7E00000000ULL + worker;
+    for (round = 0; round < 64; round++) {
+        if (smp_cpuid() != 0) g_alloc_ap[worker] = 1;
+        for (i = 0; i < 16; i++) {
+            u64 *p;
+            pages[i] = mem.pmm_alloc_page();
+            sizes[i] = (u64)16 << (i % 10);
+            objects[i] = (u64)mem.kmalloc(sizes[i]);
+            if (pages[i] == 0 || objects[i] == 0) g_alloc_bad[worker] = 1;
+            if (pages[i] != 0) {
+                p = (u64 *)mem.pmm_phys_to_virt(pages[i]);
+                p[0] = tag;
+                p[511] = tag;
+            }
+            if (objects[i] != 0) {
+                p = (u64 *)objects[i];
+                p[0] = tag;
+                p[sizes[i] / 8 - 1] = tag;
+            }
+        }
+        sched_yield();
+        for (i = 0; i < 16; i++) {
+            u64 *p;
+            if (pages[i] != 0) {
+                p = (u64 *)mem.pmm_phys_to_virt(pages[i]);
+                if (p[0] != tag || p[511] != tag) g_alloc_bad[worker] = 1;
+                mem.pmm_free_page(pages[i]);
+            }
+            if (objects[i] != 0) {
+                p = (u64 *)objects[i];
+                if (p[0] != tag || p[sizes[i] / 8 - 1] != tag) g_alloc_bad[worker] = 1;
+                mem.kfree((void *)objects[i]);
+            }
+        }
+    }
+    g_alloc_done[worker] = 1;
+    kthread_exit();
+}
+
+void sched_allocator_selftest(void) {
+    u32 i;
+    u32 done = 0;
+    u32 saw_ap = 0;
+    u64 deadline = sched_tick_count() + 3000;
+    kprintf("\n[MEM] Concurrent buddy/slab allocator self-test...\n");
+    for (i = 0; i < 4; i++) {
+        g_alloc_done[i] = 0;
+        g_alloc_bad[i] = 0;
+        g_alloc_ap[i] = 0;
+    }
+    for (i = 0; i < 4; i++) {
+        if (kthread_create((u64)(&allocator_worker), i) == 0xFFFFFFFFu) {
+            kprintf("      [FAIL] concurrent buddy/slab worker creation\n");
+            return;
+        }
+    }
+    while (done != 4 && sched_tick_count() < deadline) {
+        done = 0;
+        for (i = 0; i < 4; i++) done += g_alloc_done[i];
+        if (done != 4) sched_yield();
+    }
+    for (i = 0; i < 4; i++) {
+        if (!g_alloc_done[i] || g_alloc_bad[i]) {
+            kprintf("      [FAIL] concurrent buddy/slab allocation canaries worker=%u\n", (u64)i);
+            return;
+        }
+        if (g_alloc_ap[i]) saw_ap = 1;
+    }
+    if (smp_cpu_count() > 1 && !saw_ap) {
+        kprintf("      [FAIL] concurrent buddy/slab did not run on AP\n");
+        return;
+    }
+    kprintf("      [PASS] concurrent buddy/slab allocation canaries (AP=%u)\n", (u64)saw_ap);
+}

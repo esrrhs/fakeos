@@ -73,6 +73,14 @@ extern void wait_queue_init(struct wait_queue_head *wq);
 extern void wait_queue_wake(struct wait_queue_head *wq);
 extern void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m);
 
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+extern void wait_queue_sleep_unlock_spin(struct wait_queue_head *wq,
+    struct kmutex *m, volatile u32 *condition_lock);
+static volatile u32 tty_rx_lock;
+
 static struct kmutex tty_lock;
 static struct wait_queue_head tty_wait;
 static u32 tty_locks_inited;
@@ -364,7 +372,7 @@ static void tty_ingest_byte(char c) {
 }
 
 
-void tty_on_uart_byte(void) {
+static void tty_drain_uart_locked(void) {
     /* Drain the UART IRQ ring through ISIG so Ctrl-C/Z work during wait4. */
     for (;;) {
         int c = drivers.uart_getc_nonblock();
@@ -373,9 +381,21 @@ void tty_on_uart_byte(void) {
     }
 }
 
+void tty_on_uart_byte(void) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&tty_rx_lock);
+    tty_drain_uart_locked();
+    spin_unlock(&tty_rx_lock);
+    cpu_irq_restore(flags);
+}
+
 /* Called from kbd_irq (interrupts masked). */
 void tty_push_byte(char c) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&tty_rx_lock);
     tty_ingest_byte(c);
+    spin_unlock(&tty_rx_lock);
+    cpu_irq_restore(flags);
 }
 
 /* Non-blocking: bytes waiting in the shared ring or a completed line. */
@@ -403,6 +423,17 @@ static int tty_in_pop(void) {
     return (int)(unsigned char)c;
 }
 
+static int tty_poll_byte(void) {
+    int c;
+    u64 flags = cpu_irq_save();
+    spin_lock(&tty_rx_lock);
+    tty_drain_uart_locked();
+    c = tty_in_pop();
+    spin_unlock(&tty_rx_lock);
+    cpu_irq_restore(flags);
+    return c;
+}
+
 static int tty_getc_block(void) {
     int c;
     /* Hold tty_lock around the wait condition. CLI covers the empty-check to
@@ -412,21 +443,22 @@ static int tty_getc_block(void) {
     kmutex_lock(&tty_lock);
     cpu_cli();
     for (;;) {
+        spin_lock(&tty_rx_lock);
+        tty_drain_uart_locked();
         if (tty_got_intr || sched_has_pending_fatal()) {
+            spin_unlock(&tty_rx_lock);
             cpu_sti();
             kmutex_unlock(&tty_lock);
             return -2;                  /* interrupted */
         }
         c = tty_in_pop();
-        if (c < 0) {
-            c = drivers.uart_getc_nonblock();
-        }
         if (c >= 0) {
+            spin_unlock(&tty_rx_lock);
             cpu_sti();
             kmutex_unlock(&tty_lock);
             return c;
         }
-        wait_queue_sleep_unlock(&tty_wait, &tty_lock);
+        wait_queue_sleep_unlock_spin(&tty_wait, &tty_lock, &tty_rx_lock);
         /* Lock re-acquired; IF on. Deliver stop/kill before re-polling. */
         sched_check_signals();
         cpu_cli();
@@ -1230,28 +1262,11 @@ u64 tty_console_read(u64 ubuf, u64 len) {
             if (tty_got_intr || sched_should_eintr()) {
                 return done != 0 ? done : EINTR_NEG;
             }
-            c = tty_in_pop();
+            c = tty_poll_byte();
             if (c < 0) {
-                c = drivers.uart_getc_nonblock();
-            }
-            if (c < 0) {
-                if (done > 0 && tty_cc[TTY_VMIN] == 0) {
-                    break;
-                }
-                tty_locks_ensure();
-                kmutex_lock(&tty_lock);
-                cpu_cli();
-                c = tty_in_pop();
-                if (c < 0) {
-                    c = drivers.uart_getc_nonblock();
-                }
-                if (c < 0) {
-                    wait_queue_sleep_unlock(&tty_wait, &tty_lock);
-                    sched_check_signals();
-                    continue;
-                }
-                cpu_sti();
-                kmutex_unlock(&tty_lock);
+                if (done > 0 && tty_cc[TTY_VMIN] == 0) break;
+                c = tty_getc_block();
+                if (c < 0) return done != 0 ? done : EINTR_NEG;
             }
             ((volatile char *)ubuf)[done] = (char)c;
             done++;
@@ -1297,18 +1312,5 @@ u64 tty_console_read(u64 ubuf, u64 len) {
 /* Self-test: block on tty wait_queue until one input byte arrives, then drop it.
  * Uses the same kmutex + wait_queue_sleep_unlock path as console read. */
 void tty_selftest_wait_byte(void) {
-    int c;
-    tty_locks_ensure();
-    kmutex_lock(&tty_lock);
-    cpu_cli();
-    for (;;) {
-        c = tty_in_pop();
-        if (c >= 0) {
-            cpu_sti();
-            kmutex_unlock(&tty_lock);
-            return;
-        }
-        wait_queue_sleep_unlock(&tty_wait, &tty_lock);
-        cpu_cli();
-    }
+    tty_getc_block();
 }

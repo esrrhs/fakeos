@@ -82,6 +82,7 @@ def main():
                           if '[FAIL]' in line and re.search(
                               r'SYSRET|STAR/LSTAR|EFER|current AS', line)]
         assert not platform_fails, platform_fails
+        assert "[PASS] concurrent buddy/slab allocation canaries" in transcript
         if args.require_process_selftests:
             verify_process_selftests(transcript)
         vm.send('export FAKECC_RTCACHE=0')

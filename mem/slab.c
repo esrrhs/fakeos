@@ -10,6 +10,14 @@ extern u64 pmm_alloc_page(void);
 extern u64 pmm_alloc_pages(u32 order);
 extern void pmm_free_pages(u64 paddr, u32 order);
 
+/* Shared allocator state is protected across CPUs and local IRQ preemption.
+ * Lock ordering: heap_lock -> pmm_lock. Neither path sleeps. */
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+static volatile u32 heap_lock;
+
 /* ---------------------------------------------------------------------------
  * Slab kernel heap
  *
@@ -117,7 +125,7 @@ static int slab_grow(u32 c) {
     return 1;
 }
 
-void *kmalloc(u64 size) {
+static void *kmalloc_unlocked(u64 size) {
     if (size == 0) {
         size = MIN_CLASS_SIZE;
     }
@@ -164,7 +172,18 @@ void *kmalloc(u64 size) {
     return (void *)(HHDM_BASE + block);
 }
 
-void kfree(void *ptr) {
+void *kmalloc(u64 size) {
+    u64 flags = cpu_irq_save();
+    void * result;
+    spin_lock(&heap_lock);
+    result = kmalloc_unlocked(size);
+    spin_unlock(&heap_lock);
+    cpu_irq_restore(flags);
+    return result;
+}
+
+
+static void kfree_unlocked(void *ptr) {
     if (ptr == 0) {
         return;
     }
@@ -204,6 +223,15 @@ void kfree(void *ptr) {
     h->free_head = obj;
     h->nfree++;
 }
+
+void kfree(void *ptr) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&heap_lock);
+    kfree_unlocked(ptr);
+    spin_unlock(&heap_lock);
+    cpu_irq_restore(flags);
+}
+
 
 /* ---------------------------------------------------------------------------
  * Diagnostics

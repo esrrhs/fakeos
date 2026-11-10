@@ -2787,7 +2787,10 @@ u32 wait_queue_wake_n(struct wait_queue_head *wq, u32 n) {
  * hold a kmutex around the wait condition (pipe/tty-style). Caller must
  * hold `m`. Idle-CPU kicks for any mutex waiter woken by the drop run
  * before this thread deschedules. */
-void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
+/* Optional condition spinlock is held by IRQ producers as well as waiters.
+ * Lock order: condition -> sched_run_lock; drop condition after sleep is armed. */
+void wait_queue_sleep_unlock_spin(struct wait_queue_head *wq, struct kmutex *m,
+                                  volatile u32 *condition_lock) {
     u32 kick_mask = 0;
     u32 self;
     if (wq == 0 || m == 0) {
@@ -2803,6 +2806,7 @@ void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
     threads[self].wait_chan = (u64)wq;
     cfs_dequeue_locked(self);
     threads[self].state = TCB_SLEEPING;
+    if (condition_lock != 0) spin_unlock(condition_lock);
     /* Kick mutex waiters before sleeping: schedule_tail drops run_lock. */
     spin_unlock(&sched_run_lock);
     kick_idle_cpus(kick_mask);
@@ -2814,6 +2818,10 @@ void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
     }
     arch.cpu_sti();
     kmutex_lock(m);
+}
+
+void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m) {
+    wait_queue_sleep_unlock_spin(wq, m, 0);
 }
 
 /* Called from the Local APIC timer ISR (vector 32) with interrupts off in the

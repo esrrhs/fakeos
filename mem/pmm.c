@@ -19,6 +19,14 @@ extern u8 boot_pml4[];
 extern u64 vmm_kernel_root(void);
 extern void vmm_hhdm_extend(u64 root, u64 start_pa, u64 end_pa);
 
+/* Shared allocator state is protected across CPUs and local IRQ preemption.
+ * Lock ordering: heap_lock -> pmm_lock. Neither path sleeps. */
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+static volatile u32 pmm_lock;
+
 /* ---------------------------------------------------------------------------
  * Constants
  * ------------------------------------------------------------------------- */
@@ -176,7 +184,7 @@ static void add_run(u32 start, u32 end) {
     }
 }
 
-u64 pmm_alloc_pages(u32 order) {
+static u64 pmm_alloc_pages_unlocked(u32 order) {
     if (order > MAX_ORDER) {
         return 0;
     }
@@ -207,6 +215,17 @@ u64 pmm_alloc_pages(u32 order) {
     return (u64)pfn * PAGE_SIZE;
 }
 
+u64 pmm_alloc_pages(u32 order) {
+    u64 flags = cpu_irq_save();
+    u64 result;
+    spin_lock(&pmm_lock);
+    result = pmm_alloc_pages_unlocked(order);
+    spin_unlock(&pmm_lock);
+    cpu_irq_restore(flags);
+    return result;
+}
+
+
 u64 pmm_alloc_page(void) {
     return pmm_alloc_pages(0);
 }
@@ -216,7 +235,7 @@ static int block_is_free_head(u32 pfn) {
     return st <= MAX_ORDER;
 }
 
-void pmm_free_pages(u64 paddr, u32 order) {
+static void pmm_free_pages_unlocked(u64 paddr, u32 order) {
     if (order > MAX_ORDER) {
         return;
     }
@@ -251,6 +270,15 @@ void pmm_free_pages(u64 paddr, u32 order) {
 
     list_insert_sorted(order, pfn);
 }
+
+void pmm_free_pages(u64 paddr, u32 order) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&pmm_lock);
+    pmm_free_pages_unlocked(paddr, order);
+    spin_unlock(&pmm_lock);
+    cpu_irq_restore(flags);
+}
+
 
 void pmm_free_page(u64 paddr) {
     pmm_free_pages(paddr, 0);
