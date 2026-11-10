@@ -35,7 +35,7 @@ extern u32 sched_current_egid(void);
  *
  * Files come in two flavors:
  *   static (ro=1) - data points at a kernel rodata incbin image; immutable
- *   dynamic       - kmalloc-backed growable buffer (doubling, 1 MiB cap)
+ *   dynamic       - kmalloc-backed growable buffer (doubling to FILE_MAX)
  *
  * All handles are plain u32 indices: inode numbers and open-file slots. This
  * matches the handle style used by mem/as.c across package boundaries.

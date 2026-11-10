@@ -207,7 +207,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     kprintf("           - 64-bit IDT + CPU exception capture & dump: OK\n");
     kprintf("           - Local APIC periodic timer (100 Hz ticks): OK\n");
     kprintf("           - HHDM direct map + identity mapping retired: OK\n");
-    kprintf("           - Multiboot memory map + buddy PMM (4K..4M): OK\n");
+    kprintf("           - Multiboot memory map + buddy PMM (4K..16M): OK\n");
     kprintf("           - 4-level VMM toolchain (map/translate/unmap, NX): OK\n");
     kprintf("           - Slab kmalloc/kfree (16B..2048B + buddy blocks): OK\n");
     kprintf("           - Address spaces / VMA demand paging / COW fork: OK\n");

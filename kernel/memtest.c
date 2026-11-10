@@ -249,6 +249,95 @@ static int test_slab_big(void) {
     return ok;
 }
 
+/* Ramfs declares 16 MiB files. Exercise both new buddy orders, every
+ * requested page's edges, coexistence, failure, and exact page reclamation.
+ * This runs before scheduler release, so free-page accounting is stable. */
+static int test_slab_large(void) {
+    void *blocks[3];
+    u64 sizes[3];
+    u64 caps[3];
+    u64 before = mem.pmm_free_pages_count();
+    u64 i;
+    u64 j;
+    u64 n = 0;
+    int ok = 1;
+    sizes[0] = 4198400; caps[0] = 8388608;
+    sizes[1] = 8392704; caps[1] = 16777216;
+    sizes[2] = 16777216; caps[2] = 16777216;
+    for (i = 0; i < 3; i++) {
+        blocks[i] = mem.kmalloc(sizes[i]);
+        if (blocks[i] == 0) {
+            kprintf("      [FAIL] large kmalloc(%u) returned null\n", sizes[i]);
+            ok = 0;
+            break;
+        }
+        n++;
+        if (((u64)blocks[i] & (caps[i] - 1)) != 0) {
+            kprintf("      [FAIL] large kmalloc block misaligned\n");
+            ok = 0;
+        }
+        for (j = 0; j < i; j++) {
+            if ((u64)blocks[i] < (u64)blocks[j] + caps[j]
+                && (u64)blocks[j] < (u64)blocks[i] + caps[i]) {
+                kprintf("      [FAIL] large kmalloc live blocks overlap\n");
+                ok = 0;
+            }
+        }
+    }
+    if (n == 3 && mem.pmm_free_pages_count() + 10240 != before) {
+        kprintf("      [FAIL] large kmalloc allocation accounting drift\n");
+        ok = 0;
+    }
+    if (ok) {
+        for (i = 0; i < n; i++) {
+            volatile u64 *b = (volatile u64 *)blocks[i];
+            for (j = 0; j < sizes[i] / 4096; j++) {
+                b[j * 512] = sizes[i] + j;
+                b[j * 512 + 511] = sizes[i] + j + 1;
+            }
+        }
+        for (i = 0; i < n; i++) {
+            volatile u64 *b = (volatile u64 *)blocks[i];
+            for (j = 0; j < sizes[i] / 4096; j++) {
+                if (b[j * 512] != sizes[i] + j
+                    || b[j * 512 + 511] != sizes[i] + j + 1) {
+                    kprintf("      [FAIL] large kmalloc page canary %u/%u\n", i, j);
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+    }
+    for (i = n; i > 0; i--) mem.kfree(blocks[i - 1]);
+    if (mem.pmm_free_pages_count() != before) {
+        kprintf("      [FAIL] large kmalloc leaked pages\n");
+        ok = 0;
+    }
+    void *too_big = mem.kmalloc(16777217);
+    if (too_big != 0) {
+        kprintf("      [FAIL] oversized kmalloc unexpectedly succeeded\n");
+        mem.kfree(too_big);
+        ok = 0;
+    }
+    void *overflow = mem.kmalloc(0xffffffffffffffffULL);
+    if (overflow != 0) {
+        kprintf("      [FAIL] maximal-size kmalloc wrapped into a small allocation\n");
+        mem.kfree(overflow);
+        ok = 0;
+    }
+    void *again = mem.kmalloc(16777216);
+    if (again == 0) {
+        kprintf("      [FAIL] reclaimed large block cannot be allocated\n");
+        ok = 0;
+    }
+    mem.kfree(again);
+    if (mem.pmm_free_pages_count() != before) {
+        kprintf("      [FAIL] large kmalloc limit/reuse accounting drift\n");
+        ok = 0;
+    }
+    return ok;
+}
+
 static int test_slab_reuse(void) {
     /* After freeing a class, the cached slab must immediately hand the same
      * storage back without consuming new pages. */
@@ -309,6 +398,9 @@ void slab_selftest(void) {
     }
     if (test_slab_big()) {
         kprintf("      [PASS] Big alloc path: 64 buddy blocks (up to 256 KiB), exact accounting\n");
+    }
+    if (test_slab_large()) {
+        kprintf("      [PASS] Large kmalloc: 8/16 MiB canaries, limits and exact reclamation\n");
     }
     if (test_slab_reuse()) {
         kprintf("      [PASS] Free-list reuse: cached slab hands memory back, no leaks\n");

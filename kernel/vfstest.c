@@ -23,7 +23,7 @@ enum {
     T_SEEK_SET = 0,
     T_SEEK_END = 2,
     T_DENT_RECLEN = 48,
-    T_FILE_MAX = 4194304
+    T_FILE_MAX = 16777216
 };
 
 /* Spelled as a string literal rather than a char initialiser list: this is
@@ -172,13 +172,12 @@ void vfs_selftest(void) {
         vfs_expect(good, "appended content matches");
     }
 
-    /* Growth ceiling: dynamic buffers double through kmalloc; the buddy
-     * allocator's largest block is 4 MiB, so a write at offset 4 MiB cannot
-     * be backed and is rejected without changing the file. */
+    /* Enforce the declared 16 MiB FILE_MAX, not the old 4 MiB heap cap.
+     * The one-byte write beyond that ceiling must retain existing data. */
     vfs_expect(fs.fs_lseek_h(fh, T_FILE_MAX, T_SEEK_SET) == T_FILE_MAX,
                "seek near file ceiling");
     vfs_expect(fs.fs_write_h(fh, buf, 1) == (u64)(-1),
-               "negative: write beyond 4 MiB rejected without growth");
+               "negative: write beyond 16 MiB rejected without growth");
     ino = fs.fs_lookup("/selftest/dyn");
     vfs_expect(fs.fs_ino_size(ino) == 6410, "file size untouched after failed write");
     fs.fs_close(fh);

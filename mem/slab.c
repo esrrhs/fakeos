@@ -8,6 +8,7 @@ typedef types.uint64_t u64;
 
 extern u64 pmm_alloc_page(void);
 extern u64 pmm_alloc_pages(u32 order);
+extern u32 pmm_max_order(void);
 extern void pmm_free_pages(u64 paddr, u32 order);
 
 /* Shared allocator state is protected across CPUs and local IRQ preemption.
@@ -28,7 +29,8 @@ static volatile u32 heap_lock;
  *                    page base, objects follow, and free objects thread an
  *                    intrusive singly-linked list through their first 8 bytes.
  *
- *   size >  2048  -> a power-of-two buddy block (order 1..10, 8 KiB .. 4 MiB).
+ *   size >  2048  -> a power-of-two buddy block up to pmm_max_order()
+ *                    (currently 8 KiB .. 16 MiB).
  *
  * A packed per-frame table (`page_info`) gives O(1) kfree resolution: class
  * caches store (class_index + 1), buddy blocks store (0x80000000 | order).
@@ -44,7 +46,6 @@ enum {
     HEADER_SIZE    = 32,               /* sizeof(struct slab_header)         */
     INFO_NONE      = 0xFFFFFFFF,
     INFO_BIG       = 0x80000000,
-    BIG_ORDER_MAX  = 10,
     SLAB_MAGIC     = 0x534C414242414C53ULL,   /* "SLABBALS" */
     MAX_FRAMES     = 1048576           /* 4 GiB / 4 KiB (must match pmm.c)   */
 };
@@ -81,14 +82,15 @@ static u32 size_to_class(u64 size) {
 
 static u32 big_order_for(u64 size) {
     u32 order = 1;                    /* 8 KiB minimum for the big path */
-    while (order <= BIG_ORDER_MAX) {
+    u32 max_order = pmm_max_order();
+    while (order <= max_order) {
         u64 bytes = (u64)1 << (order + 12);
         if (bytes >= size) {
             return order;
         }
         order++;
     }
-    return BIG_ORDER_MAX + 1;       /* Unsupported: must be > every order */
+    return max_order + 1;       /* Unsupported: must be > every order */
 }
 
 /* Create a fresh single-page slab for class c and prepend it to the chain. */
@@ -156,7 +158,7 @@ static void *kmalloc_unlocked(u64 size) {
 
     /* Big allocation: contiguous buddy block. */
     u32 order = big_order_for(size);
-    if (order > BIG_ORDER_MAX) {
+    if (order > pmm_max_order()) {
         return 0;
     }
     u64 block = pmm_alloc_pages(order);

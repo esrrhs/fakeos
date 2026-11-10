@@ -38,9 +38,9 @@ static const u64 KERNEL_LMA     = 0x00100000;     /* Kernel loads at 1 MiB   */
 static const u64 BOOT_WINDOW    = 0x40000000;     /* Static HHDM covers 1 GiB */
 static const u64 MAX_PHYS       = 0x100000000ULL; /* Managed RAM ceiling: 4 GiB */
 
-/* Buddy geometry: orders 0..10 => blocks of 4 KiB .. 4 MiB (1024 frames). */
+/* Buddy geometry: orders 0..12 => blocks of 4 KiB .. 16 MiB (4096 frames). */
 enum {
-    MAX_ORDER     = 10,
+    MAX_ORDER     = 12,
     MAX_FRAMES    = 1048576,          /* 4 GiB / 4 KiB */
     NIL           = 0xFFFFFFFF,
     ST_RESERVED   = 0xFF,             /* Hole, BIOS/device range or in use   */
@@ -56,7 +56,7 @@ enum {
  * ------------------------------------------------------------------------- */
 
 /* One state byte per physical frame. A free block head stores its order
- * (0..10); everything else uses one of the ST_* sentinels above. */
+ * (0..MAX_ORDER); everything else uses one of the ST_* sentinels above. */
 static u8 frame_state[MAX_FRAMES];
 
 /* Free list head per order (PFN, NIL when empty). Lists are kept sorted by
@@ -258,12 +258,14 @@ static void pmm_free_pages_unlocked(u64 paddr, u32 order) {
         u32 span = (u32)1 << (order + 1);
         if (buddy >= highest_pfn) break;               /* Outside tracked RAM */
         if (frame_state[buddy] != (u8)order) break;   /* Buddy not free here  */
-        if ((pfn & (span - 1)) != 0) break;           /* Misaligned pair      */
+        /* Either half can be freed last. Check the pair's lower base,
+         * not the just-freed head (which may be the upper buddy). */
+        u32 base = buddy < pfn ? buddy : pfn;
+        if ((base & (span - 1)) != 0) break;
 
         list_remove(order, buddy);
-        if (buddy < pfn) {
-            pfn = buddy;
-        }
+        frame_state[base + ((u32)1 << order)] = ST_INTERIOR;
+        pfn = base;
         order++;
         frame_state[pfn] = (u8)order;
     }

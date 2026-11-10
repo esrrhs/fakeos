@@ -42,6 +42,7 @@ These are executable acceptance checks, not a daily-driver certification:
 | File workspace | `tools/m5_persistent_files_smoke.py --smp 2`: fresh private 4 MiB ext2 image, two boots; create nested dirs, append with piped `ed`, copy/rename/delete, recursive copy, byte comparisons, >12-block file, source saved script, mode/size/mtime preserved across relaunch; RAM `/tmp` not preserved |
 | Relaunch contract | Guest `sync`, then shell `exit 0`, then QEMU process shutdown/relaunch on that same disposable image; **not** guest reboot(2), power-loss safety, or a full journal guarantee |
 | Memory under SMP | Post-AP buddy/slab worker canaries, allocation/free interleaving; allocator locks preserve local IRQ state, lock order heap -> PMM |
+| Ramfs growth | `tools/m5_ramfs_growth_smoke.py --smp 1` and `--smp 2`: real writes beyond 4 MiB, exact 16 MiB, zero extension/full hashes, copy/shrink/regrow, retained data on size-limit and real allocation-pressure failures, recovery after freeing a block |
 | Programs / compiler | `tools/m5_guest_smoke.py --require-process-selftests --smp 1` and repeated `--smp 2`: seven pipe/signal/orphan regressions, AP SYSRET/NXE/current-AS, guest C exec, provenance, ELF64/flat binary |
 | Build | `FCC=/tmp/fakecc-pr116-merge/build/fakecc FAKECC_SRC=/tmp/fakecc-pr116-merge tools/m5_no_host_cc_smoke.sh`: clean deny-tools build and compiler fixed point |
 | Inspection | `tools/m5_daily_proc_smoke.py`: real processes/memory via ps/free |
@@ -139,7 +140,7 @@ durability are not certified here.
 The first ENOSPC fixture also exposed a separate Ramfs contiguous-allocation
 limit: 5 MiB `dd` failed while preparing its source. The fixture now verifies
 an exact 1.5 MiB source before filling the disposable disk; larger Ramfs files
-remain a real unresolved daily-use gap, not a passing claim. A separate guest
+were a real daily-use gap before the growth correction below. A separate guest
 boundary probe confirmed that exactly 4 MiB succeeds, 5 MiB stops at 4 MiB,
 and appending one byte at offset 4 MiB fails without changing retained bytes,
 with 191820 kB free. `FILE_MAX` is 16 MiB, but Ramfs doubling calls contiguous
@@ -216,7 +217,8 @@ intervened probes are **diagnostics, not acceptance**. The fixture now aligns
 its deadline to 16 KiB: existing 16 KiB buddy-backed stacks place counters in
 a last page, while the aligned deadline occupies a first page, preventing
 that low-page-index collision. The final linked deadline was verified as
-`0xffffffff83a3c000`; the tick counter's page has low bits 1, not stack bits 3.
+`0xffffffff83a3c000` in that earlier image; its tick page had low bits 1,
+not stack bits 3.
 No scheduler algorithm, hot loop, duration, ratio, progress check, or retry
 policy changed. The oldest unobserved failure cannot be retrospectively
 measured, and host-service sensitivity still exists.
@@ -242,13 +244,59 @@ continued with fresh SMP1/2 process runs and all strict compiler runs on the
 **same unchanged ELF**; the earlier failed log was retained, not relabeled green.
 No full in-OS kbuild or daily-driver readiness is inferred.
 
+### Ramfs growth and buddy reclamation acceptance
+
+A fresh strict guest probe on the preceding validated image verified the full
+4 MiB HEAD/zero hash, then failed an actual four-byte append at offset 4 MiB
+(`dd: write error`, exit 1). The correction extends buddy orders through 12
+(16 MiB) and makes the heap use that same PMM limit instead of a second,
+independently capped constant. The contiguous-allocation design is unchanged;
+fragmentation or insufficient memory can still reject growth. Review also
+reproduced an existing directional buddy-merge bug with the real PMM core:
+a private aligned 16 MiB arena split into pages, then freed in ascending
+order, reported all 4096 pages free yet could not supply one 16 MiB block.
+The correction validates the pair's lower base (either buddy may be freed
+last) and marks the absorbed upper head interior. The native fakecc test
+covers every leaf order 0..11, ascending/reverse/interleaved frees, reserved
+holes, exact accounting and full-block reclamation; its only hardware
+adaptations are HHDM backing and single-thread IRQ/lock stubs.
+
+New boot checks hold 8/16 MiB allocations simultaneously, verify every
+requested page's boundary canaries and non-overlap, reject an over-limit
+request, and require exact page reclamation/reuse. The new
+`tools/m5_ramfs_growth_smoke.py --smp 1` (and `--smp 2`) exercises real writes,
+zero-extension through 5/8/9/16 MiB, full-byte hashes, retained contents on
+size-limit errors, copy, shrink/regrow and deletion. It additionally exhausts
+16 MiB blocks in its disposable 256 MiB guest, requires failed truncate and
+write growth to retain an existing file's full hash/size, frees one filler,
+and requires that same growth to succeed with the prefix retained. This is
+allocation-pressure coverage, not a guarantee against arbitrary fragmentation.
+The boot bounds test also rejects the maximal unsigned request without wrap.
+`FCC=... python3 tools/test_pmm_buddy.py` runs the native PMM cases.
+The VFS boot test still requires a failed beyond-limit write, unchanged file
+size and correct later O_APPEND; its ceiling now matches FILE_MAX=16 MiB,
+not the obsolete 4 MiB heap cap. No fairness windows/ratios were changed.
+
+The final uninstrumented ELF SHA256 is
+`d7f5a16ecff878e1000d9b56d7cf714259b27969b885489264c60f969afe73db`.
+Its fourteen audited boot logs contain no FAIL/FATAL: growth/copy/ps SMP1/2,
+persistence both boots SMP1/2, strict process+compiler SMP1 and SMP2 three
+times. All include large canaries, concurrent allocators and the unchanged
+nested fairness assertion. Both pressure tests reached 11 live 16 MiB filler
+files before failure. Clean fakecc-only deny/fixed-point/provenance and asm
+ELF/bin checks passed at released dfb1c7b. Earlier candidates really failed
+an obsolete VFS bound and over-cap cleanup argv; they were corrected, not
+counted as passing. Contiguous allocation, 16 MiB per-file and resource limits
+remain; this is not general daily-driver or full in-OS kbuild acceptance.
+
 ## Next concrete gaps
 
-1. Ramfs file growth: the reproduced 5 MiB source-setup failure requires a
-   bounded non-contiguous allocation strategy or honest size-limit handling.
-2. Script launching: shell currently ignores script argv; only source/. is
-   tested. Atomic copy replacement/metadata UX (`cp -p` / `touch -d`) also
-   remain incomplete.
+1. Script launching: shell ignores script argv and execve has no shebang
+   handling; only source/. is tested. Exec also has an eight-slot argv limit.
+2. Long directory-entry names: the fixed 48-byte getdents ABI cannot represent
+   all names accepted by the filesystems. Probe prefix collisions and prevent
+   silent recursive copy omission before claiming lossless backup workflows.
+   Atomic copy replacement/metadata UX also remain incomplete.
 3. SMP timekeeping: a controlled SMP2 observation saw `sleep 20` complete in
    about 10 host seconds; global scheduler ticks currently advance on every
    CPU while clock/sleep conversion assumes 100 Hz. Reproduce SMP1/2 timing
