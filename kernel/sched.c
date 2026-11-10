@@ -3461,6 +3461,174 @@ u32 sched_current_threads(void) {
     return n == 0 ? 1 : n;
 }
 
+/* Visible in /proc and ps: a user process leader (tid==pid), including zombies
+ * that have not yet been reaped. Kernel threads (pid 0) stay hidden. */
+static u32 tcb_of_user_pid(u32 pid) {
+    u32 i;
+    u32 any = 0xFFFFFFFF;
+    if (pid == 0) {
+        return 0xFFFFFFFF;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].state == TCB_FREE || !threads[i].is_user
+            || threads[i].pid != pid) {
+            continue;
+        }
+        if (threads[i].tid == pid) {
+            return i;
+        }
+        if (any == 0xFFFFFFFF) {
+            any = i;
+        }
+    }
+    return any;
+}
+
+u32 sched_pid_visible(u32 pid) {
+    return tcb_of_user_pid(pid) != 0xFFFFFFFF;
+}
+
+u32 sched_pid_ppid(u32 pid) {
+    u32 id = tcb_of_user_pid(pid);
+    if (id == 0xFFFFFFFF) {
+        return 0;
+    }
+    return threads[id].ppid;
+}
+
+u32 sched_pid_threads(u32 pid) {
+    u32 n = 0;
+    u32 i;
+    if (!sched_pid_visible(pid)) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].state != TCB_FREE && threads[i].is_user
+            && threads[i].pid == pid) {
+            n++;
+        }
+    }
+    return n == 0 ? 1 : n;
+}
+
+u64 sched_pid_as_h(u32 pid) {
+    u32 id = tcb_of_user_pid(pid);
+    if (id == 0xFFFFFFFF) {
+        return 0;
+    }
+    return threads[id].as_h;
+}
+
+/* Linux-ish short state letter for /proc/pid/status and ps. */
+char sched_pid_state_char(u32 pid) {
+    u32 id = tcb_of_user_pid(pid);
+    u32 st;
+    if (id == 0xFFFFFFFF) {
+        return '?';
+    }
+    st = threads[id].state;
+    if (st == TCB_RUNNABLE) {
+        return 'R';
+    }
+    if (st == TCB_SLEEPING) {
+        return 'S';
+    }
+    if (st == TCB_STOPPED) {
+        return 'T';
+    }
+    if (st == TCB_DEAD) {
+        return 'Z';
+    }
+    return '?';
+}
+
+u64 sched_cmdline_copy_pid(u32 pid, char *buf, u64 cap) {
+    u32 id;
+    u64 n;
+    u64 i;
+    if (pid == 0) {
+        return sched_cmdline_copy(buf, cap);
+    }
+    id = tcb_of_user_pid(pid);
+    if (id == 0xFFFFFFFF || buf == 0 || cap == 0) {
+        return 0;
+    }
+    n = threads[id].cmdline_len;
+    if (n > cap) {
+        n = cap;
+    }
+    for (i = 0; i < n; i++) {
+        buf[i] = threads[id].cmdline[i];
+    }
+    return n;
+}
+
+u64 sched_environ_copy_pid(u32 pid, char *buf, u64 cap) {
+    u32 id;
+    u64 n;
+    u64 i;
+    if (pid == 0) {
+        return sched_environ_copy(buf, cap);
+    }
+    id = tcb_of_user_pid(pid);
+    if (id == 0xFFFFFFFF || buf == 0 || cap == 0) {
+        return 0;
+    }
+    n = threads[id].environ_len;
+    if (n > cap) {
+        n = cap;
+    }
+    for (i = 0; i < n; i++) {
+        buf[i] = threads[id].environ[i];
+    }
+    return n;
+}
+
+/* Sorted unique visible user pids. Returns the count written to out. */
+u32 sched_pid_list(u32 *out, u32 cap) {
+    u32 n = 0;
+    u32 i;
+    u32 j;
+    if (out == 0 || cap == 0) {
+        return 0;
+    }
+    for (i = 0; i < MAX_THREADS; i++) {
+        u32 pid;
+        u32 seen;
+        if (threads[i].state == TCB_FREE || !threads[i].is_user
+            || threads[i].pid == 0) {
+            continue;
+        }
+        pid = threads[i].pid;
+        seen = 0;
+        for (j = 0; j < n; j++) {
+            if (out[j] == pid) {
+                seen = 1;
+                break;
+            }
+        }
+        if (seen) {
+            continue;
+        }
+        if (n >= cap) {
+            break;
+        }
+        out[n++] = pid;
+    }
+    /* Insertion sort so getdents/ps offsets are stable. */
+    for (i = 1; i < n; i++) {
+        u32 pid = out[i];
+        j = i;
+        while (j > 0 && out[j - 1] > pid) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = pid;
+    }
+    return n;
+}
+
+
 
 /* True when a live (neither exited nor freed) child TCB of ppid exists. The
  * exit record alone is enough for wait once the child is DEAD. */

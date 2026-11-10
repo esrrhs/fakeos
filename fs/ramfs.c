@@ -12,11 +12,14 @@ typedef types.uint64_t u64;
  * mirroring how mem/as.c already calls kprintf. */
 extern void kprintf(const char *fmt, ...);
 
-/* Filled by kernel for synthetic /proc/self nodes (see procfs_gen_*). */
-extern u64 procfs_gen_status(char *buf, u64 cap);
-extern u64 procfs_gen_maps(char *buf, u64 cap);
-extern u64 procfs_gen_cmdline(char *buf, u64 cap);
-extern u64 procfs_gen_environ(char *buf, u64 cap);
+/* Filled by kernel for synthetic /proc nodes (see procfs_gen_*). */
+extern u64 procfs_gen_status_for(char *buf, u64 cap, u32 pid);
+extern u64 procfs_gen_maps_for(char *buf, u64 cap, u32 pid);
+extern u64 procfs_gen_cmdline_for(char *buf, u64 cap, u32 pid);
+extern u64 procfs_gen_environ_for(char *buf, u64 cap, u32 pid);
+extern u64 procfs_gen_meminfo(char *buf, u64 cap);
+extern u32 sched_pid_visible(u32 pid);
+extern u32 sched_pid_list(u32 *out, u32 cap);
 extern u32 sched_umask_get(void);
 extern u64 sched_tick_count(void);
 extern u32 sched_current_euid(void);
@@ -49,13 +52,21 @@ enum {
     INO_PROC_MAPS    = 7,          /* /proc/self/maps */
     INO_PROC_CMDLINE = 8,          /* /proc/self/cmdline */
     INO_SYMLINK = 9,               /* symbolic link; target in buf/size */
-    INO_PROC_ENVIRON = 10,         /* /proc/self/environ (live per-process) */
+    INO_PROC_ENVIRON = 10,         /* /proc/{self,pid}/environ */
+    INO_PROC_MEMINFO = 11,         /* /proc/meminfo (live PMM counters) */
 
     ROOT_INO    = 1,
+    PROC_MEMINFO_INO = 56,
     PROC_ENVIRON_INO = 57,
     PROC_STATUS_INO  = 58,
     PROC_MAPS_INO    = 59,
     PROC_CMDLINE_INO = 60,
+    /* Dynamic /proc/<pid> slots: pids are not bounded by 31 (next_pid grows),
+     * so a fixed pid->ino map would miss post-init processes. 32 slots, each
+     * a dir + status/maps/cmdline/environ, bound to a live pid on lookup. */
+    PROC_PID_BASE    = 64,
+    PROC_PID_STRIDE  = 5,
+    PROC_PID_SLOTS   = 32,
     ZERO_INO    = 61,              /* fixed /dev/zero inode */
     NULL_INO    = 62,              /* fixed /dev/null inode */
     CONSOLE_INO = 63,
@@ -115,6 +126,7 @@ struct inode {
     char *buf;                     /* dynamic data (kmalloc) */
     u64 size;
     u64 cap;
+    u32 proc_pid;                  /* 0 = /proc/self or unassigned slot */
 };
 
 struct open_file {
@@ -132,10 +144,70 @@ struct open_file {
 
 static struct inode inodes[MAX_INODES];
 static struct open_file opens[MAX_OPEN_FILES];
+static u32 proc_dir_ino;
+static u32 proc_slot_pid[PROC_PID_SLOTS];
 
 static u32 inode_is_proc(u32 type) {
     return type == INO_PROC_STATUS || type == INO_PROC_MAPS
-        || type == INO_PROC_CMDLINE || type == INO_PROC_ENVIRON;
+        || type == INO_PROC_CMDLINE || type == INO_PROC_ENVIRON
+        || type == INO_PROC_MEMINFO;
+}
+
+static u32 proc_slot_dir(u32 slot) {
+    return PROC_PID_BASE + slot * PROC_PID_STRIDE;
+}
+
+static u32 ino_is_proc_pid_range(u32 ino) {
+    return ino >= PROC_PID_BASE
+        && ino < PROC_PID_BASE + PROC_PID_SLOTS * PROC_PID_STRIDE;
+}
+
+static u32 ino_is_proc_pid_dir(u32 ino) {
+    return ino_is_proc_pid_range(ino)
+        && ((ino - PROC_PID_BASE) % PROC_PID_STRIDE) == 0;
+}
+
+static u32 parse_decimal_u32(const char *name, u32 n, u32 *out) {
+    u32 i;
+    u32 pid = 0;
+    if (name == 0 || n == 0 || n > 10 || out == 0) {
+        return 0;
+    }
+    if (n > 1 && name[0] == '0') {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        u32 d;
+        if (name[i] < '0' || name[i] > '9') {
+            return 0;
+        }
+        d = (u32)(name[i] - '0');
+        if (pid > (0xFFFFFFFF - d) / 10) {
+            return 0;
+        }
+        pid = pid * 10 + d;
+    }
+    *out = pid;
+    return 1;
+}
+
+static void u32_to_dec(u32 v, char *out, u32 *n) {
+    char tmp[11];
+    u32 i = 0;
+    u32 k;
+    if (v == 0) {
+        out[0] = '0';
+        *n = 1;
+        return;
+    }
+    while (v != 0 && i < 10) {
+        tmp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = 0; k < i; k++) {
+        out[k] = tmp[i - 1 - k];
+    }
+    *n = i;
 }
 
 /* ---------------------------------------------------------------------------
@@ -199,7 +271,10 @@ static u32 alloc_ino(u32 type, u32 parent) {
     u32 i;
     /* Slots 2..MAX_INODES-1, skipping fixed console/null/zero slots. */
     for (i = 2; i < MAX_INODES; i++) {
-        if (i == CONSOLE_INO || i == NULL_INO || i == ZERO_INO) {
+        if (i == CONSOLE_INO || i == NULL_INO || i == ZERO_INO
+            || i == PROC_MEMINFO_INO || i == PROC_STATUS_INO
+            || i == PROC_MAPS_INO || i == PROC_CMDLINE_INO
+            || i == PROC_ENVIRON_INO || ino_is_proc_pid_range(i)) {
             continue;
         }
         if (inodes[i].type == INO_FREE) {
@@ -217,6 +292,7 @@ static u32 alloc_ino(u32 type, u32 parent) {
             inodes[i].buf = 0;
             inodes[i].size = 0;
             inodes[i].cap = 0;
+            inodes[i].proc_pid = 0;
             for (k = 0; k < MAX_DENTS; k++) {
                 inodes[i].dents[k].name[0] = 0;
                 inodes[i].dents[k].ino = 0;
@@ -227,8 +303,65 @@ static u32 alloc_ino(u32 type, u32 parent) {
     return 0;
 }
 
+static u32 inode_is_open(u32 ino);
+
+static u32 inode_or_children_open(u32 ino) {
+    u32 i;
+    if (inode_is_open(ino)) {
+        return 1;
+    }
+    if (inodes[ino].type != INO_DIR) {
+        return 0;
+    }
+    for (i = 0; i < inodes[ino].ndent; i++) {
+        if (inode_is_open(inodes[ino].dents[i].ino)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Bind a reserved /proc/<pid> slot to a live pid. Returns the directory ino
+ * or 0 if no slot is free (every slot is open or still bound to a live pid). */
+static u32 proc_bind_pid(u32 pid) {
+    u32 i;
+    u32 stale = 0xFFFFFFFF;
+    u32 dino;
+    if (pid == 0) {
+        return 0;
+    }
+    for (i = 0; i < PROC_PID_SLOTS; i++) {
+        if (proc_slot_pid[i] == pid) {
+            return proc_slot_dir(i);
+        }
+    }
+    for (i = 0; i < PROC_PID_SLOTS; i++) {
+        if (proc_slot_pid[i] != 0 && sched_pid_visible(proc_slot_pid[i])) {
+            continue;
+        }
+        dino = proc_slot_dir(i);
+        if (inode_or_children_open(dino)) {
+            continue;
+        }
+        stale = i;
+        break;
+    }
+    if (stale == 0xFFFFFFFF) {
+        return 0;
+    }
+    dino = proc_slot_dir(stale);
+    proc_slot_pid[stale] = pid;
+    inodes[dino].proc_pid = pid;
+    inodes[dino + 1].proc_pid = pid;
+    inodes[dino + 2].proc_pid = pid;
+    inodes[dino + 3].proc_pid = pid;
+    inodes[dino + 4].proc_pid = pid;
+    return dino;
+}
+
 static u32 dir_find(u32 dir_ino, const char *name, u32 n) {
     u32 i;
+    u32 pid;
     if (inodes[dir_ino].type != INO_DIR) {
         return 0;
     }
@@ -237,6 +370,11 @@ static u32 dir_find(u32 dir_ino, const char *name, u32 n) {
             && inodes[dir_ino].dents[i].name[n] == 0) {
             return inodes[dir_ino].dents[i].ino;
         }
+    }
+    if (proc_dir_ino != 0 && dir_ino == proc_dir_ino
+        && parse_decimal_u32(name, n, &pid) && pid != 0
+        && sched_pid_visible(pid)) {
+        return proc_bind_pid(pid);
     }
     return 0;
 }
@@ -478,6 +616,11 @@ void fs_init(void) {
         inodes[i].buf = 0;
         inodes[i].size = 0;
         inodes[i].cap = 0;
+        inodes[i].proc_pid = 0;
+    }
+    proc_dir_ino = 0;
+    for (i = 0; i < PROC_PID_SLOTS; i++) {
+        proc_slot_pid[i] = 0;
     }
     for (i = 0; i < MAX_OPEN_FILES; i++) {
         opens[i].used = 0;
@@ -523,6 +666,36 @@ void fs_init(void) {
     inodes[PROC_ENVIRON_INO].type = INO_PROC_ENVIRON;
     inodes[PROC_ENVIRON_INO].mode = 0x81A4;
     inodes[PROC_ENVIRON_INO].parent = PROC_ENVIRON_INO;
+    inodes[PROC_MEMINFO_INO].type = INO_PROC_MEMINFO;
+    inodes[PROC_MEMINFO_INO].mode = 0x81A4;
+    inodes[PROC_MEMINFO_INO].parent = PROC_MEMINFO_INO;
+
+    /* Pre-create /proc/<pid> slot inodes so alloc_ino cannot steal them. */
+    for (i = 0; i < PROC_PID_SLOTS; i++) {
+        u32 dino = proc_slot_dir(i);
+        inodes[dino].type = INO_DIR;
+        inodes[dino].mode = 0x41ED;
+        inodes[dino].parent = dino;
+        inodes[dino].proc_pid = 0;
+        inodes[dino + 1].type = INO_PROC_STATUS;
+        inodes[dino + 1].mode = 0x81A4;
+        inodes[dino + 1].parent = dino;
+        inodes[dino + 2].type = INO_PROC_MAPS;
+        inodes[dino + 2].mode = 0x81A4;
+        inodes[dino + 2].parent = dino;
+        inodes[dino + 3].type = INO_PROC_CMDLINE;
+        inodes[dino + 3].mode = 0x81A4;
+        inodes[dino + 3].parent = dino;
+        inodes[dino + 4].type = INO_PROC_ENVIRON;
+        inodes[dino + 4].mode = 0x81A4;
+        inodes[dino + 4].parent = dino;
+        if (!dir_add(dino, "status", 6, dino + 1)
+            || !dir_add(dino, "maps", 4, dino + 2)
+            || !dir_add(dino, "cmdline", 7, dino + 3)
+            || !dir_add(dino, "environ", 7, dino + 4)) {
+            kprintf("[FS] FAILED to seed /proc pid slot %u\n", i);
+        }
+    }
 
     opens[CONSOLE_FH].used = 1;
     opens[CONSOLE_FH].ino = CONSOLE_INO;
@@ -554,17 +727,24 @@ u32 fs_publish_chrdevs(void) {
     return 1;
 }
 
-/* Link synthetic /proc/self/{status,maps,cmdline,environ}. /proc/self must
- * already exist (rootfs mkdir). Returns 1 on success. */
+/* Link synthetic /proc/self/* and /proc/meminfo. Numeric /proc/<pid>
+ * directories are bound lazily from reserved slots. Returns 1 on success. */
 u32 fs_publish_procfs(void) {
-    u32 self = walk_lookup("/proc/self");
-    if (self == 0 || inodes[self].type != INO_DIR) {
+    u32 self;
+    u32 proc;
+    u32 i;
+    self = walk_lookup("/proc/self");
+    proc = walk_lookup("/proc");
+    if (self == 0 || inodes[self].type != INO_DIR
+        || proc == 0 || inodes[proc].type != INO_DIR) {
         return 0;
     }
+    proc_dir_ino = proc;
     inodes[PROC_STATUS_INO].parent = self;
     inodes[PROC_MAPS_INO].parent = self;
     inodes[PROC_CMDLINE_INO].parent = self;
     inodes[PROC_ENVIRON_INO].parent = self;
+    inodes[PROC_MEMINFO_INO].parent = proc;
     if (!dir_add(self, "status", 6, PROC_STATUS_INO)) {
         return 0;
     }
@@ -576,6 +756,12 @@ u32 fs_publish_procfs(void) {
     }
     if (!dir_add(self, "environ", 7, PROC_ENVIRON_INO)) {
         return 0;
+    }
+    if (!dir_add(proc, "meminfo", 7, PROC_MEMINFO_INO)) {
+        return 0;
+    }
+    for (i = 0; i < PROC_PID_SLOTS; i++) {
+        inodes[proc_slot_dir(i)].parent = proc;
     }
     return 1;
 }
@@ -729,6 +915,7 @@ u32 fs_link(const char *oldpath, const char *newpath) {
     if (old_ino == CONSOLE_INO || old_ino == NULL_INO || old_ino == ZERO_INO
         || old_ino == PROC_STATUS_INO || old_ino == PROC_MAPS_INO
         || old_ino == PROC_CMDLINE_INO || old_ino == PROC_ENVIRON_INO
+        || old_ino == PROC_MEMINFO_INO || ino_is_proc_pid_range(old_ino)
         || inodes[old_ino].type == INO_CONSOLE
         || inodes[old_ino].type == INO_NULL
         || inodes[old_ino].type == INO_ZERO
@@ -756,6 +943,27 @@ u32 fs_link(const char *oldpath, const char *newpath) {
     return 1;
 }
 
+
+/* Synthetic /proc names are not user-creatable (including decimal names that
+ * would shadow a later pid). The /proc tree itself is not writable. */
+static u32 proc_refuse_create(u32 parent, const char *name, u32 n) {
+    if (parent == 0) {
+        return 0;
+    }
+    if (ino_is_proc_pid_dir(parent)) {
+        return 1;
+    }
+    if (proc_dir_ino != 0 && parent == proc_dir_ino) {
+        return 1;
+    }
+    /* /proc/self */
+    if (parent == inodes[PROC_STATUS_INO].parent && parent != 0
+        && parent != PROC_STATUS_INO) {
+        return 1;
+    }
+    return 0;
+}
+
 /* Create a dynamic writable file (fail if the name already exists). */
 u32 fs_create(const char *path) {
     char last[NAME_LEN];
@@ -763,6 +971,9 @@ u32 fs_create(const char *path) {
     u32 parent = walk_parent(path, last, &last_n, 0);
     u32 ino;
     if (parent == 0 || last_n == 0) {
+        return 0;
+    }
+    if (proc_refuse_create(parent, last, last_n)) {
         return 0;
     }
     ino = alloc_ino(INO_FILE, parent);
@@ -783,6 +994,9 @@ u32 fs_mkdir(const char *path) {
     u32 parent = walk_parent(path, last, &last_n, 0);
     u32 ino;
     if (parent == 0 || last_n == 0) {
+        return 0;
+    }
+    if (proc_refuse_create(parent, last, last_n)) {
         return 0;
     }
     ino = alloc_ino(INO_DIR, parent);
@@ -824,6 +1038,9 @@ u32 fs_rmdir(const char *path) {
     }
     target = dir_find(parent, last, last_n);
     if (target == 0 || inodes[target].type != INO_DIR) {
+        return 0;
+    }
+    if (ino_is_proc_pid_dir(target) || target == proc_dir_ino) {
         return 0;
     }
     if (inodes[target].ndent != 0) {
@@ -874,6 +1091,7 @@ u32 fs_unlink(const char *path) {
     if (target == CONSOLE_INO || target == NULL_INO || target == ZERO_INO
         || target == PROC_STATUS_INO || target == PROC_MAPS_INO
         || target == PROC_CMDLINE_INO || target == PROC_ENVIRON_INO
+        || target == PROC_MEMINFO_INO || ino_is_proc_pid_range(target)
         || inodes[target].type == INO_CONSOLE
         || inodes[target].type == INO_NULL
         || inodes[target].type == INO_ZERO
@@ -957,7 +1175,12 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
         || old_ino == NULL_INO || old_ino == ZERO_INO) return 0;
     if (inodes[old_ino].type == INO_NULL || inodes[old_ino].type == INO_ZERO
         || inodes[old_ino].type == INO_CONSOLE
-        || inode_is_proc(inodes[old_ino].type)) return 0;
+        || inode_is_proc(inodes[old_ino].type)
+        || ino_is_proc_pid_range(old_ino)
+        || old_ino == PROC_MEMINFO_INO) return 0;
+    if (proc_dir_ino != 0 && (oparent == proc_dir_ino
+        || oparent == inodes[PROC_STATUS_INO].parent)) return 0;
+    if (proc_refuse_create(nparent, nlast, nlast_n)) return 0;
 
     if (inodes[old_ino].type == INO_DIR) {
         u32 cur = nparent;
@@ -1167,21 +1390,30 @@ u32 fs_file_open_mode(const char *path, u32 flags, u32 creat_mode) {
         }
         if (inode_is_proc(inodes[ino].type)) {
             enum { PROC_SNAP_CAP = 4096 };
-            char *buf = (char *)mem.kmalloc(PROC_SNAP_CAP);
+            char *buf;
             u64 n = 0;
+            u32 pid = inodes[ino].proc_pid;
+            if (pid != 0 && !sched_pid_visible(pid)) {
+                opens[fh].used = 0;
+                opens[fh].refs = 0;
+                return FH_BAD;
+            }
+            buf = (char *)mem.kmalloc(PROC_SNAP_CAP);
             if (buf == 0) {
                 opens[fh].used = 0;
                 opens[fh].refs = 0;
                 return FH_BAD;
             }
-            if (inodes[ino].type == INO_PROC_STATUS) {
-                n = procfs_gen_status(buf, PROC_SNAP_CAP);
+            if (inodes[ino].type == INO_PROC_MEMINFO) {
+                n = procfs_gen_meminfo(buf, PROC_SNAP_CAP);
+            } else if (inodes[ino].type == INO_PROC_STATUS) {
+                n = procfs_gen_status_for(buf, PROC_SNAP_CAP, pid);
             } else if (inodes[ino].type == INO_PROC_MAPS) {
-                n = procfs_gen_maps(buf, PROC_SNAP_CAP);
+                n = procfs_gen_maps_for(buf, PROC_SNAP_CAP, pid);
             } else if (inodes[ino].type == INO_PROC_CMDLINE) {
-                n = procfs_gen_cmdline(buf, PROC_SNAP_CAP);
+                n = procfs_gen_cmdline_for(buf, PROC_SNAP_CAP, pid);
             } else {
-                n = procfs_gen_environ(buf, PROC_SNAP_CAP);
+                n = procfs_gen_environ_for(buf, PROC_SNAP_CAP, pid);
             }
             opens[fh].snap = buf;
             opens[fh].snap_len = n;
@@ -1457,6 +1689,40 @@ u64 fs_getdents_h(u32 fh, char *kbuf, u64 len) {
         }
         produced += DENT_RECLEN;
         idx++;
+    }
+    /* After real /proc dents, emit live numeric pid directories. */
+    if (proc_dir_ino != 0 && opens[fh].ino == proc_dir_ino
+        && idx >= dp->ndent) {
+        u32 pids[PROC_PID_SLOTS];
+        u32 np = sched_pid_list(pids, PROC_PID_SLOTS);
+        u32 pidx = idx - dp->ndent;
+        while (pidx < np && produced + DENT_RECLEN <= len) {
+            char *r = kbuf + produced;
+            char nm[12];
+            u32 nlen = 0;
+            u32 k;
+            u32 dino;
+            u32 pid = pids[pidx];
+            dino = proc_bind_pid(pid);
+            if (dino == 0) {
+                break;
+            }
+            u32_to_dec(pid, nm, &nlen);
+            for (k = 0; k < DENT_RECLEN; k++) {
+                r[k] = 0;
+            }
+            put_u64(r, dino);
+            put_u64(r + 8, (u64)idx + 1);
+            r[16] = (char)(DENT_RECLEN & 0xFF);
+            r[17] = (char)((DENT_RECLEN >> 8) & 0xFF);
+            r[18] = (char)DT_DIR;
+            for (k = 0; k < nlen && k < 29; k++) {
+                r[19 + k] = nm[k];
+            }
+            produced += DENT_RECLEN;
+            idx++;
+            pidx++;
+        }
     }
     opens[fh].off = idx;
     return produced;

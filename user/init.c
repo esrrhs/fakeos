@@ -1107,6 +1107,123 @@ static void proc_self_test(void) {
     puts("[U][PASS] /proc/self status/maps/cmdline");
 }
 
+static int dent_has_name(const char *buf, long n, const char *want) {
+    long off;
+    for (off = 0; off + 48 <= n; off += 48) {
+        const char *name = buf + off + 19;
+        int k = 0;
+        while (want[k] != 0 && name[k] == want[k]) {
+            k++;
+        }
+        if (want[k] == 0 && name[k] == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void proc_pid_meminfo_test(void) {
+    long fd;
+    long n;
+    long w;
+    char buf[1536];
+    char selfbuf[1024];
+    char name_line[16];
+
+    fd = u_open("/proc/meminfo", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/meminfo");
+        return;
+    }
+    n = u_read(fd, buf, 1535);
+    u_close(fd);
+    if (n <= 0 || !proc_has(buf, n, "MemTotal:") || !proc_has(buf, n, "MemFree:")
+        || !proc_has(buf, n, "MemAvailable:") || !proc_has(buf, n, "MemUsed:")) {
+        puts("[U][FAIL] /proc/meminfo fields");
+        return;
+    }
+
+    fd = u_open("/proc/1/status", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/1/status");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n <= 0) {
+        puts("[U][FAIL] read /proc/1/status");
+        return;
+    }
+    name_line[0] = 'N'; name_line[1] = 'a'; name_line[2] = 'm';
+    name_line[3] = 'e'; name_line[4] = ':'; name_line[5] = '\t';
+    name_line[6] = 'i'; name_line[7] = 'n'; name_line[8] = 'i';
+    name_line[9] = 't'; name_line[10] = 0;
+    if (!proc_has(buf, n, name_line) || !proc_has(buf, n, "Pid:\t1\n")) {
+        puts("[U][FAIL] /proc/1/status not init pid 1");
+        return;
+    }
+
+    fd = u_open("/proc/self/status", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] reopen /proc/self/status");
+        return;
+    }
+    w = u_read(fd, selfbuf, 1023);
+    u_close(fd);
+    if (w <= 0 || !proc_has(selfbuf, w, "Pid:\t1\n")) {
+        puts("[U][FAIL] /proc/self/status Pid not 1");
+        return;
+    }
+
+    fd = u_open("/proc/1/cmdline", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc/1/cmdline");
+        return;
+    }
+    n = u_read(fd, buf, 1023);
+    u_close(fd);
+    if (n < 9 || !proc_has(buf, n, "/bin/init")) {
+        puts("[U][FAIL] /proc/1/cmdline not /bin/init");
+        return;
+    }
+
+    fd = u_open("/proc", 0, 0);
+    if (fd < 0) {
+        puts("[U][FAIL] open /proc for getdents");
+        return;
+    }
+    n = u_getdents(fd, buf, sizeof(buf));
+    u_close(fd);
+    if (n <= 0 || !dent_has_name(buf, n, "self") || !dent_has_name(buf, n, "meminfo")
+        || !dent_has_name(buf, n, "cpuinfo") || !dent_has_name(buf, n, "1")) {
+        puts("[U][FAIL] /proc getdents missing self/meminfo/cpuinfo/1");
+        return;
+    }
+
+    if (u_open("/proc/99999/status", 0, 0) >= 0) {
+        puts("[U][FAIL] open /proc/99999/status should fail");
+        return;
+    }
+    if (u_open("/proc/meminfo", 1, 0) >= 0) {
+        puts("[U][FAIL] write-open /proc/meminfo should fail");
+        return;
+    }
+    if (u_unlink("/proc/meminfo") == 0) {
+        puts("[U][FAIL] unlink /proc/meminfo should fail");
+        return;
+    }
+    if (u_unlink("/proc/1/status") == 0) {
+        puts("[U][FAIL] unlink /proc/1/status should fail");
+        return;
+    }
+    if (u_mkdir("/proc/notapid") == 0) {
+        puts("[U][FAIL] mkdir /proc/notapid should fail");
+        return;
+    }
+
+    puts("[U][PASS] /proc pids meminfo");
+}
+
 static void stat_test(void) {
     char st[144];
     long fd;
@@ -2350,6 +2467,7 @@ int main(int argc, char **argv) {
     dev_nodes_test();
     posix_basics_test();
     proc_self_test();
+    proc_pid_meminfo_test();
     stat_test();
     owner_mtime_test();
     cred_setuid_groups_test();

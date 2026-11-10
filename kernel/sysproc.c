@@ -636,6 +636,13 @@ extern u32 sched_current_ppid(void);
 extern u32 sched_current_threads(void);
 extern u64 sched_cmdline_copy(char *buf, u64 cap);
 extern u64 sched_environ_copy(char *buf, u64 cap);
+extern u32 sched_pid_visible(u32 pid);
+extern u32 sched_pid_ppid(u32 pid);
+extern u32 sched_pid_threads(u32 pid);
+extern u64 sched_pid_as_h(u32 pid);
+extern char sched_pid_state_char(u32 pid);
+extern u64 sched_cmdline_copy_pid(u32 pid, char *buf, u64 cap);
+extern u64 sched_environ_copy_pid(u32 pid, char *buf, u64 cap);
 extern void sched_set_cmdline(const char *data, u64 n);
 extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
 extern void sched_set_cmdline_tcb(u32 tid, const char *data, u64 n);
@@ -675,47 +682,119 @@ static u64 proc_put_u32(char *dst, u64 cap, u64 at, u32 v) {
     return proc_put(dst, cap, at, tmp);
 }
 
-u64 procfs_gen_status(char *buf, u64 cap) {
+u64 procfs_gen_status_for(char *buf, u64 cap, u32 pid) {
     char name[64];
+    char st[20];
     u64 at = 0;
     u64 cn;
     u64 i;
     u32 slash = 0;
     u64 vmkb;
+    u32 show_pid;
+    char sch;
     if (buf == 0 || cap == 0) {
         return 0;
     }
-    cn = sched_cmdline_copy(name, 63);
+    if (pid != 0 && !sched_pid_visible(pid)) {
+        return 0;
+    }
+    show_pid = pid != 0 ? pid : sched_current_pid();
+    cn = sched_cmdline_copy_pid(pid, name, 63);
     name[cn < 63 ? cn : 63] = 0;
-    /* Basename of argv[0] (stop at first NUL). */
     for (i = 0; i < cn && name[i] != 0; i++) {
         if (name[i] == '/') {
             slash = (u32)(i + 1);
         }
     }
+    sch = pid != 0 ? sched_pid_state_char(pid) : 'R';
+    st[0] = sch;
+    st[1] = 0;
     at = proc_put(buf, cap, at, "Name:\t");
     at = proc_put(buf, cap, at, name + slash);
-    at = proc_put(buf, cap, at, "\nState:\tR (running)\nPid:\t");
-    at = proc_put_u32(buf, cap, at, sched_current_pid());
+    at = proc_put(buf, cap, at, "\nState:\t");
+    at = proc_put(buf, cap, at, st);
+    if (sch == 'R') {
+        at = proc_put(buf, cap, at, " (running)");
+    } else if (sch == 'S') {
+        at = proc_put(buf, cap, at, " (sleeping)");
+    } else if (sch == 'T') {
+        at = proc_put(buf, cap, at, " (stopped)");
+    } else if (sch == 'Z') {
+        at = proc_put(buf, cap, at, " (zombie)");
+    }
+    at = proc_put(buf, cap, at, "\nPid:\t");
+    at = proc_put_u32(buf, cap, at, show_pid);
     at = proc_put(buf, cap, at, "\nPPid:\t");
-    at = proc_put_u32(buf, cap, at, sched_current_ppid());
+    at = proc_put_u32(buf, cap, at, pid != 0 ? sched_pid_ppid(pid)
+                                            : sched_current_ppid());
     at = proc_put(buf, cap, at, "\nThreads:\t");
-    at = proc_put_u32(buf, cap, at, sched_current_threads());
-    vmkb = mem.as_vma_kb_h(sched_current_as_h());
+    at = proc_put_u32(buf, cap, at, pid != 0 ? sched_pid_threads(pid)
+                                            : sched_current_threads());
+    vmkb = mem.as_vma_kb_h(pid != 0 ? sched_pid_as_h(pid)
+                                    : sched_current_as_h());
     at = proc_put(buf, cap, at, "\nVmSize:\t");
     at = proc_put_u32(buf, cap, at, (u32)vmkb);
     at = proc_put(buf, cap, at, " kB\n");
     return at;
 }
 
+u64 procfs_gen_status(char *buf, u64 cap) {
+    return procfs_gen_status_for(buf, cap, 0);
+}
+
+u64 procfs_gen_maps_for(char *buf, u64 cap, u32 pid) {
+    u64 as_h;
+    if (pid != 0 && !sched_pid_visible(pid)) {
+        return 0;
+    }
+    as_h = pid != 0 ? sched_pid_as_h(pid) : sched_current_as_h();
+    return mem.as_format_maps_h(as_h, buf, cap);
+}
+
 u64 procfs_gen_maps(char *buf, u64 cap) {
-    return mem.as_format_maps_h(sched_current_as_h(), buf, cap);
+    return procfs_gen_maps_for(buf, cap, 0);
+}
+
+u64 procfs_gen_cmdline_for(char *buf, u64 cap, u32 pid) {
+    if (pid != 0 && !sched_pid_visible(pid)) {
+        return 0;
+    }
+    return sched_cmdline_copy_pid(pid, buf, cap);
 }
 
 u64 procfs_gen_cmdline(char *buf, u64 cap) {
-    return sched_cmdline_copy(buf, cap);
+    return procfs_gen_cmdline_for(buf, cap, 0);
+}
+
+u64 procfs_gen_environ_for(char *buf, u64 cap, u32 pid) {
+    if (pid != 0 && !sched_pid_visible(pid)) {
+        return 0;
+    }
+    return sched_environ_copy_pid(pid, buf, cap);
 }
 
 u64 procfs_gen_environ(char *buf, u64 cap) {
-    return sched_environ_copy(buf, cap);
+    return procfs_gen_environ_for(buf, cap, 0);
 }
+
+/* Physical memory from the buddy allocator; kB, no invented cache figures. */
+u64 procfs_gen_meminfo(char *buf, u64 cap) {
+    u64 at = 0;
+    u32 total = (u32)(mem.pmm_total_pages() * 4);
+    u32 avail = (u32)(mem.pmm_free_pages_count() * 4);
+    u32 used = (u32)(mem.pmm_used_pages() * 4);
+    if (buf == 0 || cap == 0) {
+        return 0;
+    }
+    at = proc_put(buf, cap, at, "MemTotal:\t");
+    at = proc_put_u32(buf, cap, at, total);
+    at = proc_put(buf, cap, at, " kB\nMemFree:\t");
+    at = proc_put_u32(buf, cap, at, avail);
+    at = proc_put(buf, cap, at, " kB\nMemAvailable:\t");
+    at = proc_put_u32(buf, cap, at, avail);
+    at = proc_put(buf, cap, at, " kB\nMemUsed:\t");
+    at = proc_put_u32(buf, cap, at, used);
+    at = proc_put(buf, cap, at, " kB\n");
+    return at;
+}
+
