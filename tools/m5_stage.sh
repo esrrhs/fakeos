@@ -151,7 +151,22 @@ while IFS= read -r src; do
     # When the chosen ref compiler handled the tree the trial objects are already in place.
     [ -n "$M5_S0" ] && [ -f "$STAGE/ref/$out_rel" ] && continue
     mkdir -p "$STAGE/ref/$(dirname "$rel")"
-    cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
+    if [ -f "$BUILD/$n.o" ]; then
+        cp "$BUILD/$n.o" "$STAGE/ref/$out_rel"
+    else
+        # The staged demo programs (clock_check/dirent_check/net_check) are
+        # standalone sources with no corresponding build/*.o kernel object.
+        # In the fallback path (embed could not trial-compile the tree) compile
+        # them here with the seed compiler so /ref still carries a valid host
+        # reference object for the in-OS kbuild comparison. Use the same seed
+        # compiler (FCC) that produced the other build/*.o references.
+        ( cd "$ROOT" && FAKECC_PKG="$ROOT" \
+              "${FCC:-fakecc}" -O0 $REF_TARGET_FLAG \
+              -c "$src" -o "$STAGE/ref/$out_rel" ) >/dev/null 2>&1 || {
+            echo "m5_stage: cannot produce reference object for $rel (no build/$n.o and seed compile failed)" >&2
+            exit 1
+        }
+    fi
 done <<EOF
 $M5_SRCS
 EOF

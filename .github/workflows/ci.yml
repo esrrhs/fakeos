@@ -28,7 +28,19 @@ jobs:
 
       - name: Build and install fakecc toolchain
         run: |
-          git clone --depth 1 https://github.com/esrrhs/fakecc.git /tmp/fakecc
+          # Pin the fakecc toolchain to a known-good revision.
+          #
+          # fakeos' Milestone 5 self-host (make build / make test) depends on a
+          # specific fakecc snapshot:
+          #   * it needs the as_nasm "-f bin / -f elf64" assembler feature
+          #     (introduced upstream in c53fc4ea, required by FAKECC_BOOT_BIN=1),
+          #   * the Makefile/tools document that fakecc tip after 2c1f4525 must
+          #     NOT be used because it miscompiles the M5-rebuilt kernel.
+          # d79ac7bb reconciles both: it is on mainline after c53fc4ea and is
+          # the last validated snapshot before the documented-broken tip, so the
+          # CI always stages the same verified toolchain.
+          git clone https://github.com/esrrhs/fakecc.git /tmp/fakecc
+          git -C /tmp/fakecc checkout d79ac7bb
           cmake -S /tmp/fakecc -B /tmp/fakecc/build -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/fakecc/build --target fakecc --parallel
           sudo cp /tmp/fakecc/build/fakecc /usr/local/bin/fakecc
