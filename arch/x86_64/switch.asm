@@ -10,6 +10,7 @@ extern sched_finish_switch
 
 global switch_context
 global thread_trampoline
+global spin_test_and_set
 global spin_lock
 global spin_unlock
 global cpu_irq_save
@@ -70,6 +71,11 @@ thread_trampoline:
 ;   void spin_lock(volatile u32 *lock [RDI])
 ; ------------------------------------------------------------------------------
 align 16
+spin_test_and_set:
+    mov eax, 1
+    xchg [rdi], eax
+    ret
+
 spin_lock:
     mov     eax, 1
 .retry:

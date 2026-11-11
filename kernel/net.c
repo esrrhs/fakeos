@@ -24,6 +24,15 @@ extern u32 sched_fd_get(u32 idx);
 extern u32 sched_should_eintr(void);
 extern void cpu_cli(void);
 extern void cpu_sti(void);
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
+extern u32 kthread_create(u64 entry, u64 arg);
+extern void sched_sleep_unlock_spin(u64 chan, volatile u32 *lock);
+extern void sched_wakeup(u64 chan);
+/* Atomic exchange returns the OLD word: zero acquires, one was busy. */
+extern u32 spin_test_and_set(volatile u32 *lock);
 
 struct kmutex {
     u32 locked;
@@ -40,6 +49,8 @@ extern void kmutex_unlock(struct kmutex *m);
 extern void wait_queue_init(struct wait_queue_head *wq);
 extern void wait_queue_wake(struct wait_queue_head *wq);
 extern void wait_queue_sleep_unlock(struct wait_queue_head *wq, struct kmutex *m);
+extern void wait_queue_sleep_unlock_spin(struct wait_queue_head *wq,
+                                        struct kmutex *m, volatile u32 *lock);
 
 /* ---------------------------------------------------------------------------
  * Minimal L2/L3 + BSD-ish UDP/TCP sockets.
@@ -133,6 +144,7 @@ struct udp_pkt {
 struct sock {
     u32 used;
     u32 refs;
+    u32 closing; /* prevents reuse while final-close TX/wakeup completes */
     u32 type;          /* SOCK_DGRAM / SOCK_STREAM */
     u32 bound;
     u32 connected;
@@ -156,6 +168,7 @@ struct sock {
     u32 accept_tail;
     u32 accept_count;
     u32 accept_q[TCP_BACKLOG];
+    volatile u32 rx_lock; /* IRQ producer / SMP reader condition lock */
     u32 s_head;
     u32 s_tail;
     u32 s_count;
@@ -197,7 +210,15 @@ static u32 dhcp_next_xmit_tick;      /* renew/rebind retransmit pacing */
 static u32 net_up;
 static struct arp_entry arp_tab[ARP_CACHE];
 static u8  rx_frame[FRAME_MAX];
-static u8  tx_frame[FRAME_MAX];
+static volatile u32 net_rx_busy;
+static volatile u32 net_timer_busy;
+static volatile u32 sock_table_lock;
+/* Hard IRQs must not build protocol/packet frames on an interrupted syscall
+ * stack. RX already has one drain owner; defer that drain and timer TX to a
+ * sleeping kernel worker, without disabling NIC IRQs or AP preemption. */
+static volatile u32 net_work_lock;
+static u32 net_work_pending;
+static u32 net_worker_ready;
 static u16 ping_id;
 static u16 ping_seq;
 static u32 ping_waiting;
@@ -212,6 +233,74 @@ static u32 is_local_dst(u32 ip) {
 }
 
 static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len);
+/* IRQ-side notification only: no protocol processing or packet locals.
+ * The condition lock also covers sleep publication, so a remote IRQ cannot
+ * land between the worker's empty check and its wait registration. */
+void net_schedule_work(void) {
+    u64 irq;
+    u32 wake;
+    if (!net_up) return;
+    irq = cpu_irq_save();
+    spin_lock(&net_work_lock);
+    wake = net_worker_ready && !net_work_pending;
+    net_work_pending = 1;
+    spin_unlock(&net_work_lock);
+    if (wake) sched_wakeup((u64)&net_work_pending);
+    cpu_irq_restore(irq);
+}
+
+static u32 net_work_take(void) {
+    u64 irq = cpu_irq_save();
+    spin_lock(&net_work_lock);
+    if (!net_work_pending) {
+        sched_sleep_unlock_spin((u64)&net_work_pending, &net_work_lock);
+        cpu_irq_restore(irq);
+        return 0;
+    }
+    net_work_pending = 0;
+    spin_unlock(&net_work_lock);
+    cpu_irq_restore(irq);
+    return 1;
+}
+
+static void net_worker(u64 arg) {
+    for (;;) {
+        if (!net_work_take()) continue;
+        net_tcp_timer();
+        net_poll();
+    }
+}
+
+/* Boot DHCP/selftests explicitly poll before the scheduler is available.
+ * Start the sleeping bottom half only after sched_init/as_selftest. */
+u32 net_start_worker(void) {
+    u64 irq;
+    u32 slot;
+    if (!net_up) return 1;
+    irq = cpu_irq_save();
+    spin_lock(&net_work_lock);
+    if (net_worker_ready) {
+        spin_unlock(&net_work_lock); cpu_irq_restore(irq); return 1;
+    }
+    net_work_pending = 1;
+    spin_unlock(&net_work_lock);
+    cpu_irq_restore(irq);
+    slot = kthread_create((u64)net_worker, 0);
+    if (slot == 0xFFFFFFFFu) {
+        kprintf("[NET] [FAIL] cannot create deferred RX/timer worker\n");
+        return 0;
+    }
+    irq = cpu_irq_save();
+    spin_lock(&net_work_lock);
+    net_worker_ready = 1;
+    net_work_pending = 1;
+    spin_unlock(&net_work_lock);
+    sched_wakeup((u64)&net_work_pending);
+    cpu_irq_restore(irq);
+    kprintf("[NET] deferred RX/timer worker ready\n");
+    return 1;
+}
+
 static u32 resolve_mac(u32 ip, u8 *mac_out);
 static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
                       u32 seq, u32 ack, u8 flags,
@@ -309,6 +398,7 @@ static u32 arp_lookup(u32 ip, u8 *mac_out) {
 }
 
 static u32 eth_send(const u8 *dst_mac, u16 ethertype, const u8 *payload, u32 plen) {
+    u8 tx_frame[FRAME_MAX];
     u32 i;
     if (ETH_HDR + plen > FRAME_MAX) {
         return 0;
@@ -462,65 +552,84 @@ static void sock_locks_init(struct sock *sk) {
 }
 
 void sock_retain(u32 fh) {
-    struct sock *sk = sock_from_fh(fh);
-    if (sk) {
-        sk->refs++;
-    }
+    u64 irq = cpu_irq_save();
+    struct sock *sk;
+    spin_lock(&sock_table_lock);
+    sk = sock_from_fh(fh);
+    if (sk) sk->refs++;
+    spin_unlock(&sock_table_lock);
+    cpu_irq_restore(irq);
 }
 
 u32 sock_close(u32 fh) {
-    struct sock *sk = sock_from_fh(fh);
-    if (!sk) {
-        return 0;
+    u64 irq = cpu_irq_save();
+    struct sock *sk;
+    u32 seq;
+    u32 send_fin = 0;
+    /* Exclude in-flight wire dispatch before making a slot reusable. */
+    spin_lock(&net_rx_busy);
+    spin_lock(&sock_table_lock);
+    sk = sock_from_fh(fh);
+    if (!sk || sk->refs > 1) {
+        if (sk) sk->refs--;
+        spin_unlock(&sock_table_lock); spin_unlock(&net_rx_busy);
+        cpu_irq_restore(irq); return sk != 0;
     }
-    if (sk->refs > 1) {
-        sk->refs--;
-        return 1;
+    spin_lock(&sk->rx_lock);
+    sk->used = 0; sk->closing = 1; sk->refs = 0;
+    spin_unlock(&sk->rx_lock);
+    spin_unlock(&sock_table_lock);
+    seq = sk->snd_nxt;
+    if (sk->type == SOCK_STREAM && (sk->tcp_state == TCPS_ESTABLISHED
+                                    || sk->tcp_state == TCPS_CLOSE_WAIT)) {
+        sk->snd_nxt++;
+        send_fin = 1;
     }
-    if (sk->type == SOCK_STREAM) {
-        if (sk->tcp_state == TCPS_ESTABLISHED) {
-            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
-                       sk->snd_nxt, sk->rcv_nxt,
-                       (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
-            sk->snd_nxt++;
-            sk->tcp_state = TCPS_FIN_WAIT;
-        } else if (sk->tcp_state == TCPS_CLOSE_WAIT) {
-            tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
-                       sk->snd_nxt, sk->rcv_nxt,
-                       (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
-            sk->snd_nxt++;
-            sk->tcp_state = TCPS_LAST_ACK;
-        }
-    }
-    sk->used = 0;
-    sk->refs = 0;
-    sk->rx_count = 0;
-    sk->rx_head = 0;
-    sk->rx_tail = 0;
-    sk->s_count = 0;
-    sk->tcp_state = TCPS_CLOSED;
+    if (send_fin) tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                            seq, sk->rcv_nxt, (u8)(TCPF_FIN | TCPF_ACK), 0, 0);
+    spin_lock(&sk->rx_lock);
+    sk->rx_count = 0; sk->rx_head = 0; sk->rx_tail = 0;
+    sk->s_count = 0; sk->tcp_state = TCPS_CLOSED;
+    sk->rexmit_due = 0; sk->rexmit_len = 0;
+    spin_unlock(&sk->rx_lock);
+    spin_unlock(&net_rx_busy);
+    /* Never hold the table lock across scheduler wakeups (fork retains FDs
+     * while holding the scheduler lock). Keep this slot reserved until done. */
     sock_wake(sk);
+    spin_lock(&sock_table_lock); sk->closing = 0; spin_unlock(&sock_table_lock);
+    cpu_irq_restore(irq);
     return 1;
 }
 
 static u32 sock_alloc_slot(void) {
+    u64 irq = cpu_irq_save();
     u32 i;
+    spin_lock(&sock_table_lock);
     for (i = 1; i < MAX_SOCKS; i++) {
-        if (!socks[i].used) {
-            mem_zero(&socks[i], (u32)sizeof(struct sock));
+        if (!socks[i].used && !socks[i].closing) {
+            /* rx_lock exists for the lifetime of the table, including free
+             * slots inspected by an AP timer. Never memset a live lock. */
+            u32 off = (u32)((u64)&socks[i].rx_lock - (u64)&socks[i]);
+            spin_lock(&socks[i].rx_lock);
+            mem_zero(&socks[i], off);
+            mem_zero((u8 *)&socks[i].rx_lock + sizeof(u32),
+                     (u32)sizeof(struct sock) - off - sizeof(u32));
             socks[i].used = 1;
-            socks[i].rexmit_due = 0;
-            socks[i].rexmit_len = 0;
             socks[i].refs = 1;
             sock_locks_init(&socks[i]);
+            spin_unlock(&socks[i].rx_lock);
+            spin_unlock(&sock_table_lock); cpu_irq_restore(irq);
             return i;
         }
     }
+    spin_unlock(&sock_table_lock); cpu_irq_restore(irq);
     return 0;
 }
 
 static u16 alloc_ephemeral(void) {
+    u64 irq = cpu_irq_save();
     u32 tries;
+    spin_lock(&sock_table_lock);
     for (tries = 0; tries < 16384; tries++) {
         u16 p = next_eph;
         u32 i;
@@ -537,9 +646,11 @@ static u16 alloc_ephemeral(void) {
             }
         }
         if (!taken) {
+            spin_unlock(&sock_table_lock); cpu_irq_restore(irq);
             return p;
         }
     }
+    spin_unlock(&sock_table_lock); cpu_irq_restore(irq);
     return 0;
 }
 
@@ -751,6 +862,7 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
         return;
     }
     total = get16(pkt + 2);
+    if (checksum(pkt, ihl) != 0 || (get16(pkt + 6) & 0x3FFFu) != 0) return;
     if (total > len || total < ihl) {
         return;
     }
@@ -776,7 +888,9 @@ static void handle_ip(const u8 *pkt, u32 len, const u8 *src_mac) {
 
 static void tcp_arm_rexmit(struct sock *sk, u32 seq, u8 flags,
                            const u8 *payload, u16 plen) {
+    u64 irq = cpu_irq_save();
     u32 i;
+    spin_lock(&sk->rx_lock);
     sk->rexmit_seq = seq;
     sk->rexmit_flags = flags;
     sk->rexmit_len = plen;
@@ -785,56 +899,63 @@ static void tcp_arm_rexmit(struct sock *sk, u32 seq, u8 flags,
     }
     /* ~500ms at 100Hz */
     sk->rexmit_due = (u32)sched_clock_ticks() + 50;
+    if (!sk->rexmit_due) sk->rexmit_due = 1;
+    spin_unlock(&sk->rx_lock); cpu_irq_restore(irq);
 }
 
 static void tcp_clear_rexmit(struct sock *sk) {
-    sk->rexmit_due = 0;
-    sk->rexmit_len = 0;
+    u64 irq = cpu_irq_save();
+    spin_lock(&sk->rx_lock);
+    sk->rexmit_due = 0; sk->rexmit_len = 0;
+    spin_unlock(&sk->rx_lock); cpu_irq_restore(irq);
 }
 
 /* Called from the APIC timer ISR path: retransmit unacked SYN/data. */
 static void dhcp_timer_tick(void);
 void net_tcp_timer(void) {
+    u64 irq = cpu_irq_save();
+    u32 i, now;
+    if (spin_test_and_set(&net_timer_busy)) { cpu_irq_restore(irq); return; }
     dhcp_timer_tick();
-    u32 i;
-    u32 now;
-    if (!net_up) {
-        return;
-    }
     now = (u32)sched_clock_ticks();
-    for (i = 0; i < MAX_SOCKS; i++) {
+    if (net_up) for (i = 0; i < MAX_SOCKS; i++) {
         struct sock *sk = &socks[i];
-        if (!sk->used || sk->type != SOCK_STREAM) {
-            continue;
+        u8 bytes[TCP_MAX_PAYLOAD];
+        u32 seq, ack, ip, j, send = 0;
+        u16 port, local, len;
+        u8 flags;
+        spin_lock(&sk->rx_lock);
+        if (sk->used && sk->type == SOCK_STREAM && sk->rexmit_due
+            && (int)(now - sk->rexmit_due) >= 0) {
+            if (sk->tcp_state == TCPS_SYN_SENT || sk->tcp_state == TCPS_SYN_RCVD
+                || sk->tcp_state == TCPS_ESTABLISHED || sk->tcp_state == TCPS_CLOSE_WAIT
+                || sk->tcp_state == TCPS_FIN_WAIT || sk->tcp_state == TCPS_LAST_ACK) {
+                seq=sk->rexmit_seq; ack=sk->rcv_nxt; ip=sk->peer_ip;
+                port=sk->peer_port; local=sk->local_port; len=sk->rexmit_len;
+                flags=sk->rexmit_flags;
+                for(j=0;j<len;j++) bytes[j]=sk->rexmit_buf[j];
+                sk->rexmit_due=now+50; if(!sk->rexmit_due)sk->rexmit_due=1;
+                send=1;
+            } else { sk->rexmit_due=0; sk->rexmit_len=0; }
         }
-        if (sk->rexmit_due == 0) {
-            continue;
-        }
-        if ((int)(now - sk->rexmit_due) < 0) {
-            continue;
-        }
-        if (sk->tcp_state == TCPS_SYN_SENT ||
-            sk->tcp_state == TCPS_ESTABLISHED ||
-            sk->tcp_state == TCPS_FIN_WAIT ||
-            sk->tcp_state == TCPS_LAST_ACK) {
-            /* No ARP wait from timer ISR. */
-            tcp_tx_seg_ex(sk->local_port, sk->peer_ip, sk->peer_port,
-                          sk->rexmit_seq, sk->rcv_nxt, sk->rexmit_flags,
-                          sk->rexmit_buf, sk->rexmit_len, 0);
-            sk->rexmit_due = now + 50;
-        } else {
-            tcp_clear_rexmit(sk);
-        }
+        spin_unlock(&sk->rx_lock);
+        /* Snapshot is independent of socket reuse; never hold a state lock
+         * across TX (which can deliver synchronous loopback input). */
+        if(send) tcp_tx_seg_ex(local,ip,port,seq,ack,flags,bytes,len,0);
     }
+    spin_unlock(&net_timer_busy); cpu_irq_restore(irq);
 }
 
 void net_poll(void) {
+    u64 irq;
     u32 n;
     u16 etype;
     u8 src_mac[6];
     if (!net_up) {
         return;
     }
+    irq = cpu_irq_save();
+    if (spin_test_and_set(&net_rx_busy)) { cpu_irq_restore(irq); return; }
     while (1) {
         n = virtio_net_rx(rx_frame, FRAME_MAX);
         if (n < ETH_HDR) {
@@ -848,6 +969,8 @@ void net_poll(void) {
             handle_ip(rx_frame + ETH_HDR, n - ETH_HDR, src_mac);
         }
     }
+    spin_unlock(&net_rx_busy);
+    cpu_irq_restore(irq);
 }
 
 static u32 resolve_mac(u32 ip, u8 *mac_out) {
@@ -965,7 +1088,8 @@ static u16 tcp_checksum(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 tcp_len) {
     return (u16)(~sum);
 }
 
-static void stream_push(struct sock *sk, const u8 *data, u16 plen) {
+/* Caller holds rx_lock; never acknowledge bytes that did not enter the ring. */
+static u32 stream_push(struct sock *sk, const u8 *data, u16 plen) {
     u32 i;
     for (i = 0; i < plen; i++) {
         if (sk->s_count >= TCP_RX_CAP) {
@@ -978,13 +1102,13 @@ static void stream_push(struct sock *sk, const u8 *data, u16 plen) {
         }
         sk->s_count++;
     }
-    if (plen > 0) {
-        sock_wake(sk);
-    }
+    return i;
 }
 
 static u32 stream_pop(struct sock *sk, u8 *dst, u32 want) {
+    u64 irq = cpu_irq_save();
     u32 n = 0;
+    spin_lock(&sk->rx_lock);
     while (n < want && sk->s_count > 0) {
         dst[n] = sk->sbuf[sk->s_head];
         sk->s_head++;
@@ -994,6 +1118,8 @@ static u32 stream_pop(struct sock *sk, u8 *dst, u32 want) {
         sk->s_count--;
         n++;
     }
+    spin_unlock(&sk->rx_lock);
+    cpu_irq_restore(irq);
     return n;
 }
 
@@ -1047,6 +1173,43 @@ static struct sock *tcp_find_sock(u32 src_ip, u16 sport, u32 dst_ip, u16 dport) 
         }
     }
     return listen_sk;
+}
+
+/* Serial-number comparisons are valid within the bounded receive window. */
+static u32 tcp_before(u32 a, u32 b) { return (int)(a - b) < 0; }
+
+static void tcp_receive(struct sock *sk, u32 seq, const u8 *payload,
+                        u16 plen, u8 flags) {
+    u32 fin_seq = seq + plen;
+    u32 skip;
+    u32 accepted = 0;
+    u32 wake = 0;
+    u64 irq = cpu_irq_save();
+    spin_lock(&sk->rx_lock);
+    if (!sk->peer_fin) {
+        /* A retransmission can overlap the bytes already cumulatively ACKed. */
+        if (tcp_before(seq, sk->rcv_nxt)) {
+            skip = sk->rcv_nxt - seq;
+            if (skip > plen) skip = plen;
+            payload += skip; plen = (u16)(plen - skip); seq += skip;
+        }
+        if (plen && seq == sk->rcv_nxt) {
+            accepted = sk->shut_rd ? plen : stream_push(sk, payload, plen);
+            sk->rcv_nxt += accepted;
+            wake = accepted != 0;
+        }
+        /* FIN is after ALL preceding bytes, not after a truncated ring append. */
+        if ((flags & TCPF_FIN) && fin_seq == sk->rcv_nxt) {
+            sk->rcv_nxt++;
+            sk->peer_fin = 1;
+            if (sk->tcp_state == TCPS_ESTABLISHED) sk->tcp_state = TCPS_CLOSE_WAIT;
+            else if (sk->tcp_state == TCPS_FIN_WAIT) sk->tcp_state = TCPS_CLOSED;
+            wake = 1;
+        }
+    }
+    spin_unlock(&sk->rx_lock);
+    cpu_irq_restore(irq);
+    if (wake) sock_wake(sk);
 }
 
 static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
@@ -1124,6 +1287,7 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
         /* SYN consumes iss; peer's ACK must see snd_nxt == iss+1 even when
          * the SYN-ACK is delivered synchronously on loopback. */
         child->snd_nxt = child->iss + 1;
+        tcp_arm_rexmit(child, child->iss, (u8)(TCPF_SYN | TCPF_ACK), 0, 0);
         tcp_tx_seg(child->local_port, src_ip, sport,
                    child->iss, child->rcv_nxt,
                    (u8)(TCPF_SYN | TCPF_ACK), 0, 0);
@@ -1185,35 +1349,19 @@ static void tcp_input(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
 
     if (flags & TCPF_ACK) {
         /* Cumulative ACK: anything below ack is covered. */
-        if (ack > sk->snd_una) {
+        if (!tcp_before(ack, sk->snd_una) && !tcp_before(sk->snd_nxt, ack)) {
             sk->snd_una = ack;
         }
-        if (sk->snd_una >= sk->snd_nxt) {
+        if (sk->snd_una == sk->snd_nxt) {
             tcp_clear_rexmit(sk);
         }
     }
 
-    if (plen > 0 && seq == sk->rcv_nxt) {
-        stream_push(sk, payload, plen);
-        sk->rcv_nxt += plen;
+    if (plen || (flags & TCPF_FIN)) {
+        tcp_receive(sk, seq, payload, plen, flags);
+        /* Also ACK duplicates/out-of-order packets and a full/zero window. */
         tcp_tx_seg(sk->local_port, src_ip, sport,
                    sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
-    }
-
-    if (flags & TCPF_FIN) {
-        u32 fin_seq = seq + plen;
-        if (fin_seq == sk->rcv_nxt) {
-            sk->rcv_nxt = fin_seq + 1;
-            sk->peer_fin = 1;
-            tcp_tx_seg(sk->local_port, src_ip, sport,
-                       sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
-            if (sk->tcp_state == TCPS_ESTABLISHED) {
-                sk->tcp_state = TCPS_CLOSE_WAIT;
-            } else if (sk->tcp_state == TCPS_FIN_WAIT) {
-                sk->tcp_state = TCPS_CLOSED;
-            }
-            sock_wake(sk);
-        }
     }
 
     if ((flags & TCPF_ACK) && sk->tcp_state == TCPS_LAST_ACK) {
@@ -1245,7 +1393,19 @@ static u32 tcp_tx_seg_ex(u16 sport, u32 dst_ip, u16 dport,
     put32(seg + 8, ack);
     seg[12] = (u8)((TCP_HDR / 4) << 4);
     seg[13] = flags;
-    put16(seg + 14, 8192);            /* window */
+    {
+        struct sock *sk = tcp_find_sock(dst_ip, dport,
+                         dst_ip == LOOPBACK_IP ? LOOPBACK_IP : local_ip, sport);
+        u32 window = TCP_RX_CAP;
+        if (sk && sk->tcp_state != TCPS_LISTEN) {
+            u64 irq = cpu_irq_save();
+            spin_lock(&sk->rx_lock);
+            window = sk->shut_rd ? TCP_RX_CAP : TCP_RX_CAP - sk->s_count;
+            spin_unlock(&sk->rx_lock);
+            cpu_irq_restore(irq);
+        }
+        put16(seg + 14, (u16)window);
+    }
     put16(seg + 16, 0);               /* checksum filled below */
     for (i = 0; i < plen; i++) {
         seg[TCP_HDR + i] = payload[i];
@@ -1278,6 +1438,7 @@ static u32 tcp_tx_seg(u16 sport, u32 dst_ip, u16 dport,
 }
 
 static void handle_tcp(u32 src_ip, u32 dst_ip, const u8 *tcp, u32 len) {
+    if (len < TCP_HDR || tcp_checksum(src_ip, dst_ip, tcp, len) != 0) return;
     tcp_input(src_ip, dst_ip, tcp, len);
 }
 
@@ -1625,21 +1786,26 @@ u64 sys_sendto(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ulen) {
                 }
             }
         }
-        if (!tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
-                        sk->snd_nxt, sk->rcv_nxt,
-                        (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen)) {
-            return (u64)(-1);
+        {
+            u32 seq = sk->snd_nxt;
+            tcp_arm_rexmit(sk, seq, (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen);
+            sk->snd_nxt += plen;
+            if (!tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                            seq, sk->rcv_nxt,
+                            (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen)) {
+                tcp_clear_rexmit(sk);
+                sk->tcp_state = TCPS_CLOSED;
+                sk->peer_fin = 1;
+                sock_wake(sk);
+                return (u64)(-1);
+            }
         }
-        tcp_arm_rexmit(sk, sk->snd_nxt, (u8)(TCPF_PSH | TCPF_ACK), tbuf, plen);
-        sk->snd_nxt += plen;
         return (u64)plen;
     }
     if (sk->type != SOCK_DGRAM) {
         return (u64)(-1);
     }
-    if (len > UDP_MAX_PAYLOAD) {
-        len = UDP_MAX_PAYLOAD;
-    }
+    if (len > UDP_MAX_PAYLOAD) return (u64)(-90); /* EMSGSIZE: datagrams are atomic. */
     plen = (u16)len;
     if (uaddr != 0) {
         if (!parse_sockaddr_in(uaddr, ulen, &dst_ip, &dst_port)) {
@@ -1700,46 +1866,36 @@ u64 sys_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags, u64 uaddr, u64 ualen) {
         if (!sk->bound) {
             return (u64)(-1);
         }
+        if (len == 0) return 0;
+        if (len > TCP_MAX_PAYLOAD) len = TCP_MAX_PAYLOAD;
+        /* A bad destination must not consume/ACK-discard queued bytes. */
+        if (!mem.as_user_range_ok(as, ubuf, len)) return (u64)(-1);
         kmutex_lock(&sk->lock);
         for (;;) {
-            cpu_cli();
-            if (sk->s_count > 0) {
-                cpu_sti();
-                break;
-            }
-            if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED || !sk->used) {
-                cpu_sti();
-                kmutex_unlock(&sk->lock);
-                return sk->used ? 0 : (u64)(-1);
-            }
-            cpu_sti();
-            kmutex_unlock(&sk->lock);
             net_poll();
-            kmutex_lock(&sk->lock);
             cpu_cli();
+            spin_lock(&sk->rx_lock);
             if (sk->s_count > 0) {
-                cpu_sti();
-                break;
+                spin_unlock(&sk->rx_lock); cpu_sti(); break;
             }
             if (sk->peer_fin || sk->tcp_state == TCPS_CLOSED || !sk->used) {
-                cpu_sti();
+                spin_unlock(&sk->rx_lock); cpu_sti();
                 kmutex_unlock(&sk->lock);
                 return sk->used ? 0 : (u64)(-1);
             }
-            wait_queue_sleep_unlock(&sk->wait, &sk->lock);
+            /* Same condition lock as the IRQ producer: no SMP check-to-sleep
+             * hole. The scheduler helper atomically arms wait and drops it. */
+            wait_queue_sleep_unlock_spin(&sk->wait, &sk->lock, &sk->rx_lock);
             if (sched_should_eintr()) {
-                kmutex_unlock(&sk->lock);
-                return (u64)(-4);
+                kmutex_unlock(&sk->lock); return (u64)(-4);
             }
         }
-        if (sk->s_count == 0 && sk->peer_fin) {
-            kmutex_unlock(&sk->lock);
-            return 0;
-        }
-        if (len > TCP_MAX_PAYLOAD) {
-            len = TCP_MAX_PAYLOAD;
+        if (uaddr && !write_sockaddr_in(uaddr, ualen, sk->peer_ip, sk->peer_port)) {
+            kmutex_unlock(&sk->lock); return (u64)(-1);
         }
         got = stream_pop(sk, tbuf, (u32)len);
+        if (got) tcp_tx_seg(sk->local_port, sk->peer_ip, sk->peer_port,
+                           sk->snd_nxt, sk->rcv_nxt, TCPF_ACK, 0, 0);
         src_ip = sk->peer_ip;
         src_port = sk->peer_port;
         kmutex_unlock(&sk->lock);

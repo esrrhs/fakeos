@@ -1,6 +1,7 @@
 ;/* fakeos - context switch, spinlocks, IRQ control (Gas AT&T for fakecc) */
     .text
     .globl switch_context, thread_trampoline
+    .globl spin_test_and_set
     .globl spin_lock, spin_unlock, cpu_irq_save, cpu_irq_restore
     .extern kthread_exit, sched_finish_switch
 
@@ -37,6 +38,11 @@ thread_trampoline:
     cli
     hlt
     jmp .hang
+
+spin_test_and_set:
+    mov $1, %eax
+    xchg %eax, (%rdi)
+    ret
 
 spin_lock:
     mov $1, %eax

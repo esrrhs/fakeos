@@ -9,6 +9,10 @@ typedef types.uint32_t u32;
 typedef types.uint64_t u64;
 
 extern void kprintf(const char *fmt, ...);
+extern u64 cpu_irq_save(void);
+extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
 extern u32 pci_find_device(u16 vendor, u16 device, u8 *obus, u8 *oslot, u8 *ofunc);
 extern u32 pci_find_vendor_subsystem(u16 vendor, u16 subsystem,
                                      u8 *obus, u8 *oslot, u8 *ofunc);
@@ -58,6 +62,8 @@ enum {
     REG_QUEUE_NOTIFY      = 16,
     REG_STATUS            = 18,
     REG_ISR               = 19,
+    REG_MSIX_CONFIG       = 20,
+    REG_MSIX_QUEUE        = 22,
     REG_CFG_MAC           = 20,   /* 6 bytes (legacy) */
     REG_CFG_STATUS        = 26,
 
@@ -131,6 +137,7 @@ struct virtio_net {
     u8  mac[6];
     u8  pci_irq;
     u32 irq_armed;
+    u32 msix;             /* MSI-X changes the legacy register layout. */
     struct virtq rx;
     struct virtq tx;
     u64 arena_phys;
@@ -144,6 +151,7 @@ struct virtio_net {
     u32 notify_mult;
 };
 
+static volatile u32 vnet_tx_lock;
 static volatile u64 vnet_irq_count;
 static volatile u64 vnet_tx_irq_count;
 static const u64 VNET_TX_WAIT_CHAN = 0x564E455400000001ULL; /* "VNET" */
@@ -253,6 +261,18 @@ static void free_desc_chain(struct virtq *q, u16 head) {
     }
 }
 
+/* Queue selection has already been written by setup_one_queue. */
+static u32 legacy_msix_queue(void) {
+    if (!vn.msix) return 1;
+    iow16(REG_MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR);
+    iow16(REG_MSIX_QUEUE, 0);
+    if (ior16(REG_MSIX_QUEUE) != 0) {
+        kprintf("[VNET] legacy queue MSI-X vector rejected\n");
+        return 0;
+    }
+    return 1;
+}
+
 static u32 setup_one_queue(struct virtq *q, u16 sel, u64 *cursor) {
     u16 qsz;
     u64 desc_sz;
@@ -305,7 +325,7 @@ static u32 setup_one_queue(struct virtq *q, u16 sel, u64 *cursor) {
         *m64(vn.common_phys, M_Q_DEVICE) = q->used_phys;
         q->notify_off = *m16(vn.common_phys, M_Q_NOTIFY_OFF);
         /* Per-queue MSI-X: RX -> entry 0, TX -> entry 1 when multi-vector. */
-        if (vn.msi) {
+        if (vn.msix) {
             if (vn.msix_multi) {
                 *m16(vn.common_phys, M_Q_MSIX) = (sel == 0) ? 0 : 1;
             } else {
@@ -318,6 +338,8 @@ static u32 setup_one_queue(struct virtq *q, u16 sel, u64 *cursor) {
         *m16(vn.common_phys, M_Q_ENABLE) = 1;
     } else {
         iow32(REG_QUEUE_PFN, (u32)(base / 4096));
+        if (!legacy_msix_queue()) return 0;
+        if (vn.msix) kprintf("[VNET] legacy queue%u MSI-X entry=0 readback=0\n", (u64)sel);
     }
     kprintf("[VNET] queue%u size=%u desc=%u modern=%u\n",
             (u64)sel, (u64)qsz, base, (u64)vn.modern);
@@ -362,6 +384,7 @@ void virtio_net_mac(u8 *out) {
 }
 
 u32 virtio_net_tx(const void *frame, u32 len) {
+    u64 irq;
     u16 d0;
     u16 avail_idx;
     u16 used_idx;
@@ -372,6 +395,13 @@ u32 virtio_net_tx(const void *frame, u32 len) {
 
     if (!vn.present || frame == 0 || len == 0 || len > ETH_MAX) {
         return 0;
+    }
+    /* One DMA TX buffer: protect its bytes AND descriptor until completion.
+     * Never yield with this IRQ-safe lock held (timer/RX may transmit too). */
+    irq = cpu_irq_save();
+    spin_lock(&vnet_tx_lock);
+    if (!vn.present) {
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
     }
     buf = vn.tx_buf_phys;
     for (i = 0; i < net_hdr_size(); i++) {
@@ -384,7 +414,7 @@ u32 virtio_net_tx(const void *frame, u32 len) {
 
     d0 = alloc_desc(&vn.tx);
     if (d0 == 0xFFFF) {
-        return 0;
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
     }
     desc_write(&vn.tx, d0, buf, net_hdr_size() + len, 0, 0);
 
@@ -398,8 +428,8 @@ u32 virtio_net_tx(const void *frame, u32 len) {
     /* Wait for used-ring advance. Always pump io_wait so QEMU/TCG retires
      * host AIO. Chan-sleep once the scheduler is live deadlocks under TCG the
      * same way VirtIO-blk did: MSI never arrives without VCPU poll. Yield
-     * cooperatively when sched is up; MSI wakeup remains a fast path if the
-     * IRQ lands mid-spin. */
+     * is deliberately disabled here: RX/timer transmit must not overwrite
+     * this buffer while another context waits for DMA completion. */
     spins = 0;
     while (1) {
         used_idx = *hhdm16(vn.tx.used_phys + 2);
@@ -410,18 +440,20 @@ u32 virtio_net_tx(const void *frame, u32 len) {
         if ((spins & 255) == 0) {
             io_wait();
         }
-        if (sched_is_active() && (spins & 63) == 0) {
-            sched_yield();
-        }
         if (spins > 2000000) {
             kprintf("[VNET] tx timeout\n");
-            free_desc(&vn.tx, d0);
-            return 0;
+            /* A timed-out DMA descriptor must not be recycled while owned
+             * by the device. Fail/reset this NIC; do not reuse its buffer. */
+            vn.present = 0;
+            status_write(0);
+            spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
         }
     }
     vn.tx.last_used_idx = used_idx;
     (void)isr_read();
     free_desc(&vn.tx, d0);
+    spin_unlock(&vnet_tx_lock);
+    cpu_irq_restore(irq);
     return 1;
 }
 
@@ -576,6 +608,7 @@ void virtio_net_msix_selftest(void) {
 static void arm_irq(u8 bus, u8 slot, u8 func) {
     u8 vecs[2];
     vn.msi = 0;
+    vn.msix = 0;
     vn.msix_multi = 0;
     vn.irq_armed = 0;
     /* Modern: prefer multi-vector MSI-X (RX entry0 / TX entry1). */
@@ -584,6 +617,7 @@ static void arm_irq(u8 bus, u8 slot, u8 func) {
         vecs[1] = (u8)VNET_IRQ_VECTOR_TX;
         if (pci_msix_enable_n(bus, slot, func, vecs, 2)) {
             vn.msi = 1;
+            vn.msix = 1;
             vn.msix_multi = 1;
             vn.irq_armed = 1;
             kprintf("[VNET] MSI-X multi-vector RX=%u TX=%u\n",
@@ -592,8 +626,14 @@ static void arm_irq(u8 bus, u8 slot, u8 func) {
         }
     }
     /* Single-vector MSI (config-space only) or MSI-X entry 0 on RX. */
-    if (pci_msi_enable(bus, slot, func, VNET_IRQ_VECTOR)
-        || pci_msix_enable_one(bus, slot, func, VNET_IRQ_VECTOR)) {
+    if (pci_msi_enable(bus, slot, func, VNET_IRQ_VECTOR)) {
+        vn.msi = 1;
+        vn.irq_armed = 1;
+        kprintf("[VNET] MSI RX armed (vector %u)\n", (u64)VNET_IRQ_VECTOR);
+        return;
+    }
+    if (pci_msix_enable_one(bus, slot, func, VNET_IRQ_VECTOR)) {
+        vn.msix = 1;
         vn.msi = 1;
         vn.irq_armed = 1;
         kprintf("[VNET] MSI/MSI-X RX armed (vector %u)\n", (u64)VNET_IRQ_VECTOR);

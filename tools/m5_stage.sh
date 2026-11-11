@@ -99,6 +99,7 @@ done
 cp "$ROOT/user/progs/ping.c" "$STAGE/src/ping.c"
 cp "$ROOT/user/progs/dirent_check.c" "$STAGE/src/dirent_check.c"
 cp "$ROOT/user/progs/clock_check.c" "$STAGE/src/clock_check.c"
+cp "$ROOT/user/progs/net_check.c" "$STAGE/src/net_check.c"
 
 # Host reference objects.
 #

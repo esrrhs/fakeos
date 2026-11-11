@@ -32,6 +32,7 @@ extern void vfs_selftest(void);
 extern void rootfs_publish(void);
 extern void sched_yield(void);
 extern void net_poll(void);
+extern types.uint32_t net_start_worker(void);
 extern void net_init(void);
 extern void net_selftest(void);
 
@@ -165,6 +166,7 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // per-process address spaces with VMA demand paging and COW forks.
     sched_selftest();
     mem.as_selftest();
+    net_start_worker();
 
     // Ring-3 user processes: SYSCALL/SYSRET fast syscalls, ELF loading, COW
     // fork across real user address spaces and timer preemption at ring 3.

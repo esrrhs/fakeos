@@ -17,11 +17,10 @@ extern u32 sched_current_pid(void);
 extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
 extern void kbd_irq(void);
-extern void net_poll(void);
+extern void net_schedule_work(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp,
                                       u64 *f_rdi, u64 *f_rax);
 extern void sched_resched_from_ipi(void);
-extern void net_tcp_timer(void);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -140,7 +139,7 @@ void isr_dispatch(struct trap_frame *f) {
         if ((f->cs & 3) == 3) {
             sched_note_user_tick();     /* tick interrupted a ring-3 thread */
         }
-        net_tcp_timer();
+        net_schedule_work();
         sched_tick();
         /* After switch returns to this CPU's interrupted thread, deliver
          * custom handlers using the live trap frame (not default-only). */
@@ -187,10 +186,10 @@ void isr_dispatch(struct trap_frame *f) {
         return;
     }
 
-    /* Vector 40: VirtIO-net RX MSI/MSI-X or PCI INTx. Ack then drain RX. */
+    /* Vector 40: VirtIO-net RX MSI/MSI-X or PCI INTx. Ack then wake the deferred RX worker. */
     if (v == 40) {
         if (drivers.virtio_net_irq()) {
-            net_poll();
+            net_schedule_work();
         }
         arch.lapic_send_eoi();
         return;
