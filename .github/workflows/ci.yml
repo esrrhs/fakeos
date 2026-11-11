@@ -43,7 +43,12 @@ jobs:
           git -C /tmp/fakecc checkout d79ac7bb
           cmake -S /tmp/fakecc -B /tmp/fakecc/build -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/fakecc/build --target fakecc --parallel
-          sudo cp /tmp/fakecc/build/fakecc /usr/local/bin/fakecc
+          # Install (not just cp the binary): fakecc locates its freestanding
+          # runtime/ via <prefix>/share/fakecc/runtime, and `make build` links
+          # user programs with fakecc. Copying only the binary leaves no runtime
+          # on the system, so linking build/user/*.elf fails with
+          # "fakecc: cannot find runtime/".
+          sudo cmake --install /tmp/fakecc/build
           fakecc || true
 
       - name: Build fakeos kernel
