@@ -198,7 +198,7 @@ m5_blob_table:
 m5_blob_count:
     .quad 0
 EOF
-    FAKECC_PKG="$ROOT" "$FCC_BIN" -O0 -c "$STUB" -o "$STAGE/asm/m5stub.o"
+    FAKECC_PKG="$ROOT" "$FCC_BIN" -O0 $REF_TARGET_FLAG -c "$STUB" -o "$STAGE/asm/m5stub.o"
 else
     cat > "$STUB" <<'EOF'
 [bits 64]

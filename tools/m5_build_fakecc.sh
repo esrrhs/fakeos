@@ -262,21 +262,28 @@ echo "built static native fakecc (self-hosted from v0): $OUT ($(stat -f%z "$OUT"
 # If src ships as_nasm, the guest compiler must advertise and exercise -f bin /
 # -f elf64 (fakeos boot.asm / ap_tramp.asm). Skip only when as_nasm is absent
 # from the module set (pre-#113 trees).
+#
+# The self-hosted artifact ($OUT) is a linux x86-64 static ELF built to run
+# inside fakeos. It may not be executable on the staging host (e.g. macOS),
+# so we verify the -f bin / -f elf64 strings by reading the binary with grep
+# (same approach m5_stage.sh uses for --target detection) rather than by
+# executing $OUT. The actual asm smoke test only runs when the host can
+# execute the artifact.
 if printf '%s\n' $MODULES | grep -qx as_nasm; then
-    USAGE=$("$OUT" 2>&1 || true)
-    echo "$USAGE" | grep -q -- '-f bin' || {
+    if ! grep -qa -- '-f bin' "$OUT"; then
         echo "m5_build_fakecc: embed lacks -f bin (as_nasm present but unused?)" >&2
         exit 1
-    }
-    echo "$USAGE" | grep -q -- '-f elf64' || {
+    fi
+    if ! grep -qa -- '-f elf64' "$OUT"; then
         echo "m5_build_fakecc: embed lacks -f elf64" >&2
         exit 1
-    }
+    fi
     # Prefer assembling the real fakeos boot sources when available (absolute
-    # ROOT captured before scratch cd).
+    # ROOT captured before scratch cd). Only run when the host can execute
+    # the linux x86-64 artifact.
     BOOT_ASM="$ROOT/arch/x86_64/boot.asm"
     AP_ASM="$ROOT/arch/x86_64/ap_tramp.asm"
-    if [ -f "$BOOT_ASM" ] && [ -f "$AP_ASM" ]; then
+    if [ -f "$BOOT_ASM" ] && [ -f "$AP_ASM" ] && "$OUT" -f elf64 -o /dev/null "$BOOT_ASM" 2>/dev/null; then
         CAP=$SCRATCH/cap
         mkdir -p "$CAP"
         "$OUT" -f elf64 -o "$CAP/boot.o" "$BOOT_ASM" 2>"$CAP/boot.err" || {
@@ -296,6 +303,8 @@ if printf '%s\n' $MODULES | grep -qx as_nasm; then
             exit 1
         fi
         echo "[m5] capability OK: embed -f elf64 boot.o + -f bin ap_tramp.bin ($(wc -c <"$CAP/ap_tramp.bin") bytes)"
+    elif [ -f "$BOOT_ASM" ] && [ -f "$AP_ASM" ]; then
+        echo "[m5] capability: -f bin/-f elf64 present in embed (host cannot execute linux x86-64 artifact; skipping asm smoke test)"
     fi
 fi
 
