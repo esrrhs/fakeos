@@ -1,6 +1,6 @@
 /* dumpbin - dump a file from inside fakeos to the serial console as
  * length-framed base64. The host test harness decodes the frames to
- * pull /tmp/fakeos-new (the in-OS linked kernel) back to a host file
+ * pull /mnt/fakeos-new (the in-OS linked kernel) back to a host file
  * for a second QEMU boot.
  *
  * Frame layout (one frame per 12 KiB chunk):

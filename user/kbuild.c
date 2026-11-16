@@ -183,7 +183,7 @@ int main(void) {
     puts("[kbuild] stage a: compiler/exec chain on ping.c");
 
     /* argv: fakecc [extra flags...] ping.c -o /tmp/ping (max 8 slots) */
-    char *ping_cc[4 + CC_MAX_FLAGS];
+    char *ping_cc[5 + CC_MAX_FLAGS];
     {
         unsigned long k = 0;
         unsigned long j;
@@ -209,7 +209,21 @@ int main(void) {
     }
     puts("[kbuild] ping compile+run OK");
 
-    unsigned long nmod = 38;
+    /* A valid compiler allocation can cross two adjacent mmap VMAs. */
+    ping_cc[1 + n_cc_flags] = "vma_io_check.c";
+    ping_cc[3 + n_cc_flags] = "/tmp/vma_io_check";
+    st = run_child("/bin/fakecc", ping_cc);
+    if (st != 0) {
+        printf("[kbuild] FAIL VMA I/O regression compile exit=%d\n", st);
+        return 1;
+    }
+    char *vma_run[] = { "/tmp/vma_io_check", 0 };
+    if (run_child("/tmp/vma_io_check", vma_run) != 0) {
+        puts("[kbuild] FAIL VMA I/O regression");
+        return 1;
+    }
+
+    unsigned long nmod = sizeof(modules) / sizeof(modules[0]);
     unsigned long ok = 0;
     unsigned long diff = 0;
     char got_buf[READ_CAP];
@@ -321,10 +335,28 @@ int main(void) {
     }
     printf("[kbuild] all %u kernel objects byte-identical\n", ok);
 
+    /* Truncated ELF section tables used to dereference beyond the input.
+     * Require an ordinary rejected-input exit (not a signal/kernel fault). */
+    {
+        long badfd = u_open("/tmp/truncated.o", 0x242, 0x1FF);
+        if (badfd < 0 || u_write(badfd, got_buf, 64) != 64) {
+            puts("[kbuild] FAIL truncated-object fixture");
+            return 1;
+        }
+        u_close(badfd);
+        char *bad_args[] = { "/bin/ldfake", "-o", "/mnt/invalid-kernel",
+                             "/tmp/truncated.o", 0 };
+        if (run_child("/bin/ldfake", bad_args) != 256) {
+            puts("[kbuild] FAIL truncated-object rejection");
+            return 1;
+        }
+        puts("[kbuild] truncated object rejected cleanly");
+    }
+
     /* Final link. execve passes at most 8 argv slots, so the
      * object list goes through an @response file:
-     *   ldfake -o /tmp/fakeos-new @/tmp/ldfake.args
-     * boot.o leads (low-address multiboot entry); then the 38 C
+     *   ldfake -o /mnt/fakeos-new @/tmp/ldfake.args
+     * boot.o leads (low-address multiboot entry); then all C
      * objects, nasm objects (incl. ap_tramp_blob), userblob + empty
      * m5-blob stub. */
     {
@@ -355,7 +387,7 @@ int main(void) {
         char *argv[6];
         argv[0] = "/bin/ldfake";
         argv[1] = "-o";
-        argv[2] = "/tmp/fakeos-new";
+        argv[2] = "/mnt/fakeos-new";
         argv[3] = "@/tmp/ldfake.args";
         argv[4] = 0;
         st = run_child("/bin/ldfake", argv);
@@ -363,7 +395,7 @@ int main(void) {
             printf("[kbuild] FAIL ldfake exit=%d\n", st);
             return 1;
         }
-        puts("[kbuild] kernel image linked: /tmp/fakeos-new");
+        puts("[kbuild] kernel image linked: /mnt/fakeos-new");
     }
     return 0;
 }

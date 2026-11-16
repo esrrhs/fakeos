@@ -519,15 +519,17 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
         if (want > IO_CHUNK) {
             want = IO_CHUNK;
         }
+        /* Check before consuming file data: an invalid destination must
+         * not silently advance the file offset by a discarded chunk. */
+        if (!mem.as_user_range_ok(as, buf + done, want)) {
+            return done != 0 ? done : (u64)(-1);
+        }
         n = fs.ext2_fh_is(fh) ? fs.ext2_read(fh, kbuf, want) : fs.fs_read_h(fh, kbuf, want);
         if (n == (u64)(-1)) {
             return done != 0 ? done : (u64)(-1);
         }
         if (n == 0) {
             break;                   /* EOF */
-        }
-        if (!mem.as_user_range_ok(as, buf + done, n)) {
-            return done != 0 ? done : (u64)(-1);
         }
         {
             volatile char *u = (volatile char *)(buf + done);

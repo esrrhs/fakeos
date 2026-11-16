@@ -527,3 +527,15 @@ make clean    # 清理所有构建中间文件与产物（含 m5stage 与 build/
 ## 📄 开源许可证
 
 本项目采用 [MIT License](LICENSE) 授权许可。
+
+
+### 完整自举的输出存储
+
+`kbuild` 现在重编并逐字节核对全部 **39** 个内核模块（包括末尾的
+`kmain`），将内核链接到 **`/mnt/fakeos-new`**。完整用户空间使输出已超过
+21 MiB，因此需要挂载有足够空闲空间的 Ext2 卷；16 MiB 上限的 Ramfs
+不适合作为这个构建产物的存储。既有 Ramfs 上限和分配器没有为此扩大。
+建议给完整自举准备至少 32 MiB 的独立 Ext2 镜像，不要覆盖已有数据磁盘。
+`make test` 自动使用独立的 `build/test-bootstrap.img`（32 MiB），不会调整或
+覆盖开发者已有的 `build/disk.img`。测试仍实际在 OS 内编译、链接，再通过
+`dumpbin /mnt/fakeos-new` 导出完整镜像并二次启动；不省略模块或验收步骤。

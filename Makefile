@@ -557,6 +557,7 @@ $(BUILD_DIR)/kmain.o: kernel/kmain.c
 
 # Run automated test
 test: build
+	@python3 scripts/test_bootstrap_transfer.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_qemu.py
 
 # Run in QEMU (Headless terminal mode: standard I/O hooked to UART serial port)

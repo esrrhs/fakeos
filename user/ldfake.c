@@ -16,6 +16,7 @@ package user;
 
 extern long u_open(const char *path, long flags, long mode);
 extern long u_close(long fd);
+extern long u_fstat(long fd, void *statbuf);
 extern long u_read(long fd, void *buf, unsigned long len);
 extern long u_write(long fd, const void *buf, unsigned long len);
 extern void u_exit(long code);
@@ -40,9 +41,7 @@ enum {
     R_64 = 1, R_PC32 = 2, R_PLT32 = 4, R_GOTPCREL = 9,
     R_32 = 10, R_32S = 11, R_GOTPCRELX = 41, R_PLT32X = 42,
     PT_LOAD = 1,
-    O_RDWR_CREAT = 0x42,
-    OBJ_ARENA = 1572864,     /* ~1.5MiB: userblob+asm+36 kernel objs */
-    OUT_CAP = 2097152,
+    O_RDWR_CREAT = 0x242,    /* O_RDWR | O_CREAT | O_TRUNC: reruns must not keep a stale tail. */
     KERNEL_LMA = 0x100000,
     KERNEL_VMA = 0xFFFFFFFF80000000UL,
     SHN_ABS_SPC = 0xfff1,
@@ -175,17 +174,18 @@ static unsigned long sym_global_vma(const char *name);
 static unsigned long sym_vma(struct obj *o, unsigned int symidx,
                            const char **name_out);
 
-static unsigned char obj_arena[OBJ_ARENA];
-static unsigned long arena_used;
-/* File scope (not function-static): fakecc emits zero-init file-scope
- * arrays into NOBITS .bss; a 2 MiB function-scope static would
- * otherwise land in PROGBITS and bloat the embedded ELF. */
-static unsigned char outbuf[OUT_CAP];
+/* Inputs and output grow with the embedded userland; fixed 1.5/2 MiB
+ * arenas silently truncated userblob.o before its section table. */
+static int in_range(unsigned long off, unsigned long size, unsigned long len) {
+    return off <= len && size <= len - off;
+}
 
 static int read_obj(const char *path) {
     long fd = u_open(path, 0, 0);
     long r;
     unsigned long len = 0;
+    unsigned long end;
+    unsigned long statbuf[18];
     unsigned char *buf;
     struct obj *o;
     unsigned int i;
@@ -193,26 +193,42 @@ static int read_obj(const char *path) {
         printf("ldfake: cannot open %s\n", (long)path);
         return 0;
     }
-    if (arena_used >= OBJ_ARENA) {
-        puterr("ldfake: object arena full");
+    if (u_fstat(fd, statbuf) != 0) {
+        u_close(fd);
+        puterr("ldfake: cannot stat input object");
         return 0;
     }
-    buf = obj_arena + arena_used;
-    while (len < OBJ_ARENA - arena_used) {
-        r = u_read(fd, buf + len, OBJ_ARENA - arena_used - len);
+    end = statbuf[6]; /* Linux x86-64 stat.st_size, byte offset 48. */
+    if (end < 64 || end > 0x7FFFFFFFFFFFFFFFUL) {
+        u_close(fd);
+        puterr("ldfake: cannot size input object");
+        return 0;
+    }
+    buf = malloc((unsigned long)end);
+    if (!buf) {
+        u_close(fd);
+        puterr("ldfake: out of memory reading object");
+        return 0;
+    }
+    while (len < (unsigned long)end) {
+        r = u_read(fd, buf + len, (unsigned long)end - len);
         if (r <= 0) {
             break;
         }
         len += (unsigned long)r;
     }
     u_close(fd);
+    if (len != (unsigned long)end) {
+        free(buf);
+        puterr("ldfake: short read of input object");
+        return 0;
+    }
     if (len < 64 || buf[0] != 0x7f || buf[1] != 'E' ||
         buf[2] != 'L' || buf[3] != 'F' || buf[4] != ELFCLASS64 ||
         rd16(buf + 16) != ET_REL || rd16(buf + 18) != EM_X86_64) {
         printf("ldfake: %s not x86-64 reloc ELF\n", (long)path);
         return 0;
     }
-    arena_used += len;
     if (n_objs >= 64) {
         puterr("ldfake: too many objects");
         return 0;
@@ -223,6 +239,22 @@ static int read_obj(const char *path) {
     o->shoff = rd64(buf + 40);
     o->shentsize = rd16(buf + 58);
     o->shnum = rd16(buf + 60);
+    if (o->shentsize != 64 || o->shnum == 0 ||
+        !in_range(o->shoff, (unsigned long)o->shnum * 64, len) ||
+        rd16(buf + 62) >= o->shnum) {
+        puterr("ldfake: invalid section table");
+        return 0;
+    }
+    /* Validate all file-backed section ranges before following names,
+     * symbols or relocations. NOBITS occupies memory, not file bytes. */
+    for (i = 0; i < o->shnum; i++) {
+        const unsigned char *sh = obj_sh(o, i);
+        if (rd32(sh + 4) != SHT_NOBITS &&
+            !in_range(rd64(sh + 24), rd64(sh + 32), len)) {
+            puterr("ldfake: section outside input object");
+            return 0;
+        }
+    }
     for (i = 0; i < o->shnum; i++) {
         const unsigned char *sh =
             buf + o->shoff + (unsigned long)i * o->shentsize;
@@ -803,8 +835,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    out = outbuf;
-    memset(out, 0, OUT_CAP);
+    out = malloc(file_end);
+    if (!out) {
+        puterr("ldfake: out of memory for output image");
+        return 1;
+    }
+    memset(out, 0, file_end);
 
     /* Copy PROGBITS input data into place. */
     for (i = 0; i < (int)n_objs; i++) {

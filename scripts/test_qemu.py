@@ -7,6 +7,8 @@ import struct
 import subprocess
 import sys
 import time
+from bootstrap_transfer import (capture_dump, decode_dumpbin,
+                                dump_transfer_budget, prepare_reference_image)
 
 KERNEL = "build/fakeos.elf"
 REBUILT = "build/fakeos-rebuilt.elf"
@@ -62,11 +64,14 @@ class VM:
             chunks.append(data.decode("utf-8", errors="surrogateescape"))
         return "".join(chunks)
 
-    def wait_for(self, marker, timeout):
-        """Read until marker appears (or timeout); return captured text."""
-        out = ""
+    def wait_for(self, marker, timeout, failure_markers=()):
+        """Read until success, an explicit failure, or timeout; return all text."""
+        chunks = []
+        needles = (marker,) + tuple(failure_markers)
+        keep = max(len(s) for s in needles) - 1
+        suffix = ""
         deadline = time.time() + timeout
-        while marker not in out and time.time() < deadline:
+        while time.time() < deadline:
             ready = self.sel.select(0.2)
             if not ready:
                 continue
@@ -76,8 +81,16 @@ class VM:
                 break
             if not data:
                 break
-            out += data.decode("utf-8", errors="surrogateescape")
-        return out
+            text = data.decode("utf-8", errors="surrogateescape")
+            chunks.append(text)
+            # Search only new text plus a short overlap for split markers.
+            # Repeatedly scanning/concatenating the whole >28 MiB base64
+            # transfer is quadratic and stalls QEMU's serial pipe.
+            scan = suffix + text
+            if any(needle in scan for needle in needles):
+                break
+            suffix = scan[-keep:] if keep else ""
+        return "".join(chunks)
 
     def close(self):
         try:
@@ -89,29 +102,6 @@ class VM:
                 self.proc.communicate()
         except Exception:
             pass
-
-
-def decode_dumpbin(captured):
-    """Pull length-framed base64 chunks emitted by /bin/dumpbin out of a
-    serial capture; return the concatenated file bytes (or None).
-
-    `captured` may be bytes or str. Decoding the serial stream as UTF-8 is
-    lossy and wrong here: the base64 payload is arbitrary binary that can
-    straddle a multi-byte sequence, and errors="replace" would silently
-    collapse several lost bytes into one U+FFFD, shifting the payload and
-    breaking base64 alignment. Work in bytes end to end.
-    """
-    raw = captured if isinstance(captured, bytes) else captured.encode(
-        "utf-8", "surrogateescape")
-    frames = re.findall(
-        rb"===DUMP/BEGIN name=fakeos-new len=(\d+)===\s*(.*?)===DUMP/END===",
-        raw, re.S,
-    )
-    if not frames:
-        return None, 0, 0
-    blob = b"".join(base64.b64decode(b"".join(p.split())) for _, p in frames)
-    declared = sum(int(n) for n, _ in frames)
-    return blob, len(frames), declared
 
 
 def second_boot_checks(disk):
@@ -127,7 +117,7 @@ def second_boot_checks(disk):
     boot += vm.wait_for("fakeos:", 5.0)
     session = ""
     for c in ["hello", "echo $?", "pid", "echo INPUT123", "cat /etc/motd",
-              "ls /bin", "nosuchcmd", "exit 7"]:
+              "ls /bin", "ls -l /bin", "nosuchcmd", "exit 7"]:
         if not vm.send(c):
             break
         session += vm.read_available(0.6)
@@ -173,11 +163,15 @@ def second_boot_checks(disk):
 
 
 def ensure_disk():
-    """Build build/disk.img (Ext2) if missing; used by VirtIO-blk tests."""
-    disk = "build/disk.img"
+    """Dedicated bootstrap disk: output now exceeds the 16 MiB RAMFS cap.
+
+    Do not resize/overwrite the developer's persistent build/disk.img.
+    32 MiB holds the >21 MiB kernel plus Ext2 metadata and selftest files.
+    """
+    disk = "build/test-bootstrap.img"
     if not os.path.exists(disk):
         os.makedirs("build", exist_ok=True)
-        subprocess.check_call(["python3", "tools/mkext2.py", disk, "4"])
+        subprocess.check_call(["python3", "tools/mkext2.py", disk, "32"])
     return disk
 
 
@@ -194,6 +188,9 @@ def disk_args(disk):
 
 
 def main():
+    expected_size, expected_digest = prepare_reference_image()
+    print(f"==> Trusted rebuilt image: {expected_size} bytes SHA256={expected_digest}; "
+          f"dump budget={dump_transfer_budget(expected_size)}s, frame stall=60s")
     print("==> Phase 1-6: boot stock kernel (+IDE disk) and run the interactive shell...")
     disk = ensure_disk()
     vm = VM(KERNEL, mem="256M", extra_args=disk_args(disk) + net_args())
@@ -254,23 +251,27 @@ def main():
 
     # 3. Phase 5a: in-OS self-bootstrap. kbuild compiles every kernel
     #    module with /bin/fakecc, byte-compares each against /ref, then
-    #    links /tmp/fakeos-new with /bin/ldfake. Under TCG this is the
+    #    links /mnt/fakeos-new with /bin/ldfake. Under TCG this is the
     #    long pole (~1 min); drain until the completion marker.
     print("==> Phase 5a: running kbuild (in-OS compile + byte compare + link)...")
     bootstrap = ""
     if not vm.send("kbuild"):
         bootstrap += "kbuild dispatch failed\n"
     else:
-        bootstrap += vm.wait_for("[kbuild] kernel image linked", 5400.0)
+        bootstrap += vm.wait_for(
+            "[kbuild] kernel image linked", 5400.0,
+            failure_markers=("[kbuild] FAIL", "[kbuild] MISMATCH"),
+        )
         if "[kbuild] kernel image linked" not in bootstrap:
             print("    kbuild did not finish; capturing 5 s of tail...")
             bootstrap += vm.read_available(5.0)
 
-    print("==> dumping /tmp/fakeos-new through /bin/dumpbin...")
+    print("==> dumping /mnt/fakeos-new through /bin/dumpbin...")
     dumped = ""
     if "[kbuild] kernel image linked" in bootstrap:
-        vm.send("dumpbin /tmp/fakeos-new")
-        dumped = vm.wait_for("dumpbin: sent ", 120.0)
+        vm.send("dumpbin /mnt/fakeos-new")
+        dumped, transfer_reason = capture_dump(vm.proc.stdout, vm.sel, expected_size)
+        print(f"    dump transfer ended: {transfer_reason}")
         if "dumpbin: sent " not in dumped:
             dumped += vm.read_available(5.0)
         else:
@@ -519,7 +520,7 @@ def main():
         # interactive shell session
         "fakeos login:",
         "Welcome root",
-        "fakeos shell - session/fg, pipes/redirects, &&/||, jobs/fg/bg/Ctrl-Z/ioctl/tcsetpgrp, history/!!/readline, env/export/envp, PATH/quotes, kill; persist under /home",
+        "fakeos shell - session/fg, pipes/redirects, &&/||, ;/for/while/until/if/elif/case/esac/break[N]/continue[N]/exec, [[ ]], :/true/false, let/declare/typeset, eval/source/., jobs[-l]/fg/bg/wait/Ctrl-Z/ioctl/tcsetpgrp, printf/history/!!/readline/Tab/Double-Tab/Ctrl-W/K/V/L + /home/.sh_history, env/export[-np]/readonly[-p]/type[-t]/command[-vV]/builtin/hash[-rplt]/read/alias/unalias/return/local/shift/functions/envp, set -e/-u/-o, $((arith))/$0..$9/$#/$@/$*, cd[-LP]/pushd/popd/dirs[-vp], chmod/umask/chown/id, PATH/quotes, kill; persist under /home",
         "hello from /bin/hello",
         "INPUT123",
         "Welcome to fakeos - built entirely with the fakecc toolchain.",
@@ -537,16 +538,19 @@ def main():
         "[PASS] 64-bit Addition",
         "[PASS] Signed Arithmetic",
         "[PASS] Hex Formatting",
-        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 journal copy-pool/8 revoke-aware replay + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
+        "[SUCCESS] fakeos: CFS nested task_group SE + CFS rbtree + AHCI blk_async end_io + bio queue + async NCQ + Ext2 data-path blk_async + journal copy-pool/8 revoke-aware replay + sock/tty/pipe kmutex + sleeping locks + CLEARTID + IPI resched + signals SMP + steal + pthread + futex online!",
         # ---- Stage 5: in-OS self-bootstrap -------------------------------
         # kbuild stage a: the fakecc-compiled ping runs inside the OS
         "[kbuild] ping compile+run OK",
+        "VMAIO adjacency/content/hole/offset OK",
+        "[kbuild] truncated object rejected cleanly",
+        "[kbuild] identical kernel/kmain.o",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 38 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 39 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
-        "[ldfake] wrote /tmp/fakeos-new",
-        "[kbuild] kernel image linked: /tmp/fakeos-new",
+        "[ldfake] wrote /mnt/fakeos-new",
+        "[kbuild] kernel image linked: /mnt/fakeos-new",
         # dumpbin frame transfer completed
         "dumpbin: sent ",
     ]
@@ -577,10 +581,10 @@ def main():
         ("shell keeps pid 1", "pid\n1\n" in norm),
         ("realpath motdlink", "/etc/motd\n" in norm),
         ("ls -l symlink arrow", "motdlink -> /etc/motd" in norm),
-        ("getcwd physical init", "[U][PASS] getcwd physical" in out),
+        ("getcwd physical init", "[U][PASS] getcwd physical" in stdout),
         ("shell echo $FOO", "\nbar\n" in norm or "echo $FOO\nbar\n" in norm),
-        ("execve envp FOO in child environ", "FOO=bar" in out),
-        ("execve envp FAKECC_PKG live", "FAKECC_PKG=/src" in out),
+        ("execve envp FOO in child environ", "FOO=bar" in stdout),
+        ("execve envp FAKECC_PKG live", "FAKECC_PKG=/src" in stdout),
         ("shell which ls", "/bin/ls" in norm),
         ("shell which cd builtin", "cd: shell builtin" in norm),
         ("shell env PATH", "PATH=/bin:/usr/bin:." in norm),
@@ -614,10 +618,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 38 modules accounted for",
-         identical + mismatches == 38),
-        (f"all 38 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 38 and mismatches == 0),
+        ("all 39 modules accounted for",
+         identical + mismatches == 39),
+        (f"all 39 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 39 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),
@@ -630,11 +634,16 @@ def main():
             all_passed = False
 
     # ---- Stage 5a artifacts: decode the dumpbin transfer --------------
-    blob, nframes, declared = decode_dumpbin(stdout)
     structural = []
+    try:
+        blob, nframes, declared = decode_dumpbin(stdout, expected_size, expected_digest)
+    except ValueError as error:
+        print(f" [FAIL] Full dump validation: {error}")
+        blob, nframes, declared = None, 0, 0
     if blob is None:
         structural.append(("dumpbin frames decoded", False))
     else:
+        structural.append(("rebuilt: exact trusted reference size and SHA256", True))
         structural.append((f"dumpbin frames decoded ({nframes} frames, "
                            f"{declared} bytes)", len(blob) == declared))
         if len(blob) == declared:
@@ -649,6 +658,10 @@ def main():
             phs = [struct.unpack_from("<IIIIIIII", blob, phoff + i * 32)
                    for i in range(phnum)]
             structural.append(("rebuilt: entry 0x100028", entry == 0x100028))
+            structural.append(("rebuilt: large-image storage regression (>16 MiB)",
+                               len(blob) > 16 * 1024 * 1024))
+            structural.append(("rebuilt: full loadable file ranges transferred",
+                               max(p[1] + p[4] for p in phs) == len(blob)))
             structural.append((f"rebuilt: {phnum} program headers (2)",
                                phnum == 2))
             if len(phs) == 2:
