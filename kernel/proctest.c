@@ -15,6 +15,8 @@ extern u64 cpu_irq_save(void);
 extern void cpu_irq_restore(u64 flags);
 
 extern u32 kthread_create(u64 entry, u64 arg);
+extern u32 kthread_create_batch(u64 entry, u32 count);
+extern u32 sched_idle_cpu_mask(void);
 extern void sched_yield(void);
 extern void kthread_exit(void);
 extern void sched_init(void);
@@ -1392,37 +1394,50 @@ void sched_steal_selftest(void) {
  * an idle AP via balance (not only timer steal), with at least one resched IPI. */
 enum { BALANCE_WORKERS = 4 };
 
-static volatile u32 g_bal_done;
-static volatile u32 g_bal_saw_ap;
-static volatile u64 g_bal_hits[8];
+static volatile u32 g_bal_lock;
+static u32 g_bal_done;
+static u32 g_bal_ready;
+static u32 g_bal_go;
+static u32 g_bal_errors;
+static u32 g_bal_cpu[BALANCE_WORKERS];
+static u64 g_bal_hits[8];
 
 static void balance_worker(u64 id) {
-    u32 c = smp_cpuid();
-    (void)id;
-    if (c < 8) {
-        g_bal_hits[c] = g_bal_hits[c] + 1;
+    u64 deadline = sched_tick_count() + 800;
+    u64 flags = cpu_irq_save();
+    u32 go;
+    u32 c;
+    spin_lock(&g_bal_lock);
+    g_bal_ready++;
+    if (g_bal_ready == BALANCE_WORKERS) g_bal_go = 1;
+    spin_unlock(&g_bal_lock);
+    cpu_irq_restore(flags);
+    for (;;) {
+        flags = cpu_irq_save();
+        spin_lock(&g_bal_lock);
+        go = g_bal_go;
+        spin_unlock(&g_bal_lock);
+        cpu_irq_restore(flags);
+        if (go || sched_tick_count() >= deadline) break;
+        sched_yield();
     }
-    if (c != 0) {
-        g_bal_saw_ap = 1;
-    }
-    {
-        u64 n = 0;
-        u64 i;
-        for (i = 0; i < 50000; i++) {
-            n = n + i;
-        }
-        (void)n;
-    }
-    g_bal_done = g_bal_done + 1;
+    flags = cpu_irq_save();
+    c = smp_cpuid();
+    spin_lock(&g_bal_lock);
+    if (go != 1) g_bal_errors++;
+    g_bal_cpu[id] = c;
+    if (c < 8) g_bal_hits[c] = g_bal_hits[c] + 1;
+    g_bal_done++;
+    spin_unlock(&g_bal_lock);
+    cpu_irq_restore(flags);
     kthread_exit();
 }
 
 void sched_balance_selftest(void) {
-    u32 i;
-    u64 bal0;
-    u64 bal1;
-    u64 ipi0;
-    u64 ipi1;
+    u32 i, created = 0, ready, done, errors;
+    u32 saw_ap = 0;
+    u64 flags, deadline;
+    u64 bal0, bal1, ipi0, ipi1;
     u32 ncpu = smp_cpu_count();
 
     kprintf("\n[SCHED] Load-aware enqueue + IPI resched self-test...\n");
@@ -1430,45 +1445,51 @@ void sched_balance_selftest(void) {
         kprintf("      [PASS] IPI resched balance: skipped (-smp 1)\n");
         return;
     }
-
-    g_bal_done = 0;
-    g_bal_saw_ap = 0;
-    for (i = 0; i < 8; i++) {
-        g_bal_hits[i] = 0;
-    }
+    g_bal_done = 0; g_bal_ready = 0; g_bal_go = 0; g_bal_errors = 0;
+    for (i = 0; i < 8; i++) g_bal_hits[i] = 0;
     bal0 = sched_balance_remote_total();
     ipi0 = sched_ipi_resched_total();
-
     arch.cpu_sti();
-    for (i = 0; i < BALANCE_WORKERS; i++) {
-        if (kthread_create((u64)(&balance_worker), i) == 0xFFFFFFFF) {
-            kprintf("      [FAIL] balance worker create %u\n", (u64)i);
-            arch.cpu_cli();
-            return;
+    /* Require a real idle destination, then publish the prepared batch in
+     * one RQ transaction. One-at-a-time publication lets a timer steal each
+     * task before the next enqueue, legitimately needing NO resched IPI. */
+    deadline=sched_tick_count()+800;
+    while(!(sched_idle_cpu_mask() & ~(1u<<smp_cpuid()))) {
+        if(sched_tick_count()>=deadline) {
+            kprintf("      [FAIL] no idle remote CPU for IPI balance precondition\n");
+            arch.cpu_cli();return;
         }
+        sched_yield();
     }
-
-    {
-        u64 deadline = sched_tick_count() + 800;
-        while (g_bal_done != BALANCE_WORKERS && sched_tick_count() < deadline) {
-            sched_yield();
-        }
+    flags=cpu_irq_save();
+    if(kthread_create_batch((u64)&balance_worker,BALANCE_WORKERS))created=BALANCE_WORKERS;
+    cpu_irq_restore(flags);
+    deadline = sched_tick_count() + 800;
+    for (;;) {
+        flags = cpu_irq_save();
+        spin_lock(&g_bal_lock);
+        done = g_bal_done; errors = g_bal_errors; ready = g_bal_ready;
+        spin_unlock(&g_bal_lock);
+        cpu_irq_restore(flags);
+        if (done == created || sched_tick_count() >= deadline) break;
+        sched_yield();
     }
-    arch.pit_busy_wait_ms(30);
-    bal1 = sched_balance_remote_total();
-    ipi1 = sched_ipi_resched_total();
+    bal1 = sched_balance_remote_total(); ipi1 = sched_ipi_resched_total();
     arch.cpu_cli();
-
-    if (g_bal_done != BALANCE_WORKERS) {
-        kprintf("      [FAIL] balance workers done %u/%u\n",
-                (u64)g_bal_done, (u64)BALANCE_WORKERS);
+    if (created != BALANCE_WORKERS || ready != BALANCE_WORKERS
+        || done != BALANCE_WORKERS || errors || !sched_cfs_rb_check()) {
+        kprintf("      [FAIL] balance barrier/create/done/runqueue invariant\n");
         return;
     }
-    if (g_bal_saw_ap == 0 && (bal1 - bal0) == 0) {
+    for (i = 1; i < ncpu && i < 8; i++) if (g_bal_hits[i]) saw_ap = 1;
+    /* Require execution AND actual placement/IPI evidence, not merely either. */
+    if (!saw_ap || bal1 == bal0 || ipi1 == ipi0) {
         kprintf("      [FAIL] no remote balance (hits0=%u hits1=%u bal=%u ipi=%u)\n",
                 g_bal_hits[0], g_bal_hits[1], bal1 - bal0, ipi1 - ipi0);
         return;
     }
+    kprintf("      balance barrier: 4/4 runnable; worker CPUs=%u/%u/%u/%u\n",
+            (u64)g_bal_cpu[0], (u64)g_bal_cpu[1], (u64)g_bal_cpu[2], (u64)g_bal_cpu[3]);
     kprintf("      [PASS] IPI resched balance: remote=%u ipi=%u hits0=%u hits1=%u\n",
             bal1 - bal0, ipi1 - ipi0, g_bal_hits[0], g_bal_hits[1]);
 }
@@ -1655,4 +1676,71 @@ void sched_allocator_selftest(void) {
         return;
     }
     kprintf("      [PASS] concurrent buddy/slab allocation canaries (AP=%u)\n", (u64)saw_ap);
+}
+
+/* Real isolated user children exercise the compatibility futex path after AP
+ * release. State-based rescue is deliberately counted as a failed assertion. */
+extern u32 sched_alloc_pid(void);
+extern void sched_wait_probe_arm(u32 pid,u32 mode);
+extern u64 sched_wait_probe_scan(u32 what);
+extern void sched_wait_probe_rescue(void);
+extern void sched_wait_probe_release(void);
+extern u32 sched_count_live_pid(u32 pid);
+extern u32 uproc_wait_probe_spawn(u32 pid,u32 mode);
+extern u32 proc_wait_probe_take(u32 pid,u32 *code);
+extern u32 sched_signal_send(u32 pid,u32 sig);
+extern void sched_wakeup(u64 chan);
+extern u64 sched_clock_ticks(void);
+extern void sched_wait_probe_note_driver(void);
+static volatile u32 wait_suite_done;
+static void wait_cancel_driver(u64 arg) {
+    (void)arg;
+    u32 mode,round,pid,code,done,sent,rescues,fail=0;u64 end,cpus=0;
+    for(round=0;round<2;round++)for(mode=0;mode<9;mode++) {
+        pid=sched_alloc_pid();code=999;done=0;sent=0;rescues=0;
+        sched_wait_probe_arm(pid,mode);
+        if(!uproc_wait_probe_spawn(pid,mode)){fail=fail+1;continue;}
+        end=sched_clock_ticks()+500;
+        while(sched_clock_ticks()<end) {
+            sched_wait_probe_note_driver();
+            if(proc_wait_probe_take(pid,&code)){done=1;break;}
+            if(((mode==0 || mode==3 || mode==6) && sched_wait_probe_scan(2))
+               || (mode==7 && sched_wait_probe_scan(0) && sched_wait_probe_scan(1))) {
+                rescues=rescues+1;sched_wait_probe_rescue();
+            }
+            if(!sent && (mode==6 ? sched_wait_probe_scan(5) : sched_wait_probe_scan(1)>=(mode==5 ? 2u:1u))) {
+                if(mode==1)sched_signal_send(pid,9);
+                if(mode==2){sched_wakeup(sched_wait_probe_scan(3));sched_signal_send(pid,9);}
+                if(mode==8){sched_signal_send(pid,9);sched_wakeup(sched_wait_probe_scan(3));}
+                if(mode==4 || mode==5 || mode==6 || mode==7)sched_wakeup(sched_wait_probe_scan(3));
+                if(mode==1 || mode==2 || mode==4 || mode==5 || mode==6 || mode==7 || mode==8)sent=1;
+            }
+            if(mode==6 && sent && sched_wait_probe_scan(0) && sched_count_live_pid(pid)==1)sched_wait_probe_release();
+            sched_yield();
+        }
+        cpus=cpus | sched_wait_probe_scan(7);
+        if(!done){
+            sched_wait_probe_release();sched_signal_send(pid,9);sched_wait_probe_rescue();
+            u64 cleanup=sched_clock_ticks()+100;
+            while(!proc_wait_probe_take(pid,&code) && sched_clock_ticks()<cleanup)sched_yield();
+        }
+        if(!done || rescues || ((mode==5 || mode==6) ? code!=42 :
+           ((mode==0 || mode==1 || mode==8) ? code!=137 :
+           (mode==2 ? (code!=0 && code!=137):code!=0))))fail=fail+1;
+        kprintf("[WAIT] case=%u round=%u pid=%u done=%u code=%u rescues=%u\n",
+            (u64)mode,(u64)round,(u64)pid,(u64)done,(u64)code,(u64)rescues);
+        sched_wait_probe_arm(0,0);
+    }
+    kprintf("[WAIT] %s interruptible admission cases=18 failures=%u CPU-mask=0x%x\n",
+            fail?"FAIL":"PASS",(u64)fail,cpus);
+    wait_suite_done=1;kthread_exit();
+}
+void sched_wait_cancel_selftest(void) {
+    u32 id;u64 end=sched_clock_ticks()+3000;
+    wait_suite_done=0;id=kthread_create((u64)&wait_cancel_driver,0);
+    if(id==0xFFFFFFFF){kprintf("[WAIT] FAIL coordinator allocation\n");return;}
+    /* A real non-idle coordinator gives load-aware enqueue a genuine remote
+     * destination. BSP slot0 must not be the runnable rendezvous coordinator. */
+    while((!wait_suite_done || sched_thread_state(id)!=TCB_FREE_ST) && sched_clock_ticks()<end)sched_yield();
+    if(!wait_suite_done)kprintf("[WAIT] FAIL coordinator deadline\n");
 }

@@ -33,6 +33,7 @@ extern long u_getcwd(char *buf, unsigned long len);
 extern long u_kill(long pid, long sig);
 extern long u_pipe(int *pipefd);
 extern long u_unlink(const char *path);
+extern long u_rename(const char *oldpath, const char *newpath);
 extern long u_link(const char *oldpath, const char *newpath);
 extern long u_symlink(const char *target, const char *linkpath);
 extern long u_readlink(const char *path, char *buf, unsigned long n);
@@ -81,6 +82,7 @@ extern long arch_prctl(long code, unsigned long addr);
 
 /* libc.c (same package) */
 extern unsigned long strlen(const char *s);
+extern int strcmp(const char *a, const char *b);
 extern void printf(const char *fmt, ...);
 extern void puts(const char *s);
 extern void *malloc(unsigned long size);
@@ -2227,6 +2229,147 @@ static void symlink_test(void) {
     puts("[U][PASS] symlink/readlink");
 }
 
+/* Namespace-level regressions: filesystem-local symlink tests cannot catch
+ * dispatching a path to the wrong filesystem. All fixtures are repeatable. */
+static int xmount_read(const char *path) {
+    char buf[32];
+    const char *payload = "cross-mount-payload";
+    long fd = u_open(path, 0, 0);
+    long n;
+    int i;
+    if (fd < 0) return 0;
+    n = u_read(fd, buf, sizeof(buf));
+    u_close(fd);
+    if (n != 19) return 0;
+    for (i = 0; i < 19; i++) if (buf[i] != payload[i]) return 0;
+    return 1;
+}
+
+static void cross_mount_test(void) {
+    char st[144];
+    char buf[128];
+    char cwd[512];
+    long fd;
+    long n;
+    int i;
+    const char *paths[12];
+    paths[0] = "/tmp/xmount_data";
+    paths[1] = "/mnt/xmount_data";
+    paths[2] = "/tmp/xmount_to_ext";
+    paths[3] = "/mnt/xmount_to_ram";
+    paths[4] = "/tmp/xmount_dir";
+    paths[5] = "/mnt/xmount_rel";
+    paths[6] = "/tmp/xmount_nested";
+    paths[7] = "/tmp/xmount_dangle";
+    paths[8] = "/mnt/xmount_created";
+    paths[9] = "/tmp/xmount_cycle";
+    paths[10] = "/mnt/xmount_cycle";
+    paths[11] = "/mnt/xmount_bad";
+    fd = u_open("/mnt/m6pass.txt", 0, 0);
+    if (fd < 0) return; /* This optional boot device is required by CI. */
+    u_close(fd);
+    for (i = 0; i < 12; i++) u_unlink(paths[i]);
+    for (i = 0; i < 2; i++) {
+        fd = u_open(paths[i], 0x241, 0644);
+        if (fd < 0) { puts("[U][FAIL] cross-mount fixture open"); return; }
+        n = u_write(fd, "cross-mount-payload", 19);
+        u_close(fd);
+        if (n != 19) { puts("[U][FAIL] cross-mount fixture write"); return; }
+    }
+    if (u_symlink(paths[1], paths[2]) != 0 ||
+        u_symlink(paths[0], paths[3]) != 0 ||
+        u_symlink("/mnt", paths[4]) != 0 ||
+        u_symlink("../tmp/xmount_data", paths[5]) != 0 ||
+        u_symlink("/tmp/xmount_dir/../etc/motd", paths[6]) != 0) {
+        puts("[U][FAIL] cross-mount fixture links"); return;
+    }
+    if (!xmount_read(paths[2]) || !xmount_read(paths[3]) ||
+        !xmount_read(paths[5]) || !xmount_read("/tmp/xmount_dir/xmount_data")) {
+        puts("[U][FAIL] cross-mount open payload"); return;
+    }
+    if (u_stat(paths[2], st) != 0 || st[0] != 2 ||
+        u_stat(paths[3], st) != 0 || st[0] != 1 ||
+        u_newfstatat(12345, paths[2], st, 0) != 0 || st[0] != 2 ||
+        u_lstat(paths[2], st) != 0 || st[0] != 1 ||
+        ((unsigned char)st[25] & 0xF0) != 0xA0 ||
+        u_newfstatat(-100, paths[3], st, 0x100) != 0 || st[0] != 2 ||
+        ((unsigned char)st[25] & 0xF0) != 0xA0) {
+        puts("[U][FAIL] cross-mount stat identity/nofollow"); return;
+    }
+    n = u_readlink(paths[2], buf, sizeof(buf));
+    if (n != 16) { puts("[U][FAIL] cross-mount readlink length"); return; }
+    for (i = 0; i < 16; i++) {
+        if (buf[i] != paths[1][i]) { puts("[U][FAIL] cross-mount readlink target"); return; }
+    }
+    fd = u_open(paths[2], 0xC1, 0644); /* exclusive create inspects link */
+    if (fd >= 0) { u_close(fd); puts("[U][FAIL] cross-mount O_EXCL"); return; }
+    fd = u_open(paths[2], 0x20000, 0);
+    if (fd >= 0) { u_close(fd); puts("[U][FAIL] cross-mount O_NOFOLLOW"); return; }
+    if (u_symlink(paths[8], paths[7]) != 0) {
+        puts("[U][FAIL] cross-mount dangling link"); return;
+    }
+    fd = u_open(paths[7], 0xC1, 0644);
+    if (fd >= 0 || u_stat(paths[8], st) == 0) {
+        if (fd >= 0) u_close(fd);
+        puts("[U][FAIL] cross-mount dangling O_EXCL"); return;
+    }
+    fd = u_open(paths[7], 0x241, 0644);
+    if (fd < 0) { puts("[U][FAIL] cross-mount dangling O_CREAT"); return; }
+    n = u_write(fd, "cross-mount-payload", 19);
+    u_close(fd);
+    if (n != 19 || !xmount_read(paths[8]) ||
+        u_unlink("/tmp/xmount_dir/xmount_created") != 0 ||
+        u_lstat(paths[7], st) != 0 || u_stat(paths[8], st) == 0) {
+        puts("[U][FAIL] cross-mount create/unlink parent"); return;
+    }
+    if (u_getcwd(cwd, sizeof(cwd)) < 0 || u_chdir(paths[4]) != 0 ||
+        u_getcwd(buf, sizeof(buf)) < 0 || buf[0] != '/' || buf[1] != 'm' ||
+        buf[2] != 'n' || buf[3] != 't' || buf[4] != 0 || u_chdir(cwd) != 0) {
+        puts("[U][FAIL] cross-mount physical cwd"); return;
+    }
+    fd = u_open("/tmp/xmount_dir/../etc/motd", 0, 0);
+    if (fd < 0) { puts("[U][FAIL] cross-mount link before dotdot"); return; }
+    u_close(fd);
+    fd = u_open(paths[6], 0, 0);
+    if (fd < 0) { puts("[U][FAIL] cross-mount target dotdot"); return; }
+    u_close(fd);
+    fd = u_open("/tmp/xmount_data/../xmount_data", 0, 0);
+    if (fd >= 0) { u_close(fd); puts("[U][FAIL] cross-mount non-directory dotdot"); return; }
+    if (u_symlink(paths[10], paths[9]) != 0 || u_symlink(paths[9], paths[10]) != 0) {
+        puts("[U][FAIL] cross-mount cycle fixture"); return;
+    }
+    fd = u_open(paths[9], 0, 0);
+    if (fd >= 0 || u_stat(paths[9], st) == 0 || u_lstat(paths[9], st) != 0) {
+        if (fd >= 0) u_close(fd);
+        puts("[U][FAIL] cross-mount cycle bound"); return;
+    }
+    /* Entry mutations must never follow a last symlink and erase its target,
+     * even when the caller supplies a trailing slash. */
+    u_unlink("/tmp/xmount_rmdir");
+    u_rmdir("/mnt/xmount_sub");
+    if (u_mkdir("/tmp/xmount_dir/xmount_sub/") != 0 ||
+        u_symlink("/mnt/xmount_sub", "/tmp/xmount_rmdir") != 0 ||
+        u_rmdir("/tmp/xmount_rmdir/") == 0 ||
+        u_unlink("/tmp/xmount_rmdir/") == 0 ||
+        u_stat("/mnt/xmount_sub", st) != 0 ||
+        u_lstat("/tmp/xmount_rmdir", st) != 0 ||
+        u_lstat("/tmp/xmount_rmdir/", st) != 0 ||
+        ((unsigned char)st[25] & 0xF0) != 0x40 ||
+        u_rmdir("/tmp/xmount_dir/xmount_sub/") != 0 ||
+        u_unlink("/tmp/xmount_rmdir") != 0) {
+        puts("[U][FAIL] cross-mount trailing slash entry safety"); return;
+    }
+    if (u_rename(paths[0], "/tmp/xmount_dir/xmount_bad") == 0 ||
+        !xmount_read(paths[0]) || u_stat(paths[11], st) == 0) {
+        puts("[U][FAIL] cross-mount rename EXDEV safety"); return;
+    }
+    if (u_unlink(paths[2]) != 0 || !xmount_read(paths[1])) {
+        puts("[U][FAIL] cross-mount unlink preserves target"); return;
+    }
+    for (i = 0; i < 12; i++) u_unlink(paths[i]);
+    puts("[U][PASS] cross-mount symlink namespace");
+}
+
 static void hardlink_test(void) {
     char st_a[144];
     char st_b[144];
@@ -2440,13 +2583,374 @@ static void getcwd_test(void) {
 }
 
 
+/* Explicit regression mode: keep large I/O out of the normal boot deadline.
+ * It runs in a child /bin/init, not a new utility or a privileged host oracle. */
+static unsigned char reclaim_byte(unsigned long off, unsigned int seed) {
+    return (unsigned char)(off * 37 + (off >> 8) + seed);
+}
+
+static int reclaim_write(const char *path, unsigned long size, unsigned int seed) {
+    char buf[4096];
+    unsigned long off;
+    unsigned long i;
+    long fd = u_open(path, 0x241, 0644);
+    if (fd < 0) return 0;
+    for (off = 0; off < size; off += sizeof(buf)) {
+        unsigned long n = size - off;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        for (i = 0; i < n; i++) buf[i] = (char)reclaim_byte(off + i, seed);
+        if (u_write(fd, buf, n) != (long)n) { u_close(fd); return 0; }
+    }
+    u_close(fd);
+    return 1;
+}
+
+static int reclaim_read(const char *path, unsigned long size,
+                        unsigned long patterned, unsigned int seed) {
+    char buf[4096];
+    unsigned long off;
+    unsigned long i;
+    long fd = u_open(path, 0, 0);
+    if (fd < 0) return 0;
+    for (off = 0; off < size; off += sizeof(buf)) {
+        unsigned long n = size - off;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (u_read(fd, buf, n) != (long)n) { u_close(fd); return 0; }
+        for (i = 0; i < n; i++) {
+            unsigned char want = off + i < patterned ? reclaim_byte(off + i, seed) : 0;
+            if ((unsigned char)buf[i] != want) { u_close(fd); return 0; }
+        }
+    }
+    i = u_read(fd, buf, 1);
+    u_close(fd);
+    return i == 0;
+}
+
+static int ext2_reclaim_check(void) {
+    const char *victim = "/mnt/reclaim/victim";
+    const char *survivor = "/mnt/reclaim/survivor";
+    unsigned long before[15];
+    unsigned long now[15];
+    unsigned long base_blocks;
+    unsigned long base_inodes;
+    unsigned long i;
+    unsigned long cycle;
+    char buf[4096];
+    long fd;
+    u_mkdir("/mnt/reclaim");
+    u_unlink(victim);
+    fd = u_open(survivor, 0, 0);
+    if (fd >= 0) {
+        u_close(fd);
+        if (!reclaim_read(survivor, 327680, 327680, 73)) {
+            puts("[U][FAIL] Ext2 reclaim persisted survivor"); return 1;
+        }
+        puts("[U] Ext2 reclaim persisted survivor verified");
+    } else if (!reclaim_write(survivor, 327680, 73)) {
+        puts("[U][FAIL] Ext2 reclaim survivor fixture"); return 1;
+    }
+    if (u_statfs("/mnt", before) != 0 || before[0] != 0xEF53 || before[1] != 1024) {
+        puts("[U][FAIL] Ext2 reclaim statfs fixture"); return 1;
+    }
+    base_blocks = before[3];
+    base_inodes = before[6];
+    for (cycle = 0; cycle < 5; cycle++) {
+        unsigned long want_blocks = cycle == 4 ? 7 : 772;
+        if (cycle == 4) {
+            fd = u_open(victim, 0x241, 0644);
+            for (i = 0; i < sizeof(buf); i++) buf[i] = (char)reclaim_byte(i, 91);
+            if (fd < 0 || u_lseek(fd, 73400320, 0) != 73400320 ||
+                u_write(fd, buf, sizeof(buf)) != sizeof(buf)) {
+                if (fd >= 0) u_close(fd);
+                puts("[U][FAIL] Ext2 reclaim triple-indirect fixture"); return 1;
+            }
+            u_close(fd);
+        } else if (!reclaim_write(victim, 786432, 91)) {
+            puts("[U][FAIL] Ext2 reclaim victim write"); return 1;
+        }
+        if (u_statfs("/mnt", now) != 0 || now[3] + want_blocks != base_blocks ||
+            now[6] + 1 != base_inodes || !reclaim_read(survivor, 327680, 327680, 73)) {
+            puts("[U][FAIL] Ext2 reclaim allocation/survivor integrity"); return 1;
+        }
+        if (cycle == 0 || cycle == 4) {
+            if (u_unlink(victim) != 0) { puts("[U][FAIL] Ext2 reclaim unlink"); return 1; }
+        } else {
+            fd = u_open(victim, cycle == 1 ? 0x202 : 2, 0);
+            if (fd < 0) { puts("[U][FAIL] Ext2 reclaim truncate open"); return 1; }
+            if (cycle == 3) {
+                if (ftruncate((int)fd, 4097) != 0 ||
+                    !reclaim_read(victim, 4097, 4097, 91) ||
+                    ftruncate((int)fd, 786432) != 0 ||
+                    !reclaim_read(victim, 786432, 4097, 91)) {
+                    u_close(fd); puts("[U][FAIL] Ext2 reclaim shrink/regrow zeros"); return 1;
+                }
+            }
+            if ((cycle != 1 && ftruncate((int)fd, 0) != 0) ||
+                u_statfs("/mnt", now) != 0 || now[3] != base_blocks ||
+                now[6] + 1 != base_inodes) {
+                u_close(fd); puts("[U][FAIL] Ext2 reclaim truncate counts"); return 1;
+            }
+            u_close(fd);
+            if (!reclaim_read(victim, 0, 0, 91) || u_unlink(victim) != 0) {
+                puts("[U][FAIL] Ext2 reclaim empty/unlink"); return 1;
+            }
+        }
+        if (u_statfs("/mnt", now) != 0 || now[3] != base_blocks || now[6] != base_inodes) {
+            printf("[U][FAIL] Ext2 reclaim cycle=%u blocks=%u expected=%u inodes=%u expected=%u\n",
+                   (unsigned int)cycle, (unsigned int)now[3], (unsigned int)base_blocks,
+                   (unsigned int)now[6], (unsigned int)base_inodes);
+            return 1;
+        }
+        if (!reclaim_read(survivor, 327680, 327680, 73)) {
+            puts("[U][FAIL] Ext2 reclaim survivor after free/reuse"); return 1;
+        }
+        printf("[U] Ext2 reclaim cycle=%u blocks=%u inodes=%u exact\n",
+               (unsigned int)cycle, (unsigned int)now[3], (unsigned int)now[6]);
+    }
+    puts("[U][PASS] Ext2 indirect reclaim/accounting/survivor");
+    return 0;
+}
+
+/* Raw process/task lifetime probes. Shared pages and stacks are prefaulted;
+ * atomic assembly operations give actual acquire/release handoff on x86-64.
+ * No time-based delay is used to manufacture an exit ordering. */
+extern long u_clone(unsigned long flags, void *stack, void *fn, void *arg);
+extern long u_set_tid_address(void *addr);
+extern void u_exit_group(long code);
+extern unsigned int atomic_xchg(volatile unsigned int *p, unsigned int value);
+extern unsigned int atomic_cmpxchg(volatile unsigned int *p, unsigned int old, unsigned int value);
+struct life_gate {
+    volatile unsigned int ready, release, returned, early;
+    volatile unsigned int leader_alive, worker_alive, done;
+    long parent, child;
+};
+static unsigned int life_load(volatile unsigned int *p) { return atomic_cmpxchg(p, 0, 0); }
+static u64 life_now(void) {
+    long t[2];
+    if (u_clock_gettime(1, t) != 0) return 0;
+    return (u64)t[0] * 1000000000UL + (u64)t[1];
+}
+static int life_until(volatile unsigned int *p, unsigned int value) {
+    u64 end = life_now() + 5000000000UL;
+    while (life_load(p) != value) { if (life_now() >= end) return 0; u_yield(); }
+    return 1;
+}
+static char life_status(long pid, int *one_thread) {
+    char path[64], digits[24], buf[512];
+    long n, fd; int i, at = 6, d = 0;
+    path[0]='/';path[1]='p';path[2]='r';path[3]='o';path[4]='c';path[5]='/';
+    do { digits[d++] = '0' + pid % 10; pid /= 10; } while (pid);
+    while (d) path[at++] = digits[--d];
+    { const char *suffix="/status"; for(i=0;suffix[i];i++) path[at++]=suffix[i]; }
+    path[at]=0; *one_thread=0;
+    fd=u_open(path,0,0); if(fd<0) return '?';
+    n=u_read(fd,buf,511);u_close(fd);if(n<=0)return '?';buf[n]=0;
+    for(i=0;i+10<n;i++) if(buf[i]=='T' && buf[i+1]=='h' && buf[i+7]==':' && buf[i+9]=='1' && buf[i+10]=='\n') *one_thread=1;
+    for(i=0;i+7<n;i++) if(buf[i]=='S'&&buf[i+1]=='t'&&buf[i+5]==':'&&buf[i+6]=='\t') return buf[i+7];
+    return '?';
+}
+static void life_worker(void *arg) {
+    struct life_gate *g=(struct life_gate *)arg;
+    int one=0; char st; u64 end=life_now()+5000000000UL;
+    u_set_tid_address((void *)&g->worker_alive);
+    atomic_xchg(&g->ready,1);
+    if(g->child == -1) {
+        life_until(&g->release,1);
+    } else {
+        if(!life_until(&g->leader_alive,0)) u_exit(90);
+        do { st=life_status(u_getpid(),&one); if(one||st=='Z')break;u_yield(); } while(life_now()<end);
+        for(;;) {
+            if(life_load(&g->returned)) { atomic_xchg(&g->early,1);break; }
+            st=life_status(g->parent,&one);
+            if(st=='S')break;
+            if(life_now()>=end)u_exit(91);
+            u_yield();
+        }
+    }
+    atomic_xchg(&g->done,1);
+    u_exit(29);
+}
+struct life_fan { volatile unsigned int release; volatile unsigned int alive[32]; };
+struct life_arg { struct life_fan *fan; int index; };
+static void life_fan_worker(void *arg) {
+    struct life_arg *a=(struct life_arg *)arg;
+    u_set_tid_address((void *)&a->fan->alive[a->index]);
+    atomic_xchg(&a->fan->alive[a->index],1);
+    life_until(&a->fan->release,1);
+    u_exit(0);
+}
+static int life_failure_checks(void) {
+    struct life_fan *f=(struct life_fan *)u_mmap(0,4096,3,0x21,-1,0);
+    char *stacks=(char *)u_mmap(0,32*16384,3,0x22,-1,0);
+    struct life_arg args[32];int i,round,n,previous_n=0;long pid,status;u64 end;
+    if((long)f<0 || (long)stacks<0)return 1;
+    for(i=0;i<4096;i++)((volatile char *)f)[i]=0;
+    for(i=0;i<32*16384;i+=4096)stacks[i]=0;
+    for(round=0;round<2;round++) {
+        atomic_xchg(&f->release,0);n=0;
+        for(i=0;i<32;i++) {
+            args[i].fan=f;args[i].index=i;atomic_xchg(&f->alive[i],2);
+            if(u_clone(0x10100,stacks+(i+1)*16384-8,(void *)&life_fan_worker,&args[i])<0) {atomic_xchg(&f->alive[i],0);break;}
+            n++;
+        }
+        if(n==0 || n==32 || (round && n!=previous_n))return 1;
+        previous_n=n;
+        for(i=0;i<n;i++)if(!life_until(&f->alive[i],1))return 1;
+        atomic_xchg(&f->release,1);
+        for(i=0;i<n;i++)if(!life_until(&f->alive[i],0))return 1;
+        end=life_now()+5000000000UL;
+        do{pid=u_fork();if(pid!=-16)break;u_yield();}while(life_now()<end);
+        if(pid<0)return 1;if(pid==0)u_exit(0);
+        if(u_wait4(pid,&status,0,0)!=pid || status)return 1;
+        printf("[LIFETIME] bounded task exhaustion round=%d created=%d rollback+reuse OK\n",round,n);
+    }
+    /* Two independent process address spaces become exit-runnable together.
+     * Repeat on the SAME owner/coordination page, not separate serialized VMs. */
+    for(round=0;round<6;round++) {
+        long children[2];
+        atomic_xchg(&f->release,0);
+        for(i=0;i<2;i++) {
+            atomic_xchg(&f->alive[i],0);children[i]=u_fork();if(children[i]<0)return 1;
+            if(children[i]==0){atomic_xchg(&f->alive[i],1);if(!life_until(&f->release,1))u_exit(95);u_exit(31+i);}
+        }
+        for(i=0;i<2;i++)if(!life_until(&f->alive[i],1))return 1;
+        atomic_xchg(&f->release,1);
+        for(i=0;i<2;i++)if(u_wait4(children[i],&status,0,0)!=children[i] || ((status>>8)&255)!=31+i)return 1;
+    }
+    puts("[LIFETIME] PASS bounded task allocation failure/rollback/reuse and concurrent process teardown");
+    u_munmap(f,4096);u_munmap(stacks,32*16384);return 0;
+}
+
+extern long u_poll(void *fds, unsigned long n, long timeout);
+static int life_owner_capacity_check(void) {
+    long children[32],pid,status;int pipefd[2];int n,i,one;u64 end;char byte;
+    struct { int fd; short events; short revents; } pollfd;
+    if(u_pipe(pipefd)!=0)return 1;
+    for(n=0;n<32;n++) {
+        pid=u_fork();if(pid<0)break;
+        if(pid==0)u_exit(0);
+        children[n]=pid;end=life_now()+5000000000UL;
+        while(life_status(pid,&one)!='Z'){if(life_now()>=end)return 1;u_yield();}
+    }
+    if(n==0 || n==32)return 1;
+    for(i=0;i<n;i++)if(u_wait4(children[i],&status,0,0)!=children[i] || status)return 1;
+    pid=u_fork();if(pid<0)return 1;if(pid==0)u_exit(0);
+    if(u_wait4(pid,&status,0,0)!=pid || status)return 1;
+    u_close(pipefd[1]);pollfd.fd=pipefd[0];pollfd.events=1;pollfd.revents=0;
+    /* EOF must be immediately readable: a leaked retained writer from the
+     * failed process-admission path would make zero-timeout poll return0. */
+    if(u_poll(&pollfd,1,0)!=1 || !(pollfd.revents&1) || u_read(pipefd[0],&byte,1)!=0)return 1;
+    u_close(pipefd[0]);
+    printf("[LIFETIME] PASS owner capacity=%d admission rollback, pipe refs/EOF and process reuse\n",n);
+    return 0;
+}
+
+static int life_extra_checks(void) {
+    struct life_gate *g=(struct life_gate *)u_mmap(0,4096,3,0x21,-1,0);
+    char *stack=(char *)u_mmap(0,16384,3,0x22,-1,0);
+    char *argv[2]; long pid,status,rc;int i;u64 end;
+    if((long)g<0 || (long)stack<0)return 1;
+    for(i=0;i<4096;i++)((volatile char *)g)[i]=0;
+    for(i=0;i<16384;i+=4096)stack[i]=0;
+    g->worker_alive=1;g->child=-1;
+    if(u_clone(0x10100,stack+16384-8,(void *)&life_worker,g)<0)return 1;
+    if(!life_until(&g->ready,1))return 1;
+    argv[0]="/bin/hello";argv[1]=0;
+    pid=u_fork();
+    if(pid==0)u_exit(99);
+    rc=u_execve("/bin/hello",argv,0);
+    if(pid!=-16 || rc!=-16)return 1;
+    atomic_xchg(&g->release,1);
+    if(!life_until(&g->worker_alive,0))return 1;
+    end=life_now()+5000000000UL;
+    do {pid=u_fork();if(pid!=-16)break;u_yield();}while(life_now()<end);
+    if(pid<0)return 1;
+    if(pid==0)u_exit(0);
+    if(u_wait4(pid,&status,0,0)!=pid || status)return 1;
+    if(u_execve("/no-such-lifetime-image",argv,0)!=-1)return 1;
+    pid=u_fork();if(pid<0)return 1;
+    if(pid==0){u_execve("/bin/hello",argv,0);u_exit(98);}
+    if(u_wait4(pid,&status,0,0)!=pid || ((status>>8)&255)!=42)return 1;
+    puts("[LIFETIME] PASS multithread fork/exec BUSY, failed-image rollback, single-task fork/exec");
+    for(i=0;i<64;i++) {
+        pid=u_fork();if(pid<0)return 1;
+        if(pid==0)u_exit(0);
+        if(u_wait4(pid,&status,0,0)!=pid || status || u_wait4(pid,&status,1,0)!=-1)return 1;
+    }
+    puts("[LIFETIME] PASS 64 unique process completions and slot/AS reuse");
+    u_munmap(g,4096);u_munmap(stack,16384);return 0;
+}
+
+static int process_lifetime_probe(void) {
+    int mode, rc=0; long pid, got, status;
+    for(mode=0;mode<2;mode++) {
+        struct life_gate *g=(struct life_gate *)u_mmap(0,4096,3,0x21,-1,0);
+        char *stack=(char *)u_mmap(0,16384,3,0x22,-1,0); int i;
+        if((long)g<0||(long)stack<0)return 1;
+        for(i=0;i<4096;i++)((volatile char *)g)[i]=0;
+        for(i=0;i<16384;i+=4096)stack[i]=0;
+        g->parent=u_getpid();g->leader_alive=1;g->worker_alive=1;g->child=mode?-1:0;
+        pid=u_fork();if(pid<0)return 1;
+        if(pid==0) {
+            long tid;
+            u_set_tid_address((void *)&g->leader_alive);
+            tid=u_clone(0x10100,stack+16384-8,(void *)&life_worker,g);
+            if(tid<0)u_exit(92);
+            if(!life_until(&g->ready,1))u_exit(93);
+            if(mode)u_exit_group(42);else u_exit(17);
+        }
+        got=u_wait4(pid,&status,0,0);atomic_xchg(&g->returned,1);
+        if(mode && life_load(&g->worker_alive)) atomic_xchg(&g->release,1);
+        if(!life_until(&g->worker_alive,0))return 1;
+        printf("[LIFETIME] mode=%d pid=%ld got=%ld code=%ld early=%u worker_done=%u\n",mode,pid,got,(status>>8)&255,life_load(&g->early),life_load(&g->done));
+        if(got!=pid || (!mode && ((status>>8)&255)!=29) || (mode && (((status>>8)&255)!=42 || life_load(&g->done))))rc=1;
+        if(u_wait4(pid,&status,1,0)!=-1)rc=1;
+        u_munmap(g,4096);u_munmap(stack,16384);
+    }
+    if(!rc && life_extra_checks())rc=1;
+    if(!rc && life_failure_checks())rc=1;
+    if(!rc && life_owner_capacity_check())rc=1;
+    puts(rc?"[LIFETIME] FAIL process/task semantics":"[LIFETIME] PASS process/task semantics");
+    return rc;
+}
+
+/* Trusted boot driver arms rendezvous; this program has no ability to arm it. */
+static volatile unsigned int park_words[2];
+static volatile unsigned int park_hits;
+static void park_handler(int sig) { (void)sig;park_hits=park_hits+1; }
+static void park_worker(void *arg) {
+    (void)arg;futex(&park_words[1],0,0,0,0,0);u_exit(0);
+}
+static int park_probe(int mode) {
+    long rc;char *stack;int i;
+    atomic_xchg(&park_words[0],0);atomic_xchg(&park_words[1],0);park_hits=0;
+    if(mode==3 || mode==4) {
+        struct { void *sa_handler; unsigned long sa_flags; void *sa_restorer; unsigned long sa_mask; } act;
+        act.sa_restorer=0;act.sa_mask=0;act.sa_handler=(void *)park_handler;
+        act.sa_flags=mode==4?0x10000000:0;
+        if(sigaction(15,&act,0)!=0)return 81;
+    }
+    if(mode==5 || mode==6) {
+        stack=(char *)u_mmap(0,16384,3,0x22,-1,0);if((long)stack<0)return 82;
+        for(i=0;i<16384;i+=4096)stack[i]=0;
+        if(u_clone(0x10100,stack+16384-8,(void *)&park_worker,0)<0)return 83;
+    }
+    rc=futex(&park_words[0],0,0,0,0,0);
+    if(mode==5 || mode==6)u_exit_group(42);
+    if(mode==3)return rc==-4 && park_hits==1 ? 0:84;
+    if(mode==4)return rc==0 && park_hits==1 ? 0:85;
+    if(mode==7 && life_load(&park_words[0])!=1)return 87;
+    return rc==0 ? 0:86;
+}
+
 int main(int argc, char **argv) {
+    if(argc==3 && strcmp(argv[1],"--park-probe")==0)return park_probe(argv[2][0]-'0');
     char *sh_argv[2];
     long pid = u_getpid();
     volatile unsigned long i;
 
-    (void)argc;
-    (void)argv;
+    if (argc == 2 && strcmp(argv[1], "--process-lifetime") == 0) return process_lifetime_probe();
+    if (argc == 2 && strcmp(argv[1], "--ext2-reclaim") == 0) return ext2_reclaim_check();
 
     printf("[U] hello from ring 3, pid=%d\n", (int)pid);
 
@@ -2479,6 +2983,7 @@ int main(int argc, char **argv) {
     owner_mtime_test();
     cred_setuid_groups_test();
     symlink_test();
+    cross_mount_test();
     hardlink_test();
     getcwd_test();
     dirent_test();

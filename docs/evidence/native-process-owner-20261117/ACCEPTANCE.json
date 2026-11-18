@@ -1,0 +1,659 @@
+{
+  "state": "PASS_COVERED_ACCEPTANCE_WITH_DOCUMENTED_REMAINING_BLOCKERS",
+  "job": "444792",
+  "make_test_exit": 0,
+  "gate_exit": 0,
+  "started_shanghai": "2026-11-17T23:53:41+08:00",
+  "ended_shanghai": "2026-11-18T00:10:19+08:00",
+  "compiled_source_changes_during_gate": [],
+  "frozen_inputs": 218,
+  "actual_guest_recompiled_unique_objects": 40,
+  "actual_guest_object_markers": [
+    [
+      "types/types.o",
+      "1314"
+    ],
+    [
+      "arch/arch.o",
+      "1314"
+    ],
+    [
+      "arch/gdt.o",
+      "4024"
+    ],
+    [
+      "arch/idt.o",
+      "2423"
+    ],
+    [
+      "arch/lapic.o",
+      "5557"
+    ],
+    [
+      "arch/smp.o",
+      "11268"
+    ],
+    [
+      "arch/ioapic.o",
+      "3874"
+    ],
+    [
+      "drivers/uart.o",
+      "5190"
+    ],
+    [
+      "drivers/kbd.o",
+      "5497"
+    ],
+    [
+      "drivers/vga.o",
+      "8778"
+    ],
+    [
+      "drivers/pci.o",
+      "11612"
+    ],
+    [
+      "drivers/virtio_blk.o",
+      "19171"
+    ],
+    [
+      "drivers/virtio_net.o",
+      "23838"
+    ],
+    [
+      "drivers/ata.o",
+      "5393"
+    ],
+    [
+      "drivers/ahci.o",
+      "40409"
+    ],
+    [
+      "drivers/blk.o",
+      "7289"
+    ],
+    [
+      "kernel/kprintf.o",
+      "4472"
+    ],
+    [
+      "kernel/isr.o",
+      "11977"
+    ],
+    [
+      "mem/pmm.o",
+      "11245"
+    ],
+    [
+      "mem/vmm.o",
+      "7510"
+    ],
+    [
+      "mem/slab.o",
+      "5987"
+    ],
+    [
+      "mem/as.o",
+      "42927"
+    ],
+    [
+      "fs/ramfs.o",
+      "49822"
+    ],
+    [
+      "fs/dirent.o",
+      "2582"
+    ],
+    [
+      "fs/ext2.o",
+      "131072"
+    ],
+    [
+      "kernel/memtest.o",
+      "25531"
+    ],
+    [
+      "kernel/sched.o",
+      "131072"
+    ],
+    [
+      "kernel/proctest.o",
+      "59976"
+    ],
+    [
+      "kernel/native.o",
+      "17957"
+    ],
+    [
+      "kernel/syscall.o",
+      "16668"
+    ],
+    [
+      "kernel/sysfile.o",
+      "39715"
+    ],
+    [
+      "kernel/sysproc.o",
+      "21950"
+    ],
+    [
+      "kernel/proc.o",
+      "12032"
+    ],
+    [
+      "kernel/pipe.o",
+      "9371"
+    ],
+    [
+      "kernel/net.o",
+      "69592"
+    ],
+    [
+      "kernel/tty.o",
+      "36137"
+    ],
+    [
+      "kernel/uproc.o",
+      "13591"
+    ],
+    [
+      "kernel/rootfs.o",
+      "6909"
+    ],
+    [
+      "kernel/vfstest.o",
+      "15413"
+    ],
+    [
+      "kernel/kmain.o",
+      "17566"
+    ]
+  ],
+  "host_staged_parity_separate_evidence": [
+    {
+      "object": "types/types.o",
+      "bytes": 1314,
+      "host_staged_sha256": "63802b020ec7ad195ce912d64c52cb6e457101c5c5856720dd710c76df7cdbfc",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/arch.o",
+      "bytes": 1314,
+      "host_staged_sha256": "63802b020ec7ad195ce912d64c52cb6e457101c5c5856720dd710c76df7cdbfc",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/gdt.o",
+      "bytes": 4024,
+      "host_staged_sha256": "c3ef313577d23081d5e15f79d6796f6192b12f963c31262fb5f1ea64ceb35570",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/idt.o",
+      "bytes": 2423,
+      "host_staged_sha256": "8914d5e93a55b0766944172fe8bca6b5fd4e3bef7831013fdf091e8b9ea3e0c6",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/lapic.o",
+      "bytes": 5557,
+      "host_staged_sha256": "56e4cb69900678979c7a4c72782295dc3e165a259e50f8ab257ba63197cfdb51",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/smp.o",
+      "bytes": 11268,
+      "host_staged_sha256": "f0de879037365b022df7ddf769a9e0e94c59a8140b2ce06167dce0f00a5c1f12",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "arch/ioapic.o",
+      "bytes": 3874,
+      "host_staged_sha256": "aec8b2619e6b1a80bd051c713cc00b0e590aa9e0ab18ca2decdb76a83601c964",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/uart.o",
+      "bytes": 5190,
+      "host_staged_sha256": "6a6ed9de031f0e2c49115accd3050a558139e384d03b68fdec49e5d7cb042a5e",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/kbd.o",
+      "bytes": 5497,
+      "host_staged_sha256": "e84d277e7a500636d5eb329e83db386c0e2b9609250b6b79e709cfaef6c2902e",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/vga.o",
+      "bytes": 8778,
+      "host_staged_sha256": "cd4fa0328724a2cfbe431fd7a08230108bd49dbc5a8acbc93b72b83c9bfee7e2",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/pci.o",
+      "bytes": 11612,
+      "host_staged_sha256": "bf30f354da9809842ed6cface0966b03b217769183d81760c4b09f85335708f7",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/virtio_blk.o",
+      "bytes": 19171,
+      "host_staged_sha256": "b981e576f42606fc39031f6492a78bd43ca79cfc20fe9048f92caeb9d3f42eb9",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/virtio_net.o",
+      "bytes": 23838,
+      "host_staged_sha256": "b125ae8a358688c97ec76ee0a85abcd927088de6115b558588cbb1b6dbb2fc71",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/ata.o",
+      "bytes": 5393,
+      "host_staged_sha256": "bcbf3667bbbffa5f1a987f4c8684c96c9a9e96b29783e12b7275083edd45ad72",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/ahci.o",
+      "bytes": 40409,
+      "host_staged_sha256": "45fbada59d688613e13028c63f24d092d1e29d781ec183c3f51ee8d529cbe213",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "drivers/blk.o",
+      "bytes": 7289,
+      "host_staged_sha256": "b9fc0ce66d8ed248fa5c801b9d855406ce22c875399ebda80990dbc060eb158d",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/kprintf.o",
+      "bytes": 4472,
+      "host_staged_sha256": "c6a4701d2232ba168457e71fd8994118081b0109f253187126685514e3ce26d3",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/isr.o",
+      "bytes": 11977,
+      "host_staged_sha256": "72ad4ce274dcde5754cadaecbea6a768be9af9c5127ec6a7a72984c6e15aca03",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "mem/pmm.o",
+      "bytes": 11245,
+      "host_staged_sha256": "ef2153f9f433e51956b65b50a225f55fd2db20933abb2e8778b8d41350f2b2fd",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "mem/vmm.o",
+      "bytes": 7510,
+      "host_staged_sha256": "203c2f264c7d4a6beec64be0972d50bad1052d0e08eac179ee1859c83d1cba93",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "mem/slab.o",
+      "bytes": 5987,
+      "host_staged_sha256": "838fb7b672c426c026c7752f8a774812fdf3b134f1f52770fa129083d41c5023",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "mem/as.o",
+      "bytes": 42927,
+      "host_staged_sha256": "ed3e8a9730d28f781e4f9ed4b2a1148913af975f627ccc03301792a12f0644e1",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "fs/ramfs.o",
+      "bytes": 49822,
+      "host_staged_sha256": "9e83667452d951a0e01fc4b5a9514801144117ff6e0a96168051f2f0467d3368",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "fs/dirent.o",
+      "bytes": 2582,
+      "host_staged_sha256": "cd2e05f7b90067aa48d4342b2c9545fa70f2e810c81863e51816c8e693fdf56b",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "fs/ext2.o",
+      "bytes": 131072,
+      "host_staged_sha256": "0237328df387e986e0f28a38a0d5fedc889987d4aa1e2d377c63ecb3c5d66267",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/memtest.o",
+      "bytes": 25531,
+      "host_staged_sha256": "027f0cee0d2ad3fbb9533a1723abcfa1f15e43bc9eb769a2715630944daf166d",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/sched.o",
+      "bytes": 131072,
+      "host_staged_sha256": "4a33bc91865d3daeb2744d8979987a81906e308c330aa729756d91751e0ab28c",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/proctest.o",
+      "bytes": 59976,
+      "host_staged_sha256": "c0d23262cdbb093f0dd572ec9fa6bee69f852d348225bdf3cbbf25f065ed2645",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/native.o",
+      "bytes": 17957,
+      "host_staged_sha256": "2b3c3c5b7eeb432b29debd229f126027c8ec336b0778a135eccd838f371ecf08",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/syscall.o",
+      "bytes": 16668,
+      "host_staged_sha256": "94bb741cd0a60e4fa5500e38756e9d61fb6e7c8431b810d6f3cf5f158d1b668a",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/sysfile.o",
+      "bytes": 39715,
+      "host_staged_sha256": "3b488c948b1c91faa70afb33f5f7a799175343471b0f21fc91771fdbaa5f21f4",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/sysproc.o",
+      "bytes": 21950,
+      "host_staged_sha256": "cf2547180477acfd7eedcd447abb02d73aa82e03f905160dabffe0c9dd9b7778",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/proc.o",
+      "bytes": 12032,
+      "host_staged_sha256": "27c56419c7bb1147b9456cd5230fbe20583c0372a6ed495662b4dec3c2d8b3c0",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/pipe.o",
+      "bytes": 9371,
+      "host_staged_sha256": "82e711371179b6791deca0dddc9e5b34f05ea206ce91326c4b21d33681dc7bba",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/net.o",
+      "bytes": 69592,
+      "host_staged_sha256": "4b76b4f570c11a0d92b1c385bb4369204eeb6a8b538ce0c70c7552d79d179f4d",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/tty.o",
+      "bytes": 36137,
+      "host_staged_sha256": "74519e395446531d22791a81ed70928ace6f26600ba1df841cfbb40fd6e2a3b9",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/uproc.o",
+      "bytes": 13591,
+      "host_staged_sha256": "6409e764929be0096d07d591b82ed08d3a90d31a5d6c05895bab325b98fe15be",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/rootfs.o",
+      "bytes": 6909,
+      "host_staged_sha256": "c742c157375e16f4b0f273aafbc86ccdc78317695cf4b58e2c4f3dd100c8f1a6",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/vfstest.o",
+      "bytes": 15413,
+      "host_staged_sha256": "91761bb4b9ea608cb33b7ee8a2304f51ef4f65ad8dfa63fadfc7ba69f0084bd8",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    },
+    {
+      "object": "kernel/kmain.o",
+      "bytes": 17566,
+      "host_staged_sha256": "a941207cf46624ef0c301f032327adfbe10bba61d3cae9da935997fe8b9c0917",
+      "host_staged_equal": true,
+      "actual_guest_identical_marker": true
+    }
+  ],
+  "actual_guest_link": true,
+  "actual_guest_dump_bytes": 21730208,
+  "dump_frames": 1769,
+  "reference_sha256": "6805baaf18e50a52a74506db90b732de46c4baaac16db66023e2363f09ca5744",
+  "actual_guest_rebuilt_sha256": "6805baaf18e50a52a74506db90b732de46c4baaac16db66023e2363f09ca5744",
+  "rebuilt_second_boot_checks_passed": 31,
+  "rebuilt_second_boot_smp": 1,
+  "native_smp": [
+    {
+      "cpus": 1,
+      "actual_payload_mask": 1,
+      "per_cpu_transfers": [
+        [
+          "0",
+          "512",
+          "512"
+        ]
+      ],
+      "strict_balance_marker": [
+        "[PASS] IPI resched balance: skipped (-smp 1)"
+      ]
+    },
+    {
+      "cpus": 2,
+      "actual_payload_mask": 3,
+      "per_cpu_transfers": [
+        [
+          "0",
+          "256",
+          "251"
+        ],
+        [
+          "1",
+          "256",
+          "261"
+        ]
+      ],
+      "strict_balance_marker": [
+        "[PASS] IPI resched balance: remote=2 ipi=1 hits0=2 hits1=2"
+      ]
+    },
+    {
+      "cpus": 4,
+      "actual_payload_mask": 15,
+      "per_cpu_transfers": [
+        [
+          "0",
+          "256",
+          "8"
+        ],
+        [
+          "1",
+          "123",
+          "116"
+        ],
+        [
+          "2",
+          "133",
+          "128"
+        ],
+        [
+          "3",
+          "0",
+          "260"
+        ]
+      ],
+      "strict_balance_marker": [
+        "[PASS] IPI resched balance: remote=3 ipi=3 hits0=1 hits1=1"
+      ]
+    }
+  ],
+  "process_smp": [
+    {
+      "cpus": 1,
+      "task_exhaustion_round_capacities": [
+        [
+          "0",
+          "29"
+        ],
+        [
+          "1",
+          "29"
+        ]
+      ],
+      "owner_capacity": 30,
+      "owner_table_rejection": true,
+      "pipe_rollback_eof": true,
+      "task_exit_cpu_masks": [
+        1
+      ],
+      "observed_results": [
+        [
+          "0",
+          "24",
+          "24",
+          "29",
+          "0",
+          "1"
+        ],
+        [
+          "1",
+          "26",
+          "26",
+          "42",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "cpus": 2,
+      "task_exhaustion_round_capacities": [
+        [
+          "0",
+          "28"
+        ],
+        [
+          "1",
+          "28"
+        ]
+      ],
+      "owner_capacity": 30,
+      "owner_table_rejection": true,
+      "pipe_rollback_eof": true,
+      "task_exit_cpu_masks": [
+        1,
+        2,
+        3
+      ],
+      "observed_results": [
+        [
+          "0",
+          "24",
+          "24",
+          "29",
+          "0",
+          "1"
+        ],
+        [
+          "1",
+          "26",
+          "26",
+          "42",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "cpus": 4,
+      "task_exhaustion_round_capacities": [
+        [
+          "0",
+          "26"
+        ],
+        [
+          "1",
+          "26"
+        ]
+      ],
+      "owner_capacity": 30,
+      "owner_table_rejection": true,
+      "pipe_rollback_eof": true,
+      "task_exit_cpu_masks": [
+        1,
+        2,
+        3,
+        4,
+        8,
+        15
+      ],
+      "observed_results": [
+        [
+          "0",
+          "24",
+          "24",
+          "29",
+          "0",
+          "1"
+        ],
+        [
+          "1",
+          "26",
+          "26",
+          "42",
+          "0",
+          "0"
+        ]
+      ]
+    }
+  ],
+  "seed_sha256": "0f214a20107809a8927cfc990a31622b07af844637b61f9a0b3a567a35369e76",
+  "staged_compiler_sha256": "147b2dd2339e142d74830f6bc4086c519bfd0c6230577a639ba20af11c39e9bb",
+  "source_pin": "dfb1c7b649480e2acfef2a0a02e8168b5b28ee38",
+  "local_acceptance_not_github_ci_run": true,
+  "remaining_blockers": [
+    "fatal cancellation before park publication: source-level interleaving, not an executed deterministic repro",
+    "concurrent VM/frame references/TLB shootdowns not solved",
+    "copied fd/cwd/credentials/signal adapters; native capabilities not exposed",
+    "last-detacher default result/main-return policy must be settled before native ABI release",
+    "32 task slots/16KiB stacks/global run_lock unchanged"
+  ],
+  "updated_shanghai": "2026-11-18T00:11:08.162620",
+  "validated_inputs_archive_sha256": "8420f03aba37005f46fb5f873c3b903edd6e700125ceb3a00330280826d98c3d"
+}

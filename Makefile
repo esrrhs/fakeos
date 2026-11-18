@@ -136,6 +136,7 @@ OBJS := \
 	$(BUILD_DIR)/memtest.o \
 	$(BUILD_DIR)/sched.o \
 	$(BUILD_DIR)/proctest.o \
+	$(BUILD_DIR)/native.o \
 	$(BUILD_DIR)/syscall.o \
 	$(BUILD_DIR)/sysfile.o \
 	$(BUILD_DIR)/sysproc.o \
@@ -490,6 +491,11 @@ $(BUILD_DIR)/sched.o: kernel/sched.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/native.o: kernel/native.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/proctest.o: kernel/proctest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -557,6 +563,11 @@ $(BUILD_DIR)/kmain.o: kernel/kmain.c
 
 # Run automated test
 test: build
+	@PYTHONUNBUFFERED=1 python3 scripts/test_native_objects.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_process_lifetime.py
+	@python3 scripts/test_qemu_fixture.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_ext2_reclaim.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_vfs_mounts.py
 	@python3 scripts/test_bootstrap_transfer.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_qemu.py
 

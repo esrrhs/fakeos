@@ -133,57 +133,6 @@ static void canon_pop(char *buf) {
     }
 }
 
-/* Returns 1 on success, 0 if the result would overflow the buffer. */
-static u32 canon_path(const char *cwd, const char *raw, char *out, u32 cap) {
-    u32 i = 0;
-    if (cap < 2) {
-        return 0;
-    }
-    if (raw[0] == '/') {
-        out[0] = '/';
-        out[1] = 0;
-    } else {
-        u32 l = kstr_len(cwd);
-        u32 k;
-        if (l + 1 > cap) {
-            return 0;
-        }
-        for (k = 0; k <= l; k++) {
-            out[k] = cwd[k];
-        }
-    }
-    while (raw[i] != 0) {
-        u32 start;
-        u32 n;
-        while (raw[i] == '/') {
-            i++;
-        }
-        if (raw[i] == 0) {
-            break;
-        }
-        start = i;
-        n = 0;
-        while (raw[i] != 0 && raw[i] != '/') {
-            i++;
-            n++;
-            if (n >= PATH_KMAX) {
-                return 0;
-            }
-        }
-        if (n == 1 && raw[start] == '.') {
-            continue;
-        }
-        if (n == 2 && raw[start] == '.' && raw[start + 1] == '.') {
-            canon_pop(out);
-            continue;
-        }
-        if (!canon_push(out, &raw[start], n, cap)) {
-            return 0;                    /* resulting path too long */
-        }
-    }
-    return 1;
-}
-
 /* Copy a NUL-terminated string from user space with PER-PAGE VMA validation.
  * A fixed window cannot be used: argv strings may sit at the very top of the
  * demand stack where (addr + window) crosses the VMA end even though the
@@ -229,126 +178,138 @@ static u64 k_readlink(const char *path, char *kbuf, u64 bufsiz) {
     return fs.fs_readlink(path, kbuf, bufsiz);
 }
 
-/* Follow every symlink component of absolute `in` into `out` (physical path).
- * Used by chdir so getcwd matches Linux physical cwd / cd .. semantics. */
-static u32 path_physical(const char *in, char *out, u32 cap) {
+/* Namespace paths must be walked before selecting the filesystem. Backends
+ * resolve links within their own root, so dispatching /tmp/link -> /mnt/file
+ * (or the reverse) before following it cannot work. Keep the final component
+ * intact for entry operations such as unlink/lstat/O_CREAT|O_EXCL. */
+static u32 path_join_raw(const char *base, const char *part, char *out, u32 cap) {
+    u32 n = 0;
+    u32 i = 0;
+    if (part[0] == 0) return 0;
+    if (part[0] != '/') {
+        while (base[i] != 0) {
+            if (n + 1 >= cap) return 0;
+            out[n++] = base[i++];
+        }
+        if (n == 0 || out[n - 1] != '/') {
+            if (n + 1 >= cap) return 0;
+            out[n++] = '/';
+        }
+    }
+    i = 0;
+    while (part[i] != 0) {
+        if (n + 1 >= cap) return 0;
+        out[n++] = part[i++];
+    }
+    out[n] = 0;
+    return 1;
+}
+
+/* 0 missing, 1 directory, 2 existing non-directory. */
+static u32 path_dir_state(const char *path) {
+    u32 ino = 0;
+    u32 mode = 0;
+    u64 size = 0;
+    u32 nlink = 0;
+    if (fs.ext2_is_mnt_path(path)) {
+        if (!fs.ext2_mounted() ||
+            !fs.ext2_stat_path_nofollow(path, &ino, &mode, &size, &nlink)) return 0;
+        return (mode & 0xF000) == 0x4000 ? 1 : 2;
+    }
+    ino = fs.fs_lookup_nofollow(path);
+    if (!ino) return 0;
+    return fs.fs_ino_kind(ino) == INO_DIR_K ? 1 : 2;
+}
+
+static u32 path_physical(const char *in, char *out, u32 cap, u32 follow) {
     char work[PATH_KMAX];
     char prefix[PATH_KMAX];
     char tgt[PATH_KMAX];
     char rebuilt[PATH_KMAX];
-    char combined[PATH_KMAX];
     u32 loop;
     u32 i;
-    u32 nlen;
-
-    if (in == 0 || out == 0 || cap < 2 || in[0] != '/') {
-        return 0;
-    }
-    nlen = kstr_len(in);
-    if (nlen + 1 > PATH_KMAX) {
-        return 0;
-    }
-    for (i = 0; i <= nlen; i++) {
+    if (in == 0 || out == 0 || cap < 2 || in[0] != '/') return 0;
+    if (kstr_len(in) + 1 > PATH_KMAX) return 0;
+    for (i = 0; ; i++) {
         work[i] = in[i];
+        if (in[i] == 0) break;
     }
-
-    for (loop = 0; loop < SYMLOOP_MAX_CWD; loop++) {
+    for (loop = 0; loop <= SYMLOOP_MAX_CWD; loop++) {
         u32 found = 0;
         u32 wi = 0;
         prefix[0] = '/';
         prefix[1] = 0;
-
         while (work[wi] != 0) {
             u32 start;
-            u32 n;
+            u32 n = 0;
+            u32 rest;
             u64 rn;
-            while (work[wi] == '/') {
-                wi++;
-            }
-            if (work[wi] == 0) {
-                break;
-            }
+            while (work[wi] == '/') wi++;
+            if (work[wi] == 0) break;
             start = wi;
-            n = 0;
-            while (work[wi + n] != 0 && work[wi + n] != '/') {
-                n++;
-                if (n >= PATH_KMAX) {
-                    return 0;
-                }
-            }
-            if (n == 1 && work[start] == '.') {
-                wi += n;
-                continue;
-            }
+            while (work[wi + n] != 0 && work[wi + n] != '/') n++;
+            wi += n;
+            if (n == 1 && work[start] == '.') continue;
             if (n == 2 && work[start] == '.' && work[start + 1] == '.') {
                 canon_pop(prefix);
-                wi += n;
                 continue;
             }
-            if (!canon_push(prefix, &work[start], n, PATH_KMAX)) {
-                return 0;
-            }
-            wi += n;
-
-            rn = k_readlink(prefix, tgt, PATH_KMAX - 1);
+            if (!canon_push(prefix, &work[start], n, PATH_KMAX)) return 0;
+            rest = wi;
+            while (work[rest] == '/') rest++;
+            /* Modes: 0 entry mutation, 1 follow, 2 lstat/readlink (a trailing
+             * slash still dereferences). Never collapse .. before links. */
+            rn = ((!follow && work[rest] == 0) ||
+                  (follow == 2 && work[wi] == 0)) ? (u64)(-1) :
+                 k_readlink(prefix, tgt, PATH_KMAX - 1);
             if (rn != (u64)(-1)) {
                 u32 k;
-                const char *rest;
+                if (loop == SYMLOOP_MAX_CWD || rn == 0 || rn >= PATH_KMAX) return 0;
                 tgt[(u32)rn] = 0;
-                if (tgt[0] == '/') {
-                    if (!canon_path("/", tgt, rebuilt, PATH_KMAX)) {
-                        return 0;
-                    }
-                } else {
-                    canon_pop(prefix);
-                    if (!canon_path(prefix, tgt, rebuilt, PATH_KMAX)) {
-                        return 0;
-                    }
+                canon_pop(prefix);
+                if (!path_join_raw(prefix, tgt, rebuilt, PATH_KMAX)) return 0;
+                /* Append the unprocessed suffix verbatim, including .. . */
+                n = kstr_len(rebuilt);
+                for (k = wi; work[k] != 0; k++) {
+                    if (n + 1 >= PATH_KMAX) return 0;
+                    rebuilt[n++] = work[k];
                 }
-                rest = &work[wi];
-                while (rest[0] == '/') {
-                    rest++;
-                }
-                if (rest[0] != 0) {
-                    if (!canon_path(rebuilt, rest, combined, PATH_KMAX)) {
-                        return 0;
-                    }
-                    for (k = 0; combined[k] != 0; k++) {
-                        rebuilt[k] = combined[k];
-                    }
-                    rebuilt[k] = 0;
-                }
-                for (k = 0; rebuilt[k] != 0; k++) {
-                    work[k] = rebuilt[k];
-                }
-                work[k] = 0;
+                rebuilt[n] = 0;
+                for (k = 0; k <= n; k++) work[k] = rebuilt[k];
                 found = 1;
                 break;
             }
+            if (work[wi] != 0) {
+                u32 state = path_dir_state(prefix);
+                /* Only entry creation may leave a missing final component
+                 * before trailing slashes, e.g. mkdir("new/"). A symlink/
+                 * file is never a directory entry suitable for rmdir. */
+                if (state != 1 && (work[rest] != 0 || follow || state != 0)) return 0;
+            }
         }
         if (!found) {
-            u32 k;
-            if (kstr_len(work) + 1 > cap) {
-                return 0;
+            if (kstr_len(prefix) + 1 > cap) return 0;
+            for (i = 0; ; i++) {
+                out[i] = prefix[i];
+                if (prefix[i] == 0) break;
             }
-            for (k = 0; work[k] != 0; k++) {
-                out[k] = work[k];
-            }
-            out[k] = 0;
             return 1;
         }
     }
-    return 0;                        /* ELOOP */
+    return 0;
 }
 
-/* Copy a NUL-terminated path from user space and resolve it against the
- * per-process cwd into a canonical absolute kernel path. */
-u32 copy_user_path(char *dst, u64 upath) {
+u32 copy_user_path_follow(char *dst, u64 upath, u32 follow) {
     char raw[PATH_KMAX];
-    if (!copy_user_cstring(raw, upath, PATH_KMAX - 1)) {
-        return 0;
-    }
-    return canon_path(sched_cwd(), raw, dst, PATH_KMAX);
+    char absolute[PATH_KMAX];
+    if (!copy_user_cstring(raw, upath, PATH_KMAX - 1) ||
+        !path_join_raw(sched_cwd(), raw, absolute, PATH_KMAX)) return 0;
+    return path_physical(absolute, dst, PATH_KMAX, follow);
+}
+
+/* Entry operations follow parents, but not the final directory entry. */
+u32 copy_user_path(char *dst, u64 upath) {
+    return copy_user_path_follow(dst, upath, 0);
 }
 
 u64 sys_open(u64 upath, u64 flags, u64 mode) {
@@ -356,8 +317,13 @@ u64 sys_open(u64 upath, u64 flags, u64 mode) {
     u32 fh;
     u32 fd;
     u32 cmode = (u32)mode;
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath,
+            (flags & 0xC0) == 0xC0 ? 0 : ((flags & 0x20000) ? 2 : 1))) {
         return (u64)(-1);
+    }
+    if (flags & 0x20000) {
+        char target[PATH_KMAX];
+        if (k_readlink(path, target, PATH_KMAX - 1) != (u64)(-1)) return (u64)(-40);
     }
     if (fs.ext2_is_mnt_path(path)) {
         if (!fs.ext2_mounted()) {
@@ -752,10 +718,8 @@ u64 sys_rmdir(u64 upath) {
 
 u64 sys_chdir(u64 upath) {
     char path[PATH_KMAX];
-    char phys[PATH_KMAX];
-    const char *store;
     u32 ino;
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath, 1)) {
         return (u64)(-1);
     }
     if (fs.ext2_is_mnt_path(path)) {
@@ -775,16 +739,8 @@ u64 sys_chdir(u64 upath) {
             return (u64)(-1);
         }
     }
-    /* Store physical path so getcwd/cd .. match Linux (follow final links). */
-    if (path_physical(path, phys, PATH_KMAX)) {
-        store = phys;
-    } else {
-        store = path;                /* fallback: lexical (should be rare) */
-    }
-    if (kstr_len(store) >= CWD_LEN) {
-        return (u64)(-1);            /* would silently truncate the cwd */
-    }
-    sched_cwd_set(store);
+    if (kstr_len(path) >= CWD_LEN) return (u64)(-1);
+    sched_cwd_set(path);
     return 0;
 }
 
@@ -972,6 +928,7 @@ static u32 kstat_from_fh(u32 fh, char *k) {
 }
 
 static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
+    char resolved[PATH_KMAX];
     u32 ino = 0;
     u32 mode = 0;
     u64 size = 0;
@@ -980,9 +937,10 @@ static u32 kstat_from_path_flags(const char *path, char *k, u32 follow) {
     u32 uid = 0;
     u32 gid = 0;
     u32 mtime = 0;
-    if (path == 0) {
+    if (path == 0 || !path_physical(path, resolved, PATH_KMAX, follow ? 1 : 2)) {
         return 0;
     }
+    path = resolved;
     if (fs.ext2_is_mnt_path(path)) {
         if (!fs.ext2_mounted()) {
             return 0;
@@ -1029,7 +987,7 @@ u64 sys_fstat(u64 fd, u64 ustat) {
 u64 sys_stat(u64 upath, u64 ustat) {
     char path[PATH_KMAX];
     char k[STAT_SIZE];
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath, 1)) {
         return (u64)(-1);
     }
     if (!kstat_from_path(path, k)) {
@@ -1041,7 +999,7 @@ u64 sys_stat(u64 upath, u64 ustat) {
 u64 sys_lstat(u64 upath, u64 ustat) {
     char path[PATH_KMAX];
     char k[STAT_SIZE];
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath, 2)) {
         return (u64)(-1);
     }
     if (!kstat_from_path_flags(path, k, 0)) {
@@ -1086,7 +1044,7 @@ u64 sys_newfstatat(u64 dfd, u64 upath, u64 ustat, u64 flags) {
     }
     if (rel[0] == '/') {
         /* Absolute path ignores dfd. */
-        if (!canon_path("/", rel, path, PATH_KMAX)) {
+        if (!path_join_raw("/", rel, path, PATH_KMAX)) {
             return (u64)(-1);
         }
         if (!kstat_from_path_flags(path, k, follow)) {
@@ -1172,7 +1130,7 @@ u64 sys_readlink(u64 upath, u64 ubuf, u64 bufsiz) {
     if (bufsiz == 0 || as == 0) {
         return (u64)(-1);
     }
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath, 2)) {
         return (u64)(-1);
     }
     want = bufsiz;
@@ -1506,13 +1464,22 @@ u64 sys_utimensat(u64 dfd, u64 upath, u64 utimes, u64 flags) {
         if (raw[0] != '/') {
             return (u64)(-1);
         }
-        if (!canon_path("/", raw, path, PATH_KMAX)) {
+        if (!path_join_raw("/", raw, path, PATH_KMAX)) {
             return (u64)(-1);
         }
-    } else if (!copy_user_path(path, upath)) {
+    } else if (!copy_user_path_follow(path, upath, follow ? 1 : 2)) {
         return (u64)(-1);
     }
 
+    {
+        char resolved[PATH_KMAX];
+        u32 i;
+        if (!path_physical(path, resolved, PATH_KMAX, follow ? 1 : 2)) return (u64)(-1);
+        for (i = 0; ; i++) {
+            path[i] = resolved[i];
+            if (resolved[i] == 0) break;
+        }
+    }
     omit = 0;
     if (utimes == 0) {
         mtime_sec = (u32)(sched_clock_ticks() / 100);
@@ -1582,7 +1549,7 @@ u64 sys_statfs(u64 upath, u64 ustat) {
     u64 bfree = 0;
     u64 files = 0;
     u64 ffree = 0;
-    if (!copy_user_path(path, upath)) {
+    if (!copy_user_path_follow(path, upath, 1)) {
         return (u64)(-1);
     }
     if (fs.ext2_is_mnt_path(path)) {

@@ -127,6 +127,9 @@ static struct ext2_open opens[MAX_OPEN];
 static u8 blk_buf[4096];
 static u8 ind_buf[4096];
 static u8 tind_buf[4096];
+/* Free traversal must survive free_block_bit -> bg_load/bitmap/bg_store,
+ * all of which overwrite blk_buf. Parent levels already use ind/tind_buf. */
+static u8 free_leaf_buf[4096];
 static u8 ino_raw[128];
 
 static u16 rd16(const u8 *p) {
@@ -1086,9 +1089,9 @@ static void inode_free_all_blocks(u8 *raw) {
         u32 ind = rd32(raw + I_BLOCK + 12 * 4);
         if (ind) {
             u32 j;
-            if (bread(ind, blk_buf)) {
+            if (bread(ind, free_leaf_buf)) {
                 for (j = 0; j < nent; j++) {
-                    u32 p = rd32(blk_buf + j * 4);
+                    u32 p = rd32(free_leaf_buf + j * 4);
                     if (p) free_block_bit(p);
                 }
             }
@@ -1105,9 +1108,9 @@ static void inode_free_all_blocks(u8 *raw) {
                     u32 leaf = rd32(ind_buf + i * 4);
                     u32 j;
                     if (leaf == 0) continue;
-                    if (bread(leaf, blk_buf)) {
+                    if (bread(leaf, free_leaf_buf)) {
                         for (j = 0; j < nent; j++) {
-                            u32 p = rd32(blk_buf + j * 4);
+                            u32 p = rd32(free_leaf_buf + j * 4);
                             if (p) free_block_bit(p);
                         }
                     }
@@ -1132,9 +1135,9 @@ static void inode_free_all_blocks(u8 *raw) {
                             u32 leaf = rd32(ind_buf + i * 4);
                             u32 j;
                             if (leaf == 0) continue;
-                            if (bread(leaf, blk_buf)) {
+                            if (bread(leaf, free_leaf_buf)) {
                                 for (j = 0; j < nent; j++) {
-                                    u32 p = rd32(blk_buf + j * 4);
+                                    u32 p = rd32(free_leaf_buf + j * 4);
                                     if (p) free_block_bit(p);
                                 }
                             }
@@ -2054,7 +2057,7 @@ void ext2_file_retain(u32 fh) {
     if (!ext2_fh_is(fh)) return;
     s = fh_slot(fh);
     if (s >= MAX_OPEN || !opens[s].used) return;
-    opens[s].refs++;
+    { struct ext2_open *update_ptr = &opens[s]; update_ptr->refs = update_ptr->refs + (1); }
 }
 
 u32 ext2_close(u32 fh) {
@@ -2063,7 +2066,7 @@ u32 ext2_close(u32 fh) {
     s = fh_slot(fh);
     if (s >= MAX_OPEN || !opens[s].used) return 0;
     if (opens[s].refs > 1) {
-        opens[s].refs--;
+        { struct ext2_open *update_ptr = &opens[s]; update_ptr->refs = update_ptr->refs - (1); }
         return 1;
     }
     opens[s].refs = 0;
@@ -2528,7 +2531,7 @@ u64 ext2_read(u32 fh, char *kbuf, u64 len) {
             if (!bread(phys, blk_buf)) return done != 0 ? done : (u64)(-1);
             for (k = 0; k < take; k++) kbuf[done + k] = (char)blk_buf[boff + k];
         }
-        opens[s].off += take;
+        { struct ext2_open *update_ptr = &opens[s]; update_ptr->off = update_ptr->off + (take); }
         done += take;
     }
     return done;
@@ -2569,7 +2572,7 @@ u64 ext2_write(u32 fh, const char *kbuf, u64 len) {
             jl_commit();
             return done != 0 ? done : (u64)(-1);
         }
-        opens[s].off += take;
+        { struct ext2_open *update_ptr = &opens[s]; update_ptr->off = update_ptr->off + (take); }
         done += take;
         if (opens[s].off > opens[s].size) {
             opens[s].size = opens[s].off;
@@ -2643,7 +2646,7 @@ u64 ext2_getdents(u32 fh, char *kbuf, u64 len) {
             pos += reclen;
         }
     }
-    opens[s].off += emitted;
+    { struct ext2_open *update_ptr = &opens[s]; update_ptr->off = update_ptr->off + (emitted); }
     if (error && !produced) return (u64)(-1);
     return produced;
 }

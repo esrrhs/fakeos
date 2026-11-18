@@ -214,8 +214,8 @@ u64 sys_munmap(u64 addr, u64 len) {
 /* chmod(2): update Ramfs/Ext2 permission bits (no ACL / capability model). */
 u64 sys_chmod(u64 upath, u64 mode) {
     char path[512];
-    extern u32 copy_user_path(char *dst, u64 upath);
-    if (!copy_user_path(path, upath)) {
+    extern u32 copy_user_path_follow(char *dst, u64 upath, u32 follow);
+    if (!copy_user_path_follow(path, upath, 1)) {
         return (u64)(-1);
     }
     if (fs.ext2_is_mnt_path(path)) {
@@ -425,8 +425,8 @@ u64 sys_setgroups(u64 size, u64 list) {
 /* chown(2): update Ramfs/Ext2 owner; (u32)-1 leaves a field unchanged. */
 u64 sys_chown(u64 upath, u64 uid, u64 gid) {
     char path[512];
-    extern u32 copy_user_path(char *dst, u64 upath);
-    if (!copy_user_path(path, upath)) {
+    extern u32 copy_user_path_follow(char *dst, u64 upath, u32 follow);
+    if (!copy_user_path_follow(path, upath, 1)) {
         return (u64)(-1);
     }
     if (fs.ext2_is_mnt_path(path)) {
@@ -470,6 +470,7 @@ enum {
 
 /* futex(2) basics: WAIT/WAKE (+ PRIVATE). Channel is the user VA; works for
  * same-AS threads and MAP_SHARED across fork. No PI/bitset/requeue yet. */
+extern void sched_wait_probe_point(u64 chan);
 u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
     u64 as;
     u32 cmd;
@@ -492,6 +493,7 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
         if (cur != (u32)val) {
             return EAGAIN_NEG;
         }
+        sched_wait_probe_point(uaddr);
         sched_sleep(uaddr);
         if (sched_should_eintr()) {
             return EINTR_NEG;

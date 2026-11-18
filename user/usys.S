@@ -208,3 +208,9 @@ atomic_cmpxchg:
     .byte 0xF0, 0x0F, 0xB1, 0x17
     ret
 
+
+    .globl u_exit_group
+u_exit_group:
+    mov $231, %eax
+    syscall
+    jmp .hang

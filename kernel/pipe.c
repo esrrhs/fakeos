@@ -159,7 +159,7 @@ void pipe_retain(u32 fh) {
     kmutex_lock(&pipes_table_lock);
     s = pipe_slot(fh);
     if (s < MAX_POPENS && popens[s].used) {
-        popens[s].refs++;
+        { struct pipe_open *update_ptr = &popens[s]; update_ptr->refs = update_ptr->refs + (1); }
     }
     kmutex_unlock(&pipes_table_lock);
 }
@@ -181,7 +181,7 @@ u32 pipe_close(u32 fh) {
         return 0;
     }
     if (popens[s].refs > 1) {
-        popens[s].refs--;
+        { struct pipe_open *update_ptr = &popens[s]; update_ptr->refs = update_ptr->refs - (1); }
         kmutex_unlock(&pipes_table_lock);
         return 1;
     }

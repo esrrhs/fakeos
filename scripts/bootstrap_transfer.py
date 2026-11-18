@@ -44,8 +44,10 @@ def prepare_reference_image():
     if block is None:
         raise ValueError("cannot find bootstrap module manifest")
     modules = re.findall(r'\{\s*"(\w+)"\s*,\s*"(\w+)"\s*\}', block[1])
-    if len(modules) != 39 or len(set(modules)) != 39 or modules[-1] != ("kernel", "kmain"):
-        raise ValueError("reference must include all39 modules, including kmain")
+    if (len(modules) != 40 or len(set(modules)) != 40
+            or modules[-1] != ("kernel", "kmain")
+            or ("kernel", "native") not in modules):
+        raise ValueError("reference must include all 40 modules, including native and kmain")
     paths = ["asm/boot.o"] + [f"ref/{p}/{n}.o" for p, n in modules]
     paths += [f"asm/{n}.o" for n in (
         "desc", "io", "sysentry", "switch", "ap_tramp_blob", "userblob", "m5stub")]

@@ -31,7 +31,7 @@ extern u64 sched_current_as_h(void);
 extern void sched_replace_as(u64 new_as_h);
 
 /* sysfile.c */
-extern u32 copy_user_path(char *dst, u64 upath);
+extern u32 copy_user_path_follow(char *dst, u64 upath, u32 follow);
 extern u32 copy_user_cstring(char *dst, u64 uva, u32 maxlen);
 
 /* Embedded userland images live in Ramfs after rootfs_publish(); pid 1 is
@@ -296,7 +296,7 @@ static u32 read_user_u64(u64 as, u64 uva, u64 *out) {
     return 1;
 }
 
-u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
+static u64 execve_exclusive(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
     char path[EXEC_PATH_MAX];
     char argbuf[EXEC_MAX_ARGC * EXEC_ARG_SLOT];
     u32 argc = 0;
@@ -312,7 +312,7 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
     u32 i;
 
     as = sched_current_as_h();
-    if (as == 0 || frame_p == 0 || !copy_user_path(path, path_u)) {
+    if (as == 0 || frame_p == 0 || !copy_user_path_follow(path, path_u, 1)) {
         return (u64)(-1);
     }
 
@@ -402,15 +402,23 @@ u64 sys_execve(u64 path_u, u64 argv_u, u64 envp_u, u64 frame_p) {
      * stacks and this frame live in the shared higher half and survive. */
     old_as = as;
     sched_replace_as(new_as);
-    mem.as_activate_h(new_as);
     if (old_as != 0) {
-        mem.as_destroy_h(old_as);
+        mem.as_release_h(old_as);
     }
 
     f = (struct exec_frame *)frame_p;
     f->rip = entry;
     f->usersp = sp;
     return 0;                          /* epilogue returns RAX into new image */
+}
+
+extern u32 sched_process_image_begin(void);
+extern void sched_process_image_end(void);
+u64 sys_execve(u64 path_u,u64 argv_u,u64 envp_u,u64 frame_p) {
+    u64 rc;
+    if(!sched_process_image_begin())return (u64)-16;
+    rc=execve_exclusive(path_u,argv_u,envp_u,frame_p);
+    sched_process_image_end();return rc;
 }
 
 /* ---------------------------------------------------------------------------
@@ -526,4 +534,19 @@ void uproc_selftest(void) {
     while (!uproc_done) {
         sched_yield();
     }
+}
+
+/* Internal boot regression child builder. Arm before publication; all argv is
+ * copied into its new isolated image, no debug userspace syscall/capability. */
+u32 uproc_wait_probe_spawn(u32 pid,u32 mode) {
+    char args[3*EXEC_ARG_SLOT];u32 i,ino;u64 entry=0,sp=0,as=0;
+    static char path[]="/bin/init";static char option[]="--park-probe";
+    for(i=0;i<3*EXEC_ARG_SLOT;i++)args[i]=0;
+    for(i=0;path[i];i++)args[i]=path[i];
+    for(i=0;option[i];i++)args[EXEC_ARG_SLOT+i]=option[i];
+    args[2*EXEC_ARG_SLOT]=(char)('0'+mode);
+    ino=fs.fs_lookup(path);
+    if(!proc_build_image(fs.fs_ino_data(ino),fs.fs_ino_size(ino),3,args,0,0,&entry,&sp,&as))return 0;
+    if(kthread_create_user(entry,sp,as,pid)==0xFFFFFFFF){mem.as_destroy_h(as);return 0;}
+    return 1;
 }

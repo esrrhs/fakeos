@@ -531,11 +531,25 @@ make clean    # 清理所有构建中间文件与产物（含 m5stage 与 build/
 
 ### 完整自举的输出存储
 
-`kbuild` 现在重编并逐字节核对全部 **39** 个内核模块（包括末尾的
+`kbuild` 现在重编并逐字节核对全部 **40** 个内核模块（包括末尾的
 `kmain`），将内核链接到 **`/mnt/fakeos-new`**。完整用户空间使输出已超过
 21 MiB，因此需要挂载有足够空闲空间的 Ext2 卷；16 MiB 上限的 Ramfs
 不适合作为这个构建产物的存储。既有 Ramfs 上限和分配器没有为此扩大。
 建议给完整自举准备至少 32 MiB 的独立 Ext2 镜像，不要覆盖已有数据磁盘。
-`make test` 自动使用独立的 `build/test-bootstrap.img`（32 MiB），不会调整或
+`make test` 每次自动创建独立的 `build/test-bootstrap-*/disk.img`（32 MiB），
+同一轮的首次启动和重建内核二次启动共用该盘，结束后自动清理，重复运行不会复用旧内容。
+不会覆盖旧的 `build/test-bootstrap.img`，也不会调整或
 覆盖开发者已有的 `build/disk.img`。测试仍实际在 OS 内编译、链接，再通过
 `dumpbin /mnt/fakeos-new` 导出完整镜像并二次启动；不省略模块或验收步骤。
+
+### 原生多核任务与通信：设计和当前边界
+
+[内核架构决策记录](docs/native-kernel-architecture.md) 将进程定义为隔离及资源域、
+任务定义为调度实体；先采用可抢占的内核 1:1 任务，保留未来用户态 M:N 运行时空间。
+目标 IPC 是带类型及权限的原生对象/能力句柄，不将 pipe/socket 换名。
+
+首个实现 `kernel/native.c` 目前**仅供内核使用**：代际句柄、独立读写权限、
+有界 channel、原子阻塞唤醒、关闭撤销及引用回收。尚没有跨进程用户态能力表、
+原生健壮 mutex、超时或 select，不能将内核内部 ID 直接暴露成用户句柄。
+`python3 scripts/test_native_objects.py` 在无 NIC 的 SMP 1/2/4 来宾中依次测试，
+也已加入 `make test`；它不将内核线程测试冒充跨进程通信验收。

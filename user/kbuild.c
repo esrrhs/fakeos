@@ -101,6 +101,7 @@ static const struct mod_entry modules[] = {
     { "kernel",  "memtest" },
     { "kernel",  "sched" },
     { "kernel",  "proctest" },
+    { "kernel",  "native" },
     { "kernel",  "syscall" },
     { "kernel",  "sysfile" },
     { "kernel",  "sysproc" },

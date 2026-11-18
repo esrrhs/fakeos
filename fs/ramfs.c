@@ -938,7 +938,7 @@ u32 fs_link(const char *oldpath, const char *newpath) {
     if (inodes[old_ino].nlink == 0) {
         inodes[old_ino].nlink = 1;
     }
-    inodes[old_ino].nlink++;
+    { struct inode *update_ptr = &inodes[old_ino]; update_ptr->nlink = update_ptr->nlink + (1); }
     return 1;
 }
 
@@ -1059,7 +1059,7 @@ u32 fs_rmdir(const char *path) {
     for (k = slot; k + 1 < inodes[parent].ndent; k++) {
         inodes[parent].dents[k] = inodes[parent].dents[k + 1];
     }
-    inodes[parent].ndent--;
+    { struct inode *update_ptr = &inodes[parent]; update_ptr->ndent = update_ptr->ndent - (1); }
     inodes[target].type = INO_FREE;
     inodes[target].parent = 0;
     inodes[target].ndent = 0;
@@ -1115,7 +1115,7 @@ u32 fs_unlink(const char *path) {
     d->ndent--;
 
     if (inodes[target].nlink > 0) {
-        inodes[target].nlink--;
+        { struct inode *update_ptr = &inodes[target]; update_ptr->nlink = update_ptr->nlink - (1); }
     }
     /* Free only when the last name is gone and nothing still has it open. */
     if (inodes[target].nlink == 0 && !inode_is_open(target)) {
@@ -1208,7 +1208,7 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
             for (k = slot; k + 1 < inodes[nparent].ndent; k++) {
                 inodes[nparent].dents[k] = inodes[nparent].dents[k + 1];
             }
-            inodes[nparent].ndent--;
+            { struct inode *update_ptr = &inodes[nparent]; update_ptr->ndent = update_ptr->ndent - (1); }
             inodes[dest].type = INO_FREE;
             inodes[dest].parent = 0;
             inodes[dest].ndent = 0;
@@ -1226,9 +1226,9 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
             for (k = slot; k + 1 < inodes[nparent].ndent; k++) {
                 inodes[nparent].dents[k] = inodes[nparent].dents[k + 1];
             }
-            inodes[nparent].ndent--;
+            { struct inode *update_ptr = &inodes[nparent]; update_ptr->ndent = update_ptr->ndent - (1); }
             if (inodes[dest].nlink > 0) {
-                inodes[dest].nlink--;
+                { struct inode *update_ptr = &inodes[dest]; update_ptr->nlink = update_ptr->nlink - (1); }
             }
             if (inodes[dest].nlink == 0 && !inode_is_open(dest)) {
                 if (inodes[dest].buf != 0 && !inodes[dest].ro) {
@@ -1259,7 +1259,7 @@ u32 fs_rename(const char *oldpath, const char *newpath) {
     for (k = slot; k + 1 < inodes[oparent].ndent; k++) {
         inodes[oparent].dents[k] = inodes[oparent].dents[k + 1];
     }
-    inodes[oparent].ndent--;
+    { struct inode *update_ptr = &inodes[oparent]; update_ptr->ndent = update_ptr->ndent - (1); }
     inodes[old_ino].parent = nparent;
     return 1;
 }
@@ -1327,7 +1327,7 @@ void fs_file_retain(u32 fh) {
     if (fh >= MAX_OPEN_FILES || !opens[fh].used || opens[fh].permanent) {
         return;
     }
-    opens[fh].refs++;
+    { struct open_file *update_ptr = &opens[fh]; update_ptr->refs = update_ptr->refs + (1); }
 }
 
 u32 fs_file_open(const char *path, u32 flags) {
@@ -1429,7 +1429,7 @@ u32 fs_close(u32 fh) {
         return 1;                     /* console: nothing to release */
     }
     if (opens[fh].refs > 1) {
-        opens[fh].refs--;
+        { struct open_file *update_ptr = &opens[fh]; update_ptr->refs = update_ptr->refs - (1); }
         return 1;
     }
     if (opens[fh].snap != 0) {
@@ -1516,7 +1516,7 @@ u64 fs_read_h(u32 fh, char *kbuf, u64 len) {
         for (i = 0; i < n; i++) {
             kbuf[i] = src[opens[fh].off + i];
         }
-        opens[fh].off += n;
+        { struct open_file *update_ptr = &opens[fh]; update_ptr->off = update_ptr->off + (n); }
         return n;
     }
     if (ip->type != INO_FILE) {
@@ -1533,7 +1533,7 @@ u64 fs_read_h(u32 fh, char *kbuf, u64 len) {
     for (i = 0; i < n; i++) {
         kbuf[i] = src[opens[fh].off + i];
     }
-    opens[fh].off += n;
+    { struct open_file *update_ptr = &opens[fh]; update_ptr->off = update_ptr->off + (n); }
     return n;
 }
 
@@ -1572,7 +1572,7 @@ u64 fs_write_h(u32 fh, const char *kbuf, u64 len) {
     for (i = 0; i < len; i++) {
         ip->buf[opens[fh].off + i] = kbuf[i];
     }
-    opens[fh].off += len;
+    { struct open_file *update_ptr = &opens[fh]; update_ptr->off = update_ptr->off + (len); }
     if (opens[fh].off > ip->size) {
         ip->size = opens[fh].off;
     }

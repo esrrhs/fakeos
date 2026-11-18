@@ -121,6 +121,12 @@ struct tcb {
     u32 groups[8];     /* supplementary gids; NGROUPS_MAX=8               */
 };
 
+/* Pointer-based operations are deliberate: current fakecc miscompiles
+ * indexed-struct-member compound updates. Do not replace these helpers with
+ * threads[index].field |= / &=; see docs/evidence/native-process-foundation-20261117. */
+static void sched_bitset_or(u32 *word, u32 mask) { *word = *word | mask; }
+static void sched_bitset_and(u32 *word, u32 mask) { *word = *word & mask; }
+
 /* Sleeping locks: wait channel is the object's own address.
  * kmutex  — binary sleep-mutex (owner tracked; unlock wakes one)
  * ksem    — counting semaphore (up wakes one)
@@ -162,6 +168,17 @@ static u32 active;                   /* Scheduler online flag              */
 static volatile u64 sched_ticks;
 /* One calibrated 100Hz source (the boot CPU), independent of AP count. */
 static volatile u64 clock_ticks;
+/* Process resources are NOT owned by a privileged leader TCB. run_lock
+ * protects admission, live borrowers, resident task refs and image ownership.
+ * pid!=0 reserves an object through zombie/reap; PIDs never wrap/recycle. */
+struct process_owner {
+    u32 pid, ppid, live, resident;
+    u32 exiting, code, image_busy, drained;
+    u32 cpu_mask;
+    u64 as_h;
+};
+static struct process_owner processes[MAX_THREADS];
+static void task_fd_close_all(u32 id);
 static u32 next_pid = 1;             /* User process id allocator          */
 static volatile u64 user_mode_ticks; /* APIC ticks taken while in ring 3   */
 static u64 cfs_min_vruntime;         /* min vruntime among runnable tasks  */
@@ -1583,6 +1600,86 @@ static void cfs_update_min(void) {
     }
 }
 
+/* All process_find users hold run_lock. No externally supplied pointer is
+ * accepted as a process identity; native capabilities are not exposed yet. */
+static struct process_owner *process_find(u32 pid) {
+    u32 i;
+    if (!pid) return 0;
+    for (i=0;i<MAX_THREADS;i++) if (processes[i].pid==pid) return &processes[i];
+    return 0;
+}
+static u32 process_attach(u32 id) {
+    u64 flags=cpu_irq_save(); u32 i; u32 ok=0;
+    struct process_owner *p;
+    spin_lock(&sched_run_lock);
+    p=process_find(threads[id].pid);
+    if (!p) {
+        for(i=0;i<MAX_THREADS;i++) if(!processes[i].pid) {
+            p=&processes[i];
+            p->pid=threads[id].pid;p->ppid=threads[id].ppid;
+            p->live=0;p->resident=0;p->exiting=0;p->code=0;
+            p->image_busy=0;p->drained=0;p->cpu_mask=0;
+            p->as_h=threads[id].as_h;
+            break;
+        }
+    }
+    if(p && !p->exiting && !p->image_busy && p->as_h==threads[id].as_h) {
+        p->live=p->live+1;p->resident=p->resident+1;ok=1;
+    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    if(!p)kprintf("[PROCESS] owner table full: admission rolled back\n");
+    return ok;
+}
+u32 sched_process_image_begin(void) {
+    u64 flags=cpu_irq_save();u32 ok=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(threads[sched_cur()].pid);
+    if(p && p->live==1 && p->resident==1 && !p->exiting && !p->image_busy) {p->image_busy=1;ok=1;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return ok;
+}
+void sched_process_image_end(void) {
+    u64 flags=cpu_irq_save();struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(threads[sched_cur()].pid);
+    if(p)p->image_busy=0;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+}
+u32 sched_process_parent(u32 pid) {
+    u64 flags=cpu_irq_save();u32 parent=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);if(p)parent=p->ppid;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return parent;
+}
+void sched_process_group_exit(u64 code) {
+    u64 flags=cpu_irq_save();struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(threads[sched_cur()].pid);
+    if(p && !p->exiting) {p->exiting=1;p->code=(u32)code;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+}
+/* Caller has already cleared TID/closed its copied fds and activated kernel
+ * CR3. Detach the last borrowed AS under lock; destruction may SLEEP, so its
+ * sole owner reference is returned to be released OUTSIDE run_lock. */
+u64 sched_process_leave(u64 code) {
+    u64 flags=cpu_irq_save();u64 as=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(threads[sched_cur()].pid);
+    if(p && threads[sched_cur()].as_h && p->live) {
+        mem.as_activate_h(0);
+        threads[sched_cur()].as_h=0;p->live=p->live-1;
+        p->cpu_mask=p->cpu_mask | (1u<<sched_cpu_index());
+        if(!p->live) {
+            as=p->as_h;p->as_h=0;
+            if(!p->exiting)p->code=(u32)code;
+            p->exiting=1;
+        }
+    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return as;
+}
+u32 sched_process_exit_ready(void) {
+    u64 flags=cpu_irq_save();u32 code=0,mask=0,pid=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(threads[sched_cur()].pid);
+    if(p && !p->live && !p->as_h && !p->drained) {p->drained=1;code=p->code;mask=p->cpu_mask;pid=p->pid;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    kprintf("[PROCESS] AS drained pid=%u task-exit CPU-mask=0x%x\n",(u64)pid,(u64)mask);
+    return code;
+}
+
 /* Best CFS pick on one runqueue. want_user: 0=kernel only, 1=user only, 2=any.
  * Nested hierarchical: leftmost top SE, descend child SE trees to a leaf,
  * then the min-vruntime member of that group (task tree filtered by tg).
@@ -1703,34 +1800,35 @@ static void rq_enqueue(u32 id, u32 cpu) {
  * Caller must set state=RUNNABLE first so a kicked idle CPU can see it.
  * Takes sched_run_lock: create paths are otherwise racy vs tick CFS tree ops.
  * rq_cpu is cleared before the load walk so this thread is not self-counted. */
+/* Shared policy, with run_lock held. Return the required remote kick mask. */
+static u32 rq_enqueue_balanced_locked(u32 id) {
+    u32 cpu,local=sched_cpu_index();u32 kick=0;
+    if(threads[id].cfs_on_rq)cfs_dequeue_locked(id);
+    threads[id].rq_cpu=SCHED_CPU_NONE;
+    cpu=rq_select_cpu();rq_enqueue(id,cpu);
+    if(cpu!=local) {
+        sched_balance_remote=sched_balance_remote+1;
+        if(rq_cpu_is_idle(cpu))kick=1u<<cpu;
+    }
+    return kick;
+}
 static void rq_enqueue_balanced(u32 id) {
-    u32 cpu;
-    u32 local;
-    u64 flags;
-    u32 kick = 0;
-    if (id >= MAX_THREADS) {
-        return;
-    }
-    flags = cpu_irq_save();
+    u64 flags;u32 kicks,c;
+    if(id>=MAX_THREADS)return;
+    flags=cpu_irq_save();spin_lock(&sched_run_lock);
+    kicks=rq_enqueue_balanced_locked(id);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    for(c=0;c<SCHED_MAX_CPUS;c++)if(kicks & (1u<<c))sched_kick_cpu(c);
+}
+/* Observation only: this does not bind tasks, park APs or suppress stealing. */
+u32 sched_idle_cpu_mask(void) {
+    u64 flags=cpu_irq_save();u32 c,mask=0,n=smp_cpu_count();
     spin_lock(&sched_run_lock);
-    local = sched_cpu_index();
-    if (threads[id].cfs_on_rq) {
-        cfs_dequeue_locked(id);
+    for(c=0;c<n && c<SCHED_MAX_CPUS;c++) {
+        if(c!=sched_bsp_cpu && !ap_in_sched[c])continue;
+        if(rq_cpu_is_idle(c))mask=mask | (1u<<c);
     }
-    threads[id].rq_cpu = SCHED_CPU_NONE;
-    cpu = rq_select_cpu();
-    rq_enqueue(id, cpu);
-    if (cpu != local) {
-        sched_balance_remote = sched_balance_remote + 1;
-        if (rq_cpu_is_idle(cpu)) {
-            kick = 1;
-        }
-    }
-    spin_unlock(&sched_run_lock);
-    cpu_irq_restore(flags);
-    if (kick) {
-        sched_kick_cpu(cpu);
-    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return mask;
 }
 
 /* After a sleeper becomes RUNNABLE, kick its home RQ if that CPU is idle. */
@@ -2133,7 +2231,7 @@ static void unreserve_slot(u32 i) {
     cpu_irq_restore(flags);
 }
 
-u32 kthread_create(u64 entry, u64 arg) {
+static u32 kthread_prepare(u64 entry, u64 arg) {
     u32 i = alloc_slot();
     if (i == 0xFFFFFFFF) {
         return 0xFFFFFFFF;
@@ -2184,9 +2282,40 @@ u32 kthread_create(u64 entry, u64 arg) {
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
     threads[i].on_cpu = SCHED_CPU_NONE;
-    threads[i].state = TCB_RUNNABLE;
-    rq_enqueue_balanced(i);
     return i;
+}
+
+u32 kthread_create(u64 entry,u64 arg) {
+    u32 id=kthread_prepare(entry,arg);
+    if(id==0xFFFFFFFF)return id;
+    threads[id].state=TCB_RUNNABLE;rq_enqueue_balanced(id);return id;
+}
+/* Prepare all resources before publication; commit an entire bounded batch
+ * under ONE runqueue transaction. Normal load selection/stealing/IPIs remain
+ * unchanged. Failure publishes nothing and rolls back every reserved stack. */
+u32 kthread_create_batch(u64 entry,u32 count) {
+    u32 ids[MAX_THREADS];u32 n,i,c,kicks=0;u64 flags;
+    if(!entry || !count || count>MAX_THREADS)return 0;
+    for(n=0;n<count;n++) {
+        ids[n]=kthread_prepare(entry,n);
+        if(ids[n]==0xFFFFFFFF)break;
+    }
+    if(n!=count) {
+        for(i=0;i<n;i++) {
+            u64 sp=threads[ids[i]].stack_phys;
+            threads[ids[i]].stack_phys=0;
+            pmm_free_pages(sp,STACK_ORDER);unreserve_slot(ids[i]);
+        }
+        return 0;
+    }
+    flags=cpu_irq_save();spin_lock(&sched_run_lock);
+    for(i=0;i<count;i++) {
+        threads[ids[i]].state=TCB_RUNNABLE;
+        kicks=kicks | rq_enqueue_balanced_locked(ids[i]);
+    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    for(c=0;c<SCHED_MAX_CPUS;c++)if(kicks & (1u<<c))sched_kick_cpu(c);
+    return 1;
 }
 
 /* Create a ring-3 user thread: first resume lands in user_iret_trampoline,
@@ -2257,6 +2386,12 @@ u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid) {
     threads[i].vruntime = cfs_min_vruntime;
     threads[i].tg = TG_ROOT;
     threads[i].on_cpu = SCHED_CPU_NONE;
+    if (!process_attach(i)) {
+        task_fd_close_all(i);
+        pmm_free_pages(stack_phys, STACK_ORDER);
+        unreserve_slot(i);
+        return 0xFFFFFFFF;
+    }
     threads[i].state = TCB_RUNNABLE;
     rq_enqueue_balanced(i);
     return i;
@@ -2376,6 +2511,12 @@ u32 sched_clone_user(u64 frame_base, u64 child_as_h, u32 child_pid) {
         }
     }
     threads[i].on_cpu = SCHED_CPU_NONE;
+    if (!process_attach(i)) {
+        task_fd_close_all(i);
+        pmm_free_pages(stack_phys, STACK_ORDER);
+        unreserve_slot(i);
+        return 0xFFFFFFFF;
+    }
     threads[i].state = TCB_RUNNABLE;
     rq_enqueue_balanced(i);
     return i;
@@ -2486,6 +2627,12 @@ u32 sched_clone_thread(u64 fn, u64 user_stack, u64 arg, u32 child_tid) {
         threads[i].sig_restorer[s] = threads[sched_cur()].sig_restorer[s];
     }
     threads[i].on_cpu = SCHED_CPU_NONE;
+    if (!process_attach(i)) {
+        task_fd_close_all(i);
+        pmm_free_pages(stack_phys, STACK_ORDER);
+        unreserve_slot(i);
+        return 0xFFFFFFFF;
+    }
     threads[i].state = TCB_RUNNABLE;
     rq_enqueue_balanced(i);
     return i;
@@ -2506,6 +2653,8 @@ void sched_finish_switch(u64 prev_id) {
     u32 prev = (u32)prev_id;
     threads[prev].on_cpu = SCHED_CPU_NONE;
     if (threads[prev].state == TCB_DEAD || threads[prev].state == TCB_RETIRED) {
+        struct process_owner *p=process_find(threads[prev].pid);
+        if(p && p->resident)p->resident=p->resident-1;
         u64 sp = threads[prev].stack_phys;
         threads[prev].stack_phys = 0;
         threads[prev].kstack_top = 0;
@@ -2913,17 +3062,8 @@ void kthread_exit(void) {
     spin_lock(&sched_run_lock);
 
     u32 self = sched_cur();
-    u32 free_slot = 0;
-    /* Kernel threads are never wait4-able — free the TCB immediately so
-     * self-tests / short-lived workers do not exhaust MAX_THREADS.
-     * Secondary CLONE_THREAD user exits are also not wait4-able: free now
-     * so the shared pid stays owned by the still-live group leader. */
-    if (threads[self].is_user == 0) {
-        free_slot = 1;
-    } else if (threads[self].pid != 0
-        && threads[self].tid != threads[self].pid) {
-        free_slot = 1;
-    }
+    /* Completion identity lives in process_owner, not the leader TCB. */
+    u32 free_slot = 1;
     cfs_dequeue_locked(self);
     threads[self].state = free_slot ? TCB_RETIRED : TCB_DEAD;
 
@@ -3156,7 +3296,10 @@ u32 sched_max_threads(void) {
  * ------------------------------------------------------------------------- */
 
 u32 sched_alloc_pid(void) {
-    return next_pid++;
+    u64 flags=cpu_irq_save();u32 pid=0;
+    spin_lock(&sched_run_lock);
+    if(next_pid && next_pid!=0xFFFFFFFFu) {pid=next_pid;next_pid=next_pid+1;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return pid;
 }
 
 u32 sched_current_pid(void) {
@@ -3169,19 +3312,9 @@ u32 sched_current_tid(void) {
 
 /* Live user threads that share `pid` (CLONE_THREAD group). */
 u32 sched_count_live_pid(u32 pid) {
-    u32 i;
-    u32 n = 0;
-    if (pid == 0) {
-        return 0;
-    }
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid == pid
-            && threads[i].state != TCB_FREE
-            && threads[i].state != TCB_DEAD) {
-            n++;
-        }
-    }
-    return n;
+    u64 flags=cpu_irq_save();u32 n=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);if(p)n=p->live;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
 }
 
 /* True when this TCB is a non-leader thread (tid != pid). */
@@ -3201,7 +3334,10 @@ u64 sched_current_as_h(void) {
 void sched_replace_as(u64 new_as_h) {
     u64 flags = cpu_irq_save();
     spin_lock(&sched_run_lock);
+    struct process_owner *p=process_find(threads[sched_cur()].pid);
+    if(p)p->as_h=new_as_h;
     threads[sched_cur()].as_h = new_as_h;
+    mem.as_activate_h(new_as_h);
     spin_unlock(&sched_run_lock);
     cpu_irq_restore(flags);
 }
@@ -3246,11 +3382,11 @@ u32 sched_fd_alloc(void) {
 
 /* Close every descriptor of the running process; called from proc_terminate
  * before the address space is torn down. */
-void sched_fd_close_all(void) {
+static void task_fd_close_all(u32 id) {
     u32 i;
     for (i = 0; i < FD_MAX; i++) {
-        if (threads[sched_cur()].fd[i] != FD_EMPTY) {
-            u32 fh = threads[sched_cur()].fd[i];
+        if (threads[id].fd[i] != FD_EMPTY) {
+            u32 fh = threads[id].fd[i];
             if (ext2_fh_is(fh)) {
                 ext2_close(fh);
             } else if (pipe_fh_is(fh)) {
@@ -3260,10 +3396,11 @@ void sched_fd_close_all(void) {
             } else {
                 fs_close(fh);
             }
-            threads[sched_cur()].fd[i] = FD_EMPTY;
+            threads[id].fd[i] = FD_EMPTY;
         }
     }
 }
+void sched_fd_close_all(void) { task_fd_close_all(sched_cur()); }
 
 const char *sched_cwd(void) {
     return threads[sched_cur()].cwd;
@@ -3520,18 +3657,7 @@ u64 sched_environ_copy(char *buf, u64 cap) {
     return n;
 }
 
-u32 sched_current_threads(void) {
-    u32 pid = threads[sched_cur()].pid;
-    u32 n = 0;
-    u32 i;
-    for (i = 0; i < MAX_THREADS; i++) {
-        if (threads[i].state != TCB_FREE && threads[i].pid == pid
-            && threads[i].is_user) {
-            n++;
-        }
-    }
-    return n == 0 ? 1 : n;
-}
+u32 sched_current_threads(void) { return sched_count_live_pid(threads[sched_cur()].pid); }
 
 /* Visible in /proc and ps: a user process leader (tid==pid), including zombies
  * that have not yet been reaped. Kernel threads (pid 0) stay hidden. */
@@ -3543,7 +3669,7 @@ static u32 tcb_of_user_pid(u32 pid) {
     }
     for (i = 0; i < MAX_THREADS; i++) {
         if (threads[i].state == TCB_FREE || !threads[i].is_user
-            || threads[i].pid != pid) {
+            || threads[i].as_h == 0 || threads[i].pid != pid) {
             continue;
         }
         if (threads[i].tid == pid) {
@@ -3557,87 +3683,44 @@ static u32 tcb_of_user_pid(u32 pid) {
 }
 
 u32 sched_pid_visible(u32 pid) {
-    return tcb_of_user_pid(pid) != 0xFFFFFFFF;
+    u64 flags=cpu_irq_save();u32 yes;
+    spin_lock(&sched_run_lock);yes=process_find(pid)!=0;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return yes;
 }
 
-u32 sched_pid_ppid(u32 pid) {
-    u32 id = tcb_of_user_pid(pid);
-    if (id == 0xFFFFFFFF) {
-        return 0;
-    }
-    return threads[id].ppid;
-}
+u32 sched_pid_ppid(u32 pid) { return sched_process_parent(pid); }
 
-u32 sched_pid_threads(u32 pid) {
-    u32 n = 0;
-    u32 i;
-    if (!sched_pid_visible(pid)) {
-        return 0;
-    }
-    for (i = 0; i < MAX_THREADS; i++) {
-        if (threads[i].state != TCB_FREE && threads[i].is_user
-            && threads[i].pid == pid) {
-            n++;
-        }
-    }
-    return n == 0 ? 1 : n;
-}
+u32 sched_pid_threads(u32 pid) { return sched_count_live_pid(pid); }
 
 /* Do not export a borrowed AS pointer: exec/exit on another CPU can free it.
  * These bounded, non-allocating formatters finish under the same lock used by
  * sched_replace_as, so detach/swap precedes any destruction by the owner. */
 u64 sched_pid_vma_kb(u32 pid) {
-    u32 id;
-    u64 n = 0;
-    u64 flags = cpu_irq_save();
-    spin_lock(&sched_run_lock);
-    id = tcb_of_user_pid(pid);
-    if (id != 0xFFFFFFFF && threads[id].as_h != 0) {
-        n = mem.as_vma_kb_h(threads[id].as_h);
-    }
-    spin_unlock(&sched_run_lock);
-    cpu_irq_restore(flags);
-    return n;
+    u64 flags=cpu_irq_save();u64 n=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);
+    if(p && p->as_h)n=mem.as_vma_kb_h(p->as_h);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
+}
+u64 sched_pid_maps(u32 pid,char *buf,u64 cap) {
+    u64 flags=cpu_irq_save();u64 n=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);
+    if(p && p->as_h)n=mem.as_format_maps_h(p->as_h,buf,cap);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
 }
 
-u64 sched_pid_maps(u32 pid, char *buf, u64 cap) {
-    u32 id;
-    u64 n = 0;
-    u64 flags = cpu_irq_save();
-    spin_lock(&sched_run_lock);
-    id = tcb_of_user_pid(pid);
-    if (id != 0xFFFFFFFF && threads[id].as_h != 0) {
-        n = mem.as_format_maps_h(threads[id].as_h, buf, cap);
-    }
-    spin_unlock(&sched_run_lock);
-    cpu_irq_restore(flags);
-    return n;
-}
-
-/* Linux-ish short state letter for /proc/pid/status and ps. */
 char sched_pid_state_char(u32 pid) {
-    u32 id = tcb_of_user_pid(pid);
-    u32 st;
-    if (id == 0xFFFFFFFF) {
-        return '?';
+    u64 flags=cpu_irq_save();u32 id;char state='?';struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);id=tcb_of_user_pid(pid);
+    if(p && !p->live)state='Z';
+    else if(id!=0xFFFFFFFF) {
+        if(threads[id].state==TCB_RUNNABLE)state='R';
+        else if(threads[id].state==TCB_SLEEPING)state='S';
+        else if(threads[id].state==TCB_STOPPED)state='T';
     }
-    st = threads[id].state;
-    if (st == TCB_RUNNABLE) {
-        return 'R';
-    }
-    if (st == TCB_SLEEPING) {
-        return 'S';
-    }
-    if (st == TCB_STOPPED) {
-        return 'T';
-    }
-    if (st == TCB_DEAD) {
-        return 'Z';
-    }
-    return '?';
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return state;
 }
 
-u64 sched_cmdline_copy_pid(u32 pid, char *buf, u64 cap) {
+static u64 sched_cmdline_copy_pid_locked(u32 pid, char *buf, u64 cap) {
     u32 id;
     u64 n;
     u64 i;
@@ -3657,8 +3740,13 @@ u64 sched_cmdline_copy_pid(u32 pid, char *buf, u64 cap) {
     }
     return n;
 }
+u64 sched_cmdline_copy_pid(u32 pid,char *buf,u64 cap) {
+    u64 flags=cpu_irq_save();u64 n;
+    spin_lock(&sched_run_lock);n=sched_cmdline_copy_pid_locked(pid,buf,cap);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
+}
 
-u64 sched_environ_copy_pid(u32 pid, char *buf, u64 cap) {
+static u64 sched_environ_copy_pid_locked(u32 pid, char *buf, u64 cap) {
     u32 id;
     u64 n;
     u64 i;
@@ -3678,48 +3766,20 @@ u64 sched_environ_copy_pid(u32 pid, char *buf, u64 cap) {
     }
     return n;
 }
+u64 sched_environ_copy_pid(u32 pid,char *buf,u64 cap) {
+    u64 flags=cpu_irq_save();u64 n;
+    spin_lock(&sched_run_lock);n=sched_environ_copy_pid_locked(pid,buf,cap);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
+}
 
 /* Sorted unique visible user pids. Returns the count written to out. */
-u32 sched_pid_list(u32 *out, u32 cap) {
-    u32 n = 0;
-    u32 i;
-    u32 j;
-    if (out == 0 || cap == 0) {
-        return 0;
-    }
-    for (i = 0; i < MAX_THREADS; i++) {
-        u32 pid;
-        u32 seen;
-        if (threads[i].state == TCB_FREE || !threads[i].is_user
-            || threads[i].pid == 0) {
-            continue;
-        }
-        pid = threads[i].pid;
-        seen = 0;
-        for (j = 0; j < n; j++) {
-            if (out[j] == pid) {
-                seen = 1;
-                break;
-            }
-        }
-        if (seen) {
-            continue;
-        }
-        if (n >= cap) {
-            break;
-        }
-        out[n++] = pid;
-    }
-    /* Insertion sort so getdents/ps offsets are stable. */
-    for (i = 1; i < n; i++) {
-        u32 pid = out[i];
-        j = i;
-        while (j > 0 && out[j - 1] > pid) {
-            out[j] = out[j - 1];
-            j--;
-        }
-        out[j] = pid;
-    }
+u32 sched_pid_list(u32 *out,u32 cap) {
+    u64 flags;u32 n=0,i,j;
+    if(!out || !cap)return 0;
+    flags=cpu_irq_save();spin_lock(&sched_run_lock);
+    for(i=0;i<MAX_THREADS && n<cap;i++)if(processes[i].pid)out[n++]=processes[i].pid;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    for(i=1;i<n;i++){u32 pid=out[i];j=i;while(j && out[j-1]>pid){out[j]=out[j-1];j--;}out[j]=pid;}
     return n;
 }
 
@@ -3728,69 +3788,30 @@ u32 sched_pid_list(u32 *out, u32 cap) {
 /* True when a live (neither exited nor freed) child TCB of ppid exists. The
  * exit record alone is enough for wait once the child is DEAD. */
 u32 sched_has_live_child(u32 ppid) {
-    u32 i;
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid != 0 && threads[i].ppid == ppid
-            && threads[i].state != TCB_DEAD && threads[i].state != TCB_FREE) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* Exact-pid variant for wait4(pid): distinguishes "this specific child is
- * still running" from "caller has some unrelated children". */
-u32 sched_is_live_child(u32 ppid, u32 pid) {
-    u32 i;
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid == pid && threads[i].ppid == ppid
-            && threads[i].state != TCB_DEAD && threads[i].state != TCB_FREE) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* Release the DEAD slot of a successfully waited-for pid. The kernel stack
- * was already freed in kthread_exit; only the slot identity remains. */
-u32 sched_reap_dead(u32 pid) {
-    u32 i;
-    u64 flags = cpu_irq_save();
+    u64 flags=cpu_irq_save();u32 i,found=0;
     spin_lock(&sched_run_lock);
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid == pid && threads[i].state == TCB_DEAD
-            && threads[i].on_cpu == SCHED_CPU_NONE && threads[i].stack_phys == 0) {
-            threads[i].state = TCB_FREE;
-            threads[i].pid = 0;
-            threads[i].tid = 0;
-            threads[i].ppid = 0;
-            threads[i].pgid = 0;
-            threads[i].sid = 0;
-            threads[i].stop_notify = 0;
-            threads[i].cont_notify = 0;
-            threads[i].is_user = 0;
-            threads[i].pending_sigs = 0;
-            threads[i].sig_ignore = 0;
-            threads[i].stop_sig = 0;
-            threads[i].stop_notify = 0;
-            spin_unlock(&sched_run_lock);
-            cpu_irq_restore(flags);
-            return 1;
-        }
-    }
-    spin_unlock(&sched_run_lock);
-    cpu_irq_restore(flags);
-    return 0;
+    for(i=0;i<MAX_THREADS;i++)if(processes[i].pid && processes[i].ppid==ppid){found=1;break;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return found;
 }
-
-/* Reparent live children when their parent exits; orphans join pid 1. */
-void sched_reparent_children(u32 old_ppid, u32 new_ppid) {
-    u32 i;
-    for (i = 1; i < MAX_THREADS; i++) {
-        if (threads[i].pid != 0 && threads[i].ppid == old_ppid) {
-            threads[i].ppid = new_ppid;
-        }
+u32 sched_is_live_child(u32 ppid,u32 pid) {
+    u64 flags=cpu_irq_save();u32 found=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);if(p && p->ppid==ppid)found=1;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return found;
+}
+u32 sched_reap_dead(u32 pid) {
+    u64 flags=cpu_irq_save();u32 ok=0;struct process_owner *p;
+    spin_lock(&sched_run_lock);p=process_find(pid);
+    if(p && p->drained && !p->live && !p->resident && !p->as_h){p->pid=0;ok=1;}
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return ok;
+}
+void sched_reparent_children(u32 old_ppid,u32 new_ppid) {
+    u64 flags=cpu_irq_save();u32 i;
+    spin_lock(&sched_run_lock);
+    for(i=0;i<MAX_THREADS;i++) {
+        if(processes[i].pid && processes[i].ppid==old_ppid)processes[i].ppid=new_ppid;
+        if(threads[i].pid && threads[i].ppid==old_ppid)threads[i].ppid=new_ppid;
     }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3871,9 +3892,9 @@ u32 sched_sigaction(u32 sig, u64 handler, u64 restorer, u64 flags, u64 *old_out,
     threads[sched_cur()].sig_restorer[sig] = restorer;
     threads[sched_cur()].sig_flags[sig] = flags;
     if (handler == 1) {
-        threads[sched_cur()].sig_ignore |= (1u << sig);
+        sched_bitset_or(&threads[sched_cur()].sig_ignore, (1u << sig));
     } else {
-        threads[sched_cur()].sig_ignore &= ~(1u << sig);
+        sched_bitset_and(&threads[sched_cur()].sig_ignore, ~(1u << sig));
     }
     return 0;
 }
@@ -3965,10 +3986,10 @@ u32 sched_signal_send(u32 pid, u32 sig) {
                         n_wake = n_wake + 1;
                     }
                 }
-                threads[i].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
-                                             | (1u << SIGTTIN_N) | (1u << SIGTTOU_N));
+                sched_bitset_and(&threads[i].pending_sigs, ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
+                                             | (1u << SIGTTIN_N) | (1u << SIGTTOU_N)));
             }
-            threads[i].pending_sigs |= (1u << sig);
+            sched_bitset_or(&threads[i].pending_sigs, (1u << sig));
             /* Wake sleepers so they can observe stop/kill/cont. */
             if (threads[i].state == TCB_SLEEPING) {
                 u32 cpu;
@@ -4034,8 +4055,8 @@ void sched_stop_self(u32 sig) {
     threads[self].wait_chan = 0;
     threads[self].stop_sig = sig;
     threads[self].stop_notify = 1;
-    threads[self].pending_sigs &= ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
-                                       | (1u << SIGTTIN_N) | (1u << SIGTTOU_N));
+    sched_bitset_and(&threads[self].pending_sigs, ~((1u << SIGSTOP_N) | (1u << SIGTSTP_N)
+                                       | (1u << SIGTTIN_N) | (1u << SIGTTOU_N)));
     spin_unlock(&sched_run_lock);
     if (ppid != 0) {
         sched_wakeup(sched_wait4_chan(ppid));
@@ -4274,7 +4295,7 @@ static u32 sig_deliver_frame(u32 sig, u64 *frame_rip, u64 *frame_rflags,
     *frame_rip = handler;
     *frame_rdi = (u64)sig;
     *frame_rsp = usp;
-    threads[sched_cur()].pending_sigs &= ~(1u << sig);
+    sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
     return 1;
 }
 
@@ -4294,7 +4315,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
         threads[sched_cur()].pending_sigs = 0;
         proc_terminate(128 + SIGKILL_N);
     }
-    threads[sched_cur()].pending_sigs &= ~ign;
+    sched_bitset_and(&threads[sched_cur()].pending_sigs, ~ign);
     pend = threads[sched_cur()].pending_sigs;
 
     /* Prefer custom handlers; default INT/TERM terminate; STOP/TSTP stop. */
@@ -4310,7 +4331,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
 
         /* SIGSTOP cannot be caught or ignored. */
         if (sig == SIGSTOP_N) {
-            threads[sched_cur()].pending_sigs &= ~(1u << sig);
+            sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
             sched_stop_self(SIGSTOP_N);
             pend = threads[sched_cur()].pending_sigs;
             continue;
@@ -4323,11 +4344,11 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
                 }
             }
             if (h == 1) {
-                threads[sched_cur()].pending_sigs &= ~(1u << sig);
+                sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
                 pend = threads[sched_cur()].pending_sigs;
                 continue;
             }
-            threads[sched_cur()].pending_sigs &= ~(1u << sig);
+            sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
             sched_stop_self(sig);
             pend = threads[sched_cur()].pending_sigs;
             continue;
@@ -4339,7 +4360,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
                     return;
                 }
             }
-            threads[sched_cur()].pending_sigs &= ~(1u << sig);
+            sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
             pend = threads[sched_cur()].pending_sigs;
             continue;
         }
@@ -4354,7 +4375,7 @@ void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp, u64 *f_rdi
             proc_terminate(128 + sig);
         }
         /* Drop unhandled / non-fatal bits. */
-        threads[sched_cur()].pending_sigs &= ~(1u << sig);
+        sched_bitset_and(&threads[sched_cur()].pending_sigs, ~(1u << sig));
         pend = threads[sched_cur()].pending_sigs;
     }
 }
@@ -4670,4 +4691,80 @@ u32 sched_smp_start(void) {
         }
         return attached;
     }
+}
+
+/* Trusted boot-only rendezvous. No syscall or user-supplied arm operation.
+ * A targeted child executes its REAL futex path; synchronous injection is at
+ * the exact post-predicate/pre-publication boundary. The driver records and
+ * rescues a stranded sleeper as FAILURE, never as accepted progress. */
+static u32 wp_pid,wp_mode,wp_fired,wp_cpu_mask,wp_driver_mask,wp_release;
+u64 sched_wait_probe_scan(u32 what);
+static u64 wp_main_chan,wp_peer_chan;
+static volatile u32 wp_gate_lock;
+void sched_wait_probe_arm(u32 pid,u32 mode) {
+    u64 flags=cpu_irq_save();spin_lock(&sched_run_lock);
+    wp_pid=pid;wp_mode=mode;wp_fired=0;wp_cpu_mask=0;wp_driver_mask=0;wp_release=0;wp_main_chan=0;wp_peer_chan=0;
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+}
+void sched_wait_probe_point(u64 chan) {
+    u64 flags=cpu_irq_save();u32 sig=0,pid=0,self,hold=0,wake=0;
+    spin_lock(&sched_run_lock);self=sched_cur();
+    if(wp_pid && threads[self].pid==wp_pid) {
+        wp_cpu_mask=wp_cpu_mask | (1u<<sched_cpu_index());
+        if(threads[self].tid==wp_pid)wp_main_chan=chan;else wp_peer_chan=chan;
+        if(!wp_fired && ((wp_mode==6 && threads[self].tid!=wp_pid)
+           || (wp_mode!=6 && threads[self].tid==wp_pid))) {
+            wp_fired=1;pid=wp_pid;
+            if(wp_mode==0)sig=9;
+            if(wp_mode==6)hold=1;
+            if(wp_mode==3 || wp_mode==4)sig=15;
+            if(wp_mode==7)wake=1;
+        }
+    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
+    if(sig)sched_signal_send(pid,sig);
+    if(wake){*(volatile u32 *)chan=1;sched_wakeup(chan);}
+    if(hold) {
+        flags=cpu_irq_save();spin_lock(&wp_gate_lock);
+        while(!wp_release) {
+            sched_sleep_unlock_spin((u64)&wp_release,&wp_gate_lock);
+            spin_lock(&wp_gate_lock);
+        }
+        spin_unlock(&wp_gate_lock);cpu_irq_restore(flags);
+    }
+}
+u64 sched_wait_probe_scan(u32 what) {
+    u64 flags=cpu_irq_save(),n=0;u32 i;
+    spin_lock(&sched_run_lock);
+    if(what==9)n=wp_release;
+    else if(what==0)n=wp_fired;
+    else if(what==3)n=wp_main_chan;
+    else if(what==4)n=wp_peer_chan;
+    else if(what==7)n=wp_cpu_mask | wp_driver_mask;
+    else if(what==10)n=wp_cpu_mask;
+    else if(what==11)n=wp_driver_mask;
+    else for(i=0;i<MAX_THREADS;i++)if(threads[i].pid==wp_pid && threads[i].state==TCB_SLEEPING) {
+        if(what==1)n=n+1;
+        if(what==2 && (threads[i].wait_chan==wp_main_chan || threads[i].wait_chan==wp_peer_chan) && (threads[i].pending_sigs & ((1u<<9)|(1u<<15))))n=n+1;
+        if(what==5 && threads[i].tid==wp_pid)n=1;
+    }
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);return n;
+}
+void sched_wait_probe_rescue(void) {
+    u64 flags=cpu_irq_save();u32 i,kicks=0;
+    spin_lock(&sched_run_lock);
+    for(i=0;i<MAX_THREADS;i++)if(threads[i].pid==wp_pid && threads[i].state==TCB_SLEEPING)
+        wake_chan_locked(threads[i].wait_chan,MAX_THREADS,&kicks);
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);kick_idle_cpus(kicks);
+}
+
+void sched_wait_probe_release(void) {
+    u64 flags=cpu_irq_save();spin_lock(&wp_gate_lock);wp_release=1;
+    sched_wakeup((u64)&wp_release);spin_unlock(&wp_gate_lock);cpu_irq_restore(flags);
+}
+
+void sched_wait_probe_note_driver(void) {
+    u64 flags=cpu_irq_save();spin_lock(&sched_run_lock);
+    wp_driver_mask=wp_driver_mask | (1u<<sched_cpu_index());
+    spin_unlock(&sched_run_lock);cpu_irq_restore(flags);
 }

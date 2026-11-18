@@ -36,6 +36,9 @@ extern types.uint32_t net_start_worker(void);
 extern void net_init(void);
 extern void net_selftest(void);
 
+extern void native_object_selftest(void);
+
+extern void sched_wait_cancel_selftest(void);
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
     drivers.uart_init();
@@ -178,6 +181,8 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     sched_balance_selftest();
     sched_ap_sysret_selftest();
     sched_allocator_selftest();
+    native_object_selftest();
+    sched_wait_cancel_selftest();
 
     // Perform verification self-tests
     kprintf("\n[TEST] Running Kernel Self-Verification Diagnostics...\n");

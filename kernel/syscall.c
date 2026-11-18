@@ -97,7 +97,7 @@ extern u64 sys_nanosleep(u64 ureq, u64 urem);
 extern u64 sys_clock_gettime(u64 clockid, u64 utp);
 
 /* proc.c */
-extern void proc_record_exit(u32 pid, u32 ppid, u64 code);
+extern u32 proc_record_exit(u32 pid, u32 ppid, u64 code);
 extern void proc_reparent_exits(u32 old_ppid, u32 new_ppid);
 extern u64 sys_wait4(u64 pid, u64 status, u64 options, u64 ruspace);
 extern u64 sys_kill(u64 pid, u64 sig);
@@ -307,16 +307,15 @@ static u64 sys_clone(u64 flags, u64 stack, u64 fn, u64 arg) {
         return (u64)(-1);
     }
     child_tid = sched_alloc_pid();      /* tid namespace shares pid allocator */
-    mem.as_retain_h(as_h);
+    if (!child_tid) return (u64)-1;
     slot = sched_clone_thread(fn, stack, arg, child_tid);
     if (slot == 0xFFFFFFFF) {
-        mem.as_release_h(as_h);
         return (u64)(-1);
     }
     return (u64)child_tid;
 }
 
-static u64 sys_fork(struct syscall_frame *f) {
+static u64 fork_exclusive(struct syscall_frame *f) {
     u64 parent_as = sched_current_as_h();
     if (parent_as == 0) {
         return (u64)(-1);               /* kernel threads cannot fork */
@@ -326,6 +325,7 @@ static u64 sys_fork(struct syscall_frame *f) {
         return (u64)(-1);
     }
     u32 child_pid = sched_alloc_pid();
+    if (!child_pid) {mem.as_destroy_h(child_as);return (u64)-1;}
     u32 slot = sched_clone_user((u64)f, child_as, child_pid);
     if (slot == 0xFFFFFFFF) {
         mem.as_destroy_h(child_as);
@@ -334,66 +334,42 @@ static u64 sys_fork(struct syscall_frame *f) {
     return child_pid;                   /* parent sees the child pid */
 }
 
-/* Terminate the current user thread/process. Secondary CLONE_THREAD exits
- * only drop one AS ref and free the TCB; the last (or sole) thread of a pid
- * performs full process teardown and wait4 notification. */
-void proc_terminate(u64 code) {
-    u32 pid = sched_current_pid();
-    u32 ppid = sched_current_ppid();
-    u64 as_h;
-
-    /* Non-leader CLONE_THREAD exit: drop one AS ref, free TCB, no wait4. */
-    if (sched_is_secondary_thread()) {
-        kprintf("[UPROC] tid %u of pid %u exited (code %u)\n",
-                (u64)sched_current_tid(), (u64)pid, code);
-        /* CLEARTID before dropping the shared AS mapping. */
-        sched_do_clear_child_tid();
-        sched_fd_close_all();
-        as_h = sched_current_as_h();
-        mem.as_activate_h(0);
-        sched_replace_as(0);
-        if (as_h != 0) {
-            mem.as_release_h(as_h);
-        }
-        kthread_exit();
-        for (;;) {
-        }
-    }
-    kprintf("[UPROC] pid %u exited (code %u)\n", (u64)pid, code);
-    uproc_note_exit(pid, code);
-
-    /* Retain an exit record for the parent; orphans move under pid 1. The
-     * exit records are keyed by the *child's* ppid, so reparent records whose
-     * owner is the exiting pid (not by the parent of the exiting process). */
-    proc_record_exit(pid, ppid, code);
-    /* POSIX: notify parent with SIGCHLD (ignored by default). */
-    if (ppid != 0) {
-        sched_signal_send(ppid, 17);
-    }
-    /* Wake a parent blocked in wait4, if any. */
-    sched_wakeup(sched_wait4_chan(ppid));
-    if (pid != 1) {
-        sched_reparent_children(pid, 1);
-        proc_reparent_exits(pid, 1);
-        /* Orphans moved under init: wake pid 1 in case it is waiting. */
-        sched_wakeup(sched_wait4_chan(1));
-    }
-
-    /* CLEARTID while AS still mapped, then close fds and tear down. */
-    sched_do_clear_child_tid();
-    /* Close all open files, then leave the doomed address space before its
-     * page tables are freed. The DEAD TCB slot stays until wait4 reaps it. */
+extern u32 sched_process_image_begin(void);
+extern void sched_process_image_end(void);
+extern void sched_process_group_exit(u64 code);
+extern u64 sched_process_leave(u64 code);
+extern u32 sched_process_exit_ready(void);
+static u64 sys_fork(struct syscall_frame *f) {
+    u64 rc;
+    if(!sched_process_image_begin())return (u64)-16;
+    rc=fork_exclusive(f);sched_process_image_end();return rc;
+}
+/* Raw task exit and native process exit deliberately differ. */
+static void proc_exit_task(u64 code) {
+    u32 pid=sched_current_pid();u32 ppid;u64 as;
     sched_fd_close_all();
-    as_h = sched_current_as_h();
-    mem.as_activate_h(0);
-    /* Detach before release: /proc must never inspect a freed zombie AS. */
-    sched_replace_as(0);
-    if (as_h != 0) {
-        mem.as_release_h(as_h);
+    sched_do_clear_child_tid();
+    as=sched_process_leave(code);
+    if(as) {
+        mem.as_release_h(as);
+        code=sched_process_exit_ready();
+        kprintf("[UPROC] pid %u exited (code %u)\n",(u64)pid,code);
+        uproc_note_exit(pid,code);
+        ppid=proc_record_exit(pid,sched_current_ppid(),code);
+        if(ppid)sched_signal_send(ppid,17);
+        sched_wakeup(sched_wait4_chan(ppid));
+        if(pid!=1){
+            sched_reparent_children(pid,1);proc_reparent_exits(pid,1);
+            sched_wakeup(sched_wait4_chan(1));
+        }
     }
-    kthread_exit();                     /* frees the kernel stack, switches away */
-    for (;;) {                          /* unreachable */
-    }
+    kthread_exit();
+    for(;;){}
+}
+void proc_terminate(u64 code) {
+    sched_process_group_exit(code);
+    sched_signal_send(sched_current_pid(),9);
+    proc_exit_task(code);
 }
 
 static u64 syscall_dispatch_inner(struct syscall_frame *f) {
@@ -653,7 +629,7 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
         return restored;
     }
     if (f->rax == SC_EXIT) {
-        proc_terminate(f->rdi);
+        proc_exit_task(f->rdi);
     }
     if (f->rax == SC_EXIT_GROUP) {
         proc_terminate(f->rdi);

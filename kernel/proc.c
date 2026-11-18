@@ -39,6 +39,7 @@ struct exit_record {
 
 static struct exit_record exit_table[MAX_EXIT];
 static volatile u32 exit_lock;
+extern u32 sched_process_parent(u32 pid);
 extern void spin_lock(volatile u32 *lock);
 extern void spin_unlock(volatile u32 *lock);
 extern u64 cpu_irq_save(void);
@@ -97,12 +98,14 @@ static void proc_record_exit_locked(u32 pid, u32 ppid, u64 code) {
     kprintf("[PROC] exit record table full, pid %u status lost\n", (u64)pid);
 }
 
-void proc_record_exit(u32 pid, u32 ppid, u64 code) {
+u32 proc_record_exit(u32 pid, u32 ppid, u64 code) {
     u64 flags = cpu_irq_save();
     spin_lock(&exit_lock);
+    ppid=sched_process_parent(pid);
     proc_record_exit_locked(pid, ppid, code);
     spin_unlock(&exit_lock);
     cpu_irq_restore(flags);
+    return ppid;
 }
 
 
@@ -516,3 +519,8 @@ u64 sys_rt_sigaction(u64 sig, u64 act_u, u64 old_u, u64 setsize) {
     return 0;
 }
 
+
+/* Kernel boot driver consumes only its own ppid0 child result. */
+u32 proc_wait_probe_take(u32 pid,u32 *code) {
+    u32 got=0;return take_exit(pid,0,&got,code);
+}

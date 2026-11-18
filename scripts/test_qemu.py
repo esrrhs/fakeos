@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import base64
+from contextlib import contextmanager
 import os
 import re
 import selectors
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from bootstrap_transfer import (capture_dump, decode_dumpbin,
                                 dump_transfer_budget, prepare_reference_image)
@@ -126,6 +128,9 @@ def second_boot_checks(disk):
     vm.close()
 
     out = boot + session + tail
+    with open("build/test-qemu-rebuilt.serial.log", "w", encoding="utf-8",
+              errors="surrogateescape") as log:
+        log.write(out)
     norm = out.replace("\r\n", "\n").replace("\r", "\n")
     required = [
         "Welcome to fakeos!",
@@ -152,6 +157,13 @@ def second_boot_checks(disk):
         # rebuilt image publishes no m5 payload but keeps the userspace
         "published 0 staged bootstrap files",
         "[PASS] Timer preemption",
+        "[U][PASS] kill SIGKILL + wait status",
+        "[U][PASS] SIGTERM handler + sigreturn",
+        "[U][PASS] SIGSTOP/CONT + WUNTRACED/WCONTINUED",
+        "[U][PASS] pipe read EINTR + handler",
+        "[U][PASS] pipe SA_RESTART keeps read",
+        "[U][PASS] orphan reparented to pid 1",
+        "[NATIVE] PASS kernel-only object/channel suite",
     ]
     results = []
     for req in required:
@@ -162,17 +174,20 @@ def second_boot_checks(disk):
     return results
 
 
+@contextmanager
 def ensure_disk():
-    """Dedicated bootstrap disk: output now exceeds the 16 MiB RAMFS cap.
+    """One fresh, test-owned 32 MiB disk shared by both boots of this run.
 
-    Do not resize/overwrite the developer's persistent build/disk.img.
-    32 MiB holds the >21 MiB kernel plus Ext2 metadata and selftest files.
+    Reusing test-bootstrap.img made repeated `make test` depend on old volume
+    contents (including a previous >21 MiB kernel). Never overwrite/delete that
+    legacy fixture or the developer's build/disk.img. A unique directory owns
+    only this invocation's disk and is cleaned on success, failure, or exception.
     """
-    disk = "build/test-bootstrap.img"
-    if not os.path.exists(disk):
-        os.makedirs("build", exist_ok=True)
+    os.makedirs("build", exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="test-bootstrap-", dir="build") as tmp:
+        disk = os.path.join(tmp, "disk.img")
         subprocess.check_call(["python3", "tools/mkext2.py", disk, "32"])
-    return disk
+        yield disk
 
 
 def net_args():
@@ -187,12 +202,11 @@ def disk_args(disk):
     return ["-drive", f"file={disk},format=raw,if=ide"]
 
 
-def main():
+def run_checks(disk):
     expected_size, expected_digest = prepare_reference_image()
     print(f"==> Trusted rebuilt image: {expected_size} bytes SHA256={expected_digest}; "
           f"dump budget={dump_transfer_budget(expected_size)}s, frame stall=60s")
     print("==> Phase 1-6: boot stock kernel (+IDE disk) and run the interactive shell...")
-    disk = ensure_disk()
     vm = VM(KERNEL, mem="256M", extra_args=disk_args(disk) + net_args())
 
     # 1. Boot + kernel self-tests + init -> login stub -> shell prompt.
@@ -505,6 +519,7 @@ def main():
         "[U][PASS] mprotect RO/RW",
         "[U][PASS] PROT_NONE + mmap addr hint",
         "[U][PASS] symlink/readlink",
+        "[U][PASS] cross-mount symlink namespace",
         "[U][PASS] hard link(2)",
         "[U][PASS] getcwd physical",
         "[U][PASS] vfs getdents",
@@ -547,7 +562,7 @@ def main():
         "[kbuild] identical kernel/kmain.o",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 39 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 40 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /mnt/fakeos-new",
         "[kbuild] kernel image linked: /mnt/fakeos-new",
@@ -618,10 +633,10 @@ def main():
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 39 modules accounted for",
-         identical + mismatches == 39),
-        (f"all 39 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 39 and mismatches == 0),
+        ("all 40 modules accounted for",
+         identical + mismatches == 40),
+        (f"all 40 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 40 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),
@@ -712,6 +727,12 @@ def main():
     else:
         print("\nTest failed: some assertions did not match.")
         sys.exit(1)
+
+def main():
+    # Keep exactly the same disk alive through stock and reconstructed boots.
+    with ensure_disk() as disk:
+        run_checks(disk)
+
 
 if __name__ == "__main__":
     main()
