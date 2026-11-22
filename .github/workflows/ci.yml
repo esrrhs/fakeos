@@ -80,3 +80,19 @@ jobs:
           path: |
             build/fakeos.elf
             build/fakeos64.elf
+
+      - name: Upload QEMU serial evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        # Every stage script writes the full guest transcript before it asserts,
+        # and those files were the only copy of what the guest actually did. A
+        # red run therefore used to be undiagnosable from CI alone: the failure
+        # said "boot-complete barrier missing" and the transcript that would say
+        # WHICH boot stage never finished was deleted with the runner. Upload
+        # them whether the suite passed or failed.
+        with:
+          name: qemu-serial-evidence
+          path: |
+            build/**/*.serial.log
+            build/**/results.json
+          if-no-files-found: warn

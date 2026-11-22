@@ -588,6 +588,7 @@ test: build
 	@PYTHONUNBUFFERED=1 python3 scripts/test_vdso.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_rlimit.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_process_lifetime.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_wait_cancel.py
 	@python3 scripts/test_qemu_fixture.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_ext2_reclaim.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_vfs_mounts.py

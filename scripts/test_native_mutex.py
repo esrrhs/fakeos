@@ -23,7 +23,7 @@ def main():
     # native suite and the slab/VM/wait-cancel self-tests that follow it, so
     # reaching it can take minutes on a loaded host.
     if idle not in out: out+=vm.wait_for(idle,300,failure_markers=('[PANIC]','[EXCEPTION]'))
-    assert idle in out, 'boot-complete barrier missing'
+    assert idle in out, ('boot-complete barrier missing; guest tail:\n' + out[-2000:])
     # Login with retries: under host load the serial input processing can lag
     # far behind, so a missed Password prompt must not be read as a kernel
     # failure (same reasoning as test_rlimit.py).

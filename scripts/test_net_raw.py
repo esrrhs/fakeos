@@ -21,7 +21,7 @@ def main():
   try:
    out+=vm.wait_for('System idle. Yielding',300,failure_markers=('[PANIC]','[EXCEPTION]','[FAIL]'))
    idle='System idle. Yielding'
-   assert idle in out, 'boot-complete barrier missing'
+   assert idle in out, ('boot-complete barrier missing; guest tail:\n' + out[-2000:])
    # Login with retries: under host load the serial input processing can lag
    # far behind, so a missed Password prompt must not be read as a kernel
    # failure (same reasoning as test_rlimit.py).
