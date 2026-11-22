@@ -19,7 +19,10 @@ def main():
     assert '[NATIVE] PASS kernel-only object/channel suite' in out
     assert 'native mutex: FIFO handoff' in out, 'mutex selftest sections missing'
     idle='System idle. Yielding for IRQ-driven TTY/net I/O.'
-    if idle not in out: out+=vm.wait_for(idle,60,failure_markers=('[PANIC]','[EXCEPTION]'))
+    # The barrier is printed at the very end of the boot sequence, AFTER the
+    # native suite and the slab/VM/wait-cancel self-tests that follow it, so
+    # reaching it can take minutes on a loaded host.
+    if idle not in out: out+=vm.wait_for(idle,300,failure_markers=('[PANIC]','[EXCEPTION]'))
     assert idle in out, 'boot-complete barrier missing'
     # Login with retries: under host load the serial input processing can lag
     # far behind, so a missed Password prompt must not be read as a kernel

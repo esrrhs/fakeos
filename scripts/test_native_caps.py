@@ -16,7 +16,11 @@ def main():
     out+=vm.wait_for('[NATIVE] PASS kernel-only object/channel suite',300,failure_markers=('[NATIVE] FAIL','[PANIC]','[EXCEPTION]'))
     assert '[NATIVE] PASS kernel-only object/channel suite' in out
     idle='System idle. Yielding for IRQ-driven TTY/net I/O.'
-    if idle not in out: out+=vm.wait_for(idle,30,failure_markers=('[PANIC]','[EXCEPTION]'))
+    # The barrier is printed at the very end of the boot sequence, AFTER the
+    # native suite and the slab/VM/wait-cancel self-tests that follow it, so
+    # reaching it can take minutes on a loaded host. 30s was not enough and
+    # the missing barrier was reported as a boot failure.
+    if idle not in out: out+=vm.wait_for(idle,300,failure_markers=('[PANIC]','[EXCEPTION]'))
     assert idle in out, 'boot-complete barrier missing'
     # Login with retries: under host load the serial input processing can lag
     # far behind, so a missed Password prompt must not be read as a kernel
