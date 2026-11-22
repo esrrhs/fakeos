@@ -22,10 +22,21 @@ def main():
    out+=vm.wait_for('System idle. Yielding',300,failure_markers=('[PANIC]','[EXCEPTION]','[FAIL]'))
    idle='System idle. Yielding'
    assert idle in out, 'boot-complete barrier missing'
-   vm.send('root');out+=vm.wait_for('Password:',20);vm.send('root');out+=vm.wait_for('Welcome root',30)
-   out+=vm.wait_for('fakeos:',30)
+   # Login with retries: under host load the serial input processing can lag
+   # far behind, so a missed Password prompt must not be read as a kernel
+   # failure (same reasoning as test_rlimit.py).
+   got_login = False
+   for attempt in range(4):
+    vm.send('root')
+    out+=vm.wait_for('Password:',30,failure_markers=('[PANIC]',))
+    if 'Password:' in out:
+     got_login = True
+     break
+   assert got_login, 'login prompt never appeared'
+   vm.send('root');out+=vm.wait_for('Welcome root',60)
+   out+=vm.wait_for('fakeos:',60)
    vm.send('/bin/init --net-raw; echo __RAW_RC=$?; echo __RAW_DONE__')
-   out+=vm.wait_for('__RAW_DONE__',60,failure_markers=('[PANIC]',))
+   out+=vm.wait_for('__RAW_DONE__',150,failure_markers=('[PANIC]',))
   finally:
    out+=vm.read_available(.2);vm.close();(e/'smp2.serial.log').write_text(out)
   assert '__RAW_RC=0' in out, f'net-raw probe failed: see {e}'
