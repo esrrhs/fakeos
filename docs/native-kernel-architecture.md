@@ -30,7 +30,7 @@ Baseline implementation before the slices below, and the gaps motivating them:
 | `sched_sleep_unlock_spin` | Usable atomic condition-lock -> run-lock -> sleep handoff; preferred foundation for native wait objects. |
 | `sched_sleep`, `sys_futex` in `kernel/sysproc.c` | Current futex checks the value then separately sleeps; disabling local IRQs cannot close a cross-CPU lost wakeup. It keys by VA, ignores timeouts and cannot identify unrelated ASs or shared mappings at different VAs correctly. Leave compatibility present but do not copy its design. |
 | `kmutex_lock/unlock`, `ksem_*`, `wait_queue_sleep_unlock_spin` | Existing kernel-private blocking primitives, not capability-protected user mutexes. `kmutex_unlock` does not validate its recorded owner. |
-| `mem/as.c`: address spaces, COW, `as_retain_h` / `as_release_h` | Keep isolation and reference counting, add explicit process ownership and VM lifecycle/locking audit (`as_retain_h`/`as_release_h` currently update plain refcounts, not atomics); do not use recyclable AS pointer as process capability identity. |
+| `mem/as.c`: address spaces, COW, `as_retain_h` / `as_release_h` | Keep isolation and reference counting, add explicit process ownership and VM lifecycle/locking audit. Frame-refcount mutations are now serialised by `ref_lock` (fakecc drops `lock cmpxchg`, so no CAS primitive), and VM mutations shoot down remote TLBs via the vector-35 per-CPU mailbox path (see docs/evidence/vm-shootdown-20261121/). Do not use recyclable AS pointer as process capability identity. |
 | `kernel/uproc.c: sys_execve`, `kernel/syscall.c: proc_terminate`, `kernel/proc.c`: exit records/wait4 | Leader exit currently publishes process exit/reparents even with peers alive; secondary exits skip process notification. Refcounting AS is not a process lifecycle. Exec/group-exit and shared ownership must be specified together before exposing process-scoped native handles. |
 
 ## 2. Execution choice: 1:1 first, optional M:N above it
@@ -217,16 +217,23 @@ wakes both directions and reclaims only after endpoints and pins drain.
 The object-lock -> scheduler-lock handoff uses `sched_sleep_unlock_spin`.
 
 These IDs are **kernel-private trusted references, not secure process-relative
-capabilities**. There are no new syscalls. No claim of user-thread/process channel
-support, native robust mutex, deadlines, select, endpoint transfer, per-process
-cleanup or goroutine-scale tasks is made. Publishing these global IDs to user
-space would be a security/lifecycle bug. The next bounded implementation step
-is the process resource owner and shared capability namespace, not an ad-hoc
-syscall demo. The single pool spinlock is bounded but serializes independent
-channels; split registry/pin and per-object locks only after the model is tested.
+capabilities**. Since this first slice, the process-relative capability
+namespace (gate 2, kernel/natcap.c, syscalls 504-508) and the native robust
+mutex (gate 3, section 6; syscalls 513-517) have been implemented ON TOP of
+this core — see docs/evidence/native-caps-20261121/RESULT.md and
+docs/evidence/native-mutex-20261122/RESULT.md. Still unimplemented: deadlines,
+select, endpoint transfer, per-process cleanup beyond the exit walk,
+goroutine-scale tasks. The single pool spinlock is bounded but serializes
+independent channels; split registry/pin and per-object locks only after the
+model is tested.
 Run `python3 scripts/test_native_objects.py` (also included by `make test`);
 serial evidence is retained per SMP count in `build/native-object-tests/`.
 The test runs one QEMU at a time with `-nic none` and a fresh disposable disk.
+
+Kernel callers must close owned handles before normal exit: no implicit kernel
+thread-death cleanup is provided for CHANNEL handles. The robust-mutex exit
+walk (owner death -> OWNER_DIED) IS wired for user tasks (proc_exit_task) and
+kernel threads (kthread_exit), outside scheduler spinlocks.
 
 Kernel callers must close owned handles before normal exit: no implicit kernel
 thread-death cleanup is provided. User exit cannot use this contract as-is.
