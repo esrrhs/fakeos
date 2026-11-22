@@ -1372,7 +1372,14 @@ void sched_steal_selftest(void) {
     }
 
     {
-        u64 deadline = sched_tick_count() + 800;
+        /* The workers only burn a short spin, so this window is generous
+         * already. It still expires on a heavily loaded host under TCG
+         * (six workers across four emulated CPUs): the last worker had not
+         * finished its spin when the window closed, and the self-test
+         * reported "steal workers done 5/6". The check is about observing a
+         * cross-CPU steal, not about how long the workers take, so give the
+         * window twice the usual room before calling it a failure. */
+        u64 deadline = sched_tick_count() + 1600;
         while (g_steal_done != STEAL_WORKERS && sched_tick_count() < deadline) {
             sched_yield();
         }
