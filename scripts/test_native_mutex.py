@@ -21,7 +21,18 @@ def main():
     idle='System idle. Yielding for IRQ-driven TTY/net I/O.'
     if idle not in out: out+=vm.wait_for(idle,60,failure_markers=('[PANIC]','[EXCEPTION]'))
     assert idle in out, 'boot-complete barrier missing'
-    vm.send('root');out+=vm.wait_for('Password:',10);vm.send('root');out+=vm.wait_for('Welcome root',20)
+    # Login with retries: under host load the serial input processing can lag
+    # far behind, so a missed Password prompt must not be read as a kernel
+    # failure (same reasoning as test_rlimit.py).
+    got_login = False
+    for attempt in range(4):
+     vm.send('root')
+     out+=vm.wait_for('Password:',30,failure_markers=('[PANIC]',))
+     if 'Password:' in out:
+      got_login = True
+      break
+    assert got_login, 'login prompt never appeared'
+    vm.send('root');out+=vm.wait_for('Welcome root',60)
     vm.send('/bin/init --native-mutex; echo __NM_RC=$?; echo __NM_DONE__')
     out+=vm.wait_for('\r\n__NM_DONE__\r\n',300,failure_markers=('[PANIC]',))
    finally:

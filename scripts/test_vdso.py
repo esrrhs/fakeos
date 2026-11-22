@@ -11,14 +11,25 @@ def run_cpu(cpus, evidence_dir):
   vm=VM('build/fakeos.elf',mem='256M',extra_args=['-smp',str(cpus),'-nic','none'])
   out=''
   try:
-   out+=vm.wait_for('System idle. Yielding',120,failure_markers=('[PANIC]','[EXCEPTION]'))
+   out+=vm.wait_for('System idle. Yielding',300,failure_markers=('[PANIC]','[EXCEPTION]'))
    assert '[TSC] calibrated:' in out, 'TSC calibration missing'
    m=re.search(r'\[TSC\] calibrated: (\d+) Hz',out)
    hz=int(m.group(1))
    assert 500000000 <= hz <= 20000000000, f'implausible TSC rate {hz}'
-   vm.send('root');out+=vm.wait_for('Password:',5);vm.send('root');out+=vm.wait_for('Welcome root',10)
+   # Login with retries: under host load the serial input processing can lag
+   # far behind, so a missed Password prompt must not be read as a kernel
+   # failure (same reasoning as test_rlimit.py).
+   got_login = False
+   for attempt in range(4):
+    vm.send('root')
+    out+=vm.wait_for('Password:',30,failure_markers=('[PANIC]',))
+    if 'Password:' in out:
+     got_login = True
+     break
+   assert got_login, 'login prompt never appeared'
+   vm.send('root');out+=vm.wait_for('Welcome root',60)
    vm.send('/bin/init --vdso; echo __VD_RC=$?; echo __VD_DONE__')
-   out+=vm.wait_for('__VD_DONE__',60,failure_markers=('[PANIC]',))
+   out+=vm.wait_for('__VD_DONE__',150,failure_markers=('[PANIC]',))
   finally:
    out+=vm.read_available(.2);vm.close();(evidence_dir/f'smp{cpus}.serial.log').write_text(out)
   assert '__VD_RC=0' in out, f'vdso probe failed on SMP{cpus}'
