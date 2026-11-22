@@ -10,12 +10,21 @@ def body(path,signature):
     return text[start:end]
 PRE=r"""package test;
 typedef unsigned long u64;typedef long i64;typedef unsigned int u32;typedef int s32;typedef unsigned short u16;
-enum{VRUNTIME_SLICE=1,FD_BAD=0xffffffff,EINTR_SEL=-4,EINVAL_NEG=-22,EINTR_NEG=-4,POLLIN_F=1,POLLOUT_F=4,POLLNVAL_F=32,TICKS_PER_SEC=100,NS_PER_TICK=10000000,NS_PER_SEC=1000000000,CLOCK_REALTIME_ID=0,CLOCK_MONOTONIC_ID=1,CLOCK_BOOTTIME_ID=7};
+enum{VRUNTIME_SLICE=1,FD_BAD=0xffffffff,EINTR_SEL=-4,EINVAL_NEG=-22,EINTR_NEG=-4,POLLIN_F=1,POLLOUT_F=4,POLLNVAL_F=32,TICKS_PER_SEC=100,NS_PER_TICK=10000000,NS_PER_SEC=1000000000,CLOCK_REALTIME_ID=0,CLOCK_MONOTONIC_ID=1,CLOCK_BOOTTIME_ID=7,PARK_INTERRUPTED_F=2};
 static u64 sched_ticks,clock_ticks;static u32 active,sched_bsp_cpu,cpu,irq,charges,switches,locks,yields,interrupt_at,bad_range;
 static u32 select_wait_token;static u32 sched_run_lock;
-void test_irq(void){irq++;}void spin_lock(u32*p){locks++;}void cfs_charge(u32 t,u32 v){charges++;}void cfs_update_min(void){}
+void test_irq(void){irq++;}void spin_lock(u32*p){locks++;}void runlock_lock_at(u32 site){locks++;}void runlock_unlock(void){}void cfs_charge(u32 t,u32 v){charges++;}void cfs_update_min(void){}
 u32 sched_cpu_index(void){return cpu;}u32 sched_cur(void){return cpu;}u32 pick_next(u32 t){return t;}void sched_switch_to(u32 t){switches++;}
 u64 sched_current_as_h(void){return 1;}u32 test_range(u64 a,u64 p,u64 n){return !bad_range && p!=0;}
+/* tsc_hz()'s extern is at file scope in sysproc.c, so extraction loses it.
+ * 0 selects the tick-derived fallback these expectations assume; the
+ * calibrated path is proven on real guests by scripts/test_vdso.py. */
+u64 tsc_hz(void){return 0;}u64 tsc_ns(void){return 0;}
+/* Only the EINTR branch of park admission is observable in these bodies, and
+ * sched_should_eintr_timer() above already models it (PARK_INTERRUPTED=2).
+ * Commit must still advance the clock, as a real sleep does. */
+void sched_park_prepare(u64 p){}void sched_park_abort(void){}
+u32 sched_park_commit(u64 p,u32 nr){ if(sched_should_eintr_timer())return 2; sched_yield(); return 0; }
 void sched_yield(void){clock_ticks++;yields++;}void sched_sleep(u64 p){sched_yield();}void sched_check_signals(void){}u32 sched_should_eintr_timer(void){return yields>=interrupt_at;}
 u32 sched_fd_get(u32 fd){return FD_BAD;}u32 fd_ready_read(u32 f){return 0;}u32 fd_ready_write(u32 f){return 0;}
 void reset(void){clock_ticks=100;yields=0;interrupt_at=0xffffffff;bad_range=0;}
@@ -77,7 +86,7 @@ int main(void){long status,value;reset();
  return 0;}
 """
 def main():
-    funcs=[body('kernel/sched.c','void sched_tick(void)'),body('kernel/sched.c','u64 sched_clock_ticks(void)'),body('kernel/sysproc.c','static void ticks_to_timespec('),body('kernel/sysproc.c','u64 sys_clock_gettime('),body('kernel/sysproc.c','u64 sys_nanosleep('),body('kernel/sysfile.c','u64 sys_select('),body('kernel/sysfile.c','u64 sys_poll(')]
+    funcs=[body('kernel/sched.c','void sched_tick(void)'),body('kernel/sched.c','u64 sched_clock_ticks(void)'),body('kernel/sysproc.c','static void ticks_to_timespec('),body('kernel/sysproc.c','static void ns_to_timespec('),body('kernel/sysproc.c','u64 sys_clock_gettime('),body('kernel/sysproc.c','u64 sys_nanosleep('),body('kernel/sysfile.c','u64 sys_select('),body('kernel/sysfile.c','u64 sys_poll(')]
     source=PRE+'\n'.join(funcs).replace('arch.lapic_irq()','test_irq()').replace('mem.as_user_range_ok','test_range')
     tests=[]
     def check(expression):tests.append('if(!('+expression+'))return '+str(len(tests)+1)+';')
@@ -116,7 +125,7 @@ def main():
         src=Path(d)/'clock.c';exe=Path(d)/'clock';src.write_text(source+'\n'+'\n'.join(tests))
         subprocess.run([os.environ.get('FCC','/tmp/fakecc-pr116-merge/build/fakecc'),str(src),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)
-        sig=SIGNAL_PRE+'\n'.join(body('kernel/sched.c',signature) for signature in ('u32 sched_has_pending_fatal(void) {','u32 sched_should_eintr(void) {','u32 sched_should_eintr_timer(void) {','void sched_check_signals_frame('))+SIGNAL_MAIN
+        sig=SIGNAL_PRE+'\n'.join(body('kernel/sched.c',signature) for signature in ('static void sched_bitset_or(','static void sched_bitset_and(','u32 sched_has_pending_fatal(void) {','u32 sched_should_eintr(void) {','u32 sched_should_eintr_timer(void) {','void sched_check_signals_frame('))+SIGNAL_MAIN
         src.write_text(sig)
         subprocess.run([os.environ.get('FCC','/tmp/fakecc-pr116-merge/build/fakecc'),str(src),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)
