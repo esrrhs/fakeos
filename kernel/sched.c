@@ -1790,21 +1790,21 @@ static void nat_rollback_owner(u32 pid) {
 
 u32 sched_process_image_begin(void) {
     u64 flags=cpu_irq_save();u32 ok=0;struct process_owner *p;
-    runlock_lock();p=process_find(threads[sched_cur()].pid);
-    if(p && p->live==1 && p->resident==1 && !p->exiting && !p->image_busy) {p->image_busy=1;ok=1;}
+    u32 seen=0,live=0,res=0,busy=0,exit=0;
+    u32 pid=threads[sched_cur()].pid;
+    runlock_lock();p=process_find(pid);
+    if(p) {seen=1;live=p->live;res=p->resident;busy=p->image_busy;exit=p->exiting;}
+    if(seen && live==1 && res==1 && !exit && !busy) {p->image_busy=1;ok=1;}
     runlock_unlock();cpu_irq_restore(flags);
-    /* Fork admission refused. Say WHY: the caller (the shell) can only
-     * report a generic failure, and a silently refused fork used to leave
-     * the shell waiting for a child that was never created. */
+    /* Fork/exec admission refused. Say WHY: the caller (the shell) can only
+     * report a generic failure, and a silently refused fork used to leave the
+     * shell waiting for a child that was never created. The reason must come
+     * from THIS transaction: a second read after the lock is dropped can
+     * report an eligibility the refusal never saw -- a peer task exiting in
+     * between turns the real live=2 resident=2 into a self-contradictory 1/1. */
     if(!ok) {
-        u32 live=0,res=0,busy=0,exit=0;
-        u64 f2=cpu_irq_save();runlock_lock();
-        p=process_find(threads[sched_cur()].pid);
-        if(p){live=p->live;res=p->resident;busy=p->image_busy;exit=p->exiting;}
-        runlock_unlock();cpu_irq_restore(f2);
-        kprintf("[PROCESS] fork refused: owner live=%u resident=%u busy=%u exiting=%u pid=%u\n",
-                (u64)live,(u64)res,(u64)busy,(u64)exit,
-                (u64)threads[sched_cur()].pid);
+        kprintf("[PROCESS] fork refused: owner present=%u live=%u resident=%u busy=%u exiting=%u pid=%u\n",
+                (u64)seen,(u64)live,(u64)res,(u64)busy,(u64)exit,(u64)pid);
     }
     return ok;
 }
