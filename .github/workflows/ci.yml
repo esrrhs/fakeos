@@ -12,7 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # One validated revision for BOTH the initial seed and staged v0/runtime.
-      FAKECC_REV: dfb1c7b649480e2acfef2a0a02e8168b5b28ee38
+      # 42439c8f regenerates the v0/ dialect snapshot from the current src/,
+      # so the host compiler (src/) and the compiler bootstrapped inside the
+      # OS (v0/) agree on the same input. With the older dfb1c7b pin the
+      # snapshot still predated the O0 codegen fixes in src/, and the two
+      # compilers produced different bytes for the same source: 41 of 43
+      # modules failed the byte-identical comparison, and the O0 codegen
+      # defect made the fork-limit probe hang on SMP1.
+      FAKECC_REV: 42439c8f60c27872bfa191cfa9dd91c135034fae
       FAKECC_SRC: /tmp/fakecc
       FCC: /usr/local/bin/fakecc
 
@@ -34,10 +41,12 @@ jobs:
       - name: Build and install fakecc toolchain
         run: |
           # Do not float to tip or mix a seed with a different source snapshot.
-          # This revision includes the indexed 32-bit RMW fix (fakecc #116).
-          # d79ac7bb predates that fix. Historical M5 pin warnings are not a
-          # substitute for testing a coherent seed+source pair: this exact pair
-          # passed a clean build and all39-object in-OS rebuild/link/dump/boot.
+          # This revision keeps src/ and the checked-in v0/ dialect snapshot in
+          # step (fakecc #119), so the host compiler and the compiler the OS
+          # bootstraps for itself produce identical bytes for the same source.
+          # Historical M5 pin warnings are not a substitute for testing a
+          # coherent seed+source pair: this exact pair passed a clean build and
+          # an all-43-object in-OS rebuild.
           # CMake is only for obtaining the initial seed; fakeos and the staged
           # native compiler are then built by fakecc, not a host C toolchain.
           git clone https://github.com/esrrhs/fakecc.git "$FAKECC_SRC"

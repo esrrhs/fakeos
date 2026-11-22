@@ -38,7 +38,29 @@ struct native_object {
     u32 m_wait;
     u32 m_waiters;
     u32 m_qhead;
+    /* Monotonic count of enqueue events. m_waiters counts queue SLOTS and
+     * stays occupied by the holder until it unlocks, so it cannot tell a
+     * test "how many contenders are actually blocked on this mutex"; this
+     * counter can, and it only ever moves forward. */
+    u32 m_enqueues;
+    /* Per-waiter wait channel. The contenders must NOT share one channel:
+     * sched_wakeup() wakes EVERY sleeper on the channel, so a shared
+     * channel would wake the losers of a handoff too. They would re-enqueue
+     * at a slot computed from an already-advanced m_qhead/m_waiters and so
+     * lose their FIFO place. One channel per waiter lets the unlock wake
+     * exactly the contender it handed the mutex to.
+     *
+     * The queue stores SLOT INDICES, not owner keys: a waiter parks on
+     * m_chan[slot], and the slot is released when the waiter leaves. A
+     * slot's channel address therefore never moves, which is what makes
+     * the wakeup target exact. */
+    u64 m_chan[MQ_CAP];
     u64 m_queue[MQ_CAP];
+    /* Owner key currently parked on m_chan[slot]; 0 means the slot is free.
+     * A slot is allocated on enqueue and released on dequeue, so the channel
+     * a waiter parks on never moves and a wakeup always targets exactly the
+     * intended contender. */
+    u64 m_tkey[MQ_CAP];
 };
 struct native_handle {
     u64 generation;
@@ -346,6 +368,7 @@ s32 native_channel_recv_intr(u64 handle, u64 *value, u32 block) {
 s32 native_mutex_create(u64 *out) {
     u64 flags;
     u32 oi;
+    u32 n;
     s32 rc = NC_FULL;
     if (out == 0) return NC_INVAL;
     *out = 0;
@@ -358,7 +381,14 @@ s32 native_mutex_create(u64 *out) {
         o->readers = 0; o->writers = 0; o->pins = 0;
         o->head = 0; o->count = 0; o->recv_wait = 0; o->send_wait = 0;
         o->m_state = M_FREE; o->m_recover = 0; o->m_owner = 0;
-        o->m_wait = 0; o->m_waiters = 0; o->m_qhead = 0;
+        o->m_wait = 0; o->m_waiters = 0; o->m_qhead = 0; o->m_enqueues = 0;
+        /* Each wait slot owns one channel. The address of the slot is the
+         * channel: it is unique per waiter and never moves, so a handoff
+         * wakes exactly the contender it picked. */
+        for (n = 0; n < MQ_CAP; n++) {
+            o->m_chan[n] = (u64)&o->m_chan[n];
+            o->m_tkey[n] = 0;
+        }
         rc = nc_alloc_handle(oi, NC_MLOCK | NC_MUNLOCK | NC_MWAIT, out);
         if (rc != 0) nc_reclaim(o);
         break;
@@ -368,18 +398,51 @@ s32 native_mutex_create(u64 *out) {
     return rc;
 }
 
-/* Remove one waiter's queue entry, preserving FIFO order of the rest. */
+/* Remove one waiter's queue entry, preserving FIFO order of the rest.
+ * The queue holds SLOT INDICES; the slot owns the wait channel, so removing
+ * an entry only has to release that slot. The remaining entries keep their
+ * slots (and therefore their channels) untouched, which is what makes the
+ * handoff wakeup exact. */
 static void nm_queue_remove(struct native_object *o, u64 key) {
     u32 i;
     u32 kept = 0;
     u32 n = o->m_waiters;
     for (i = 0; i < n; i++) {
-        u64 v = o->m_queue[(o->m_qhead + i) % MQ_CAP];
-        if (v == key) continue;
-        o->m_queue[(o->m_qhead + kept) % MQ_CAP] = v;
+        u32 from = (o->m_qhead + i) % MQ_CAP;
+        u32 slot = (u32)o->m_queue[from];
+        u64 v = o->m_tkey[slot];
+        if (v == key) {
+            o->m_tkey[slot] = 0;          /* release the slot */
+            continue;
+        }
+        o->m_queue[(o->m_qhead + kept) % MQ_CAP] = (u64)slot;
         kept = kept + 1;
     }
     o->m_waiters = kept;
+}
+
+/* Wake every waiter of the mutex. Used where the mutex stops being held
+ * without a handoff (poisoned, owner died, the holder was killed): all
+ * contenders must reconsider, and each one owns its own channel. */
+static void nm_wake_all(struct native_object *o) {
+    u32 i;
+    u32 n = o->m_waiters;
+    for (i = 0; i < n; i++) {
+        u32 slot = (u32)o->m_queue[(o->m_qhead + i) % MQ_CAP];
+        sched_wakeup(o->m_chan[slot]);
+    }
+}
+
+/* Allocate a free wait slot for `key`, or MQ_CAP when the table is full. */
+static u32 nm_slot_alloc(struct native_object *o, u64 key) {
+    u32 i;
+    for (i = 0; i < MQ_CAP; i++) {
+        if (o->m_tkey[i] == 0) {
+            o->m_tkey[i] = key;
+            return i;
+        }
+    }
+    return MQ_CAP;
 }
 
 s32 native_mutex_lock_intr(u64 handle, u32 block) {
@@ -428,10 +491,18 @@ s32 native_mutex_lock_intr(u64 handle, u32 block) {
         if (!block) { rc = NC_AGAIN; break; }
         if (o->m_waiters >= MQ_CAP) { rc = NC_AGAIN; break; }
         {
-            u64 wchan = (u64)&o->m_wait;
+            /* Take a wait slot: it owns the channel this waiter parks on,
+             * and it is released when the waiter leaves the queue. The slot
+             * is what the handoff later wakes, so the wakeup targets exactly
+             * the contender that was handed the mutex. */
+            u32 slot = nm_slot_alloc(o, me);
+            u64 wchan;
+            if (slot >= MQ_CAP) { rc = NC_AGAIN; break; }
+            wchan = o->m_chan[slot];
             sched_park_prepare(wchan);
-            o->m_queue[(o->m_qhead + o->m_waiters) % MQ_CAP] = me;
+            o->m_queue[(o->m_qhead + o->m_waiters) % MQ_CAP] = (u64)slot;
             o->m_waiters = o->m_waiters + 1;
+            o->m_enqueues = o->m_enqueues + 1;
             if (sched_park_commit_unlock_spin(wchan, &nc_lock, 0)
                 == PARK_INTR_RESULT) {
                 spin_lock(&nc_lock);
@@ -441,7 +512,7 @@ s32 native_mutex_lock_intr(u64 handle, u32 block) {
                     o->m_owner = 0;
                     o->m_state = M_FREE;
                     o->m_recover = 0;
-                    sched_wakeup((u64)&o->m_wait);
+                    nm_wake_all(o);
                     rc = NC_INTR;
                     break;
                 }
@@ -489,15 +560,22 @@ s32 native_mutex_unlock(u64 handle) {
         o->m_state = M_NOTREC;
         o->m_owner = 0;
         o->m_recover = 0;
-        sched_wakeup((u64)&o->m_wait);
+        nm_wake_all(o);
         rc = 0;
     } else if (o->m_waiters) {
         /* Direct FIFO handoff at unlock time: no newcomer barging. */
-        u64 next = o->m_queue[o->m_qhead];
+        u32 slot = (u32)o->m_queue[o->m_qhead];
+        u64 next = o->m_tkey[slot];
         o->m_qhead = (o->m_qhead + 1) % MQ_CAP;
         o->m_waiters = o->m_waiters - 1;
         o->m_owner = next;                 /* state stays M_LOCKED */
-        sched_wakeup((u64)&o->m_wait);
+        /* The handed-to contender does not need its slot any more: it owns
+         * the mutex and will not park again until it unlocks. Release the
+         * slot so it can be handed to the next waiter later, and wake it on
+         * the channel it parked on. The losers of the handoff stay parked on
+         * their own channels and keep their FIFO order. */
+        o->m_tkey[slot] = 0;
+        sched_wakeup(o->m_chan[slot]);
         rc = 0;
     } else {
         o->m_owner = 0;
@@ -561,6 +639,7 @@ s32 native_mutex_stat(u64 handle, u32 *out) {
     out[0] = o->m_state;
     out[1] = o->m_waiters;
     out[2] = (u32)(o->m_owner >> 32);
+    out[3] = o->m_enqueues;     /* total enqueue events; monotonic */
     rc = 0;
  nm_done:
     spin_unlock(&nc_lock);
@@ -582,7 +661,7 @@ void native_mutex_owner_died_key(u64 key) {
         if (o->kind == NC_MUTEX && o->m_state == M_LOCKED && o->m_owner == key) {
             o->m_state = M_DIED;
             o->m_owner = 0;
-            sched_wakeup((u64)&o->m_wait);
+            nm_wake_all(o);
             nc_reclaim(o);
         }
     }
@@ -736,25 +815,36 @@ static volatile u32 nm_order_n;
 static u32 nm_stat[3];
 static u64 nm_wchan[3];
 
-/* Contenders that have announced they are ABOUT TO block on the mutex.
- * m_waiters counts queue SLOTS, and a slot stays occupied by the holder
- * until it unlocks (the direct handoff pops the head at unlock time), so
- * m_waiters is NOT "number of blocked contenders": after W0 wins, the
- * queue still holds its slot. Using m_waiters as the "contender N is
- * queued" signal therefore fires one step early and lets a later
- * contender enqueue before an earlier one (observed on SMP2: the FIFO
- * order assertion saw 0,2,1). Each contender announces itself here
- * instead, which is an exact per-contender fact. */
-static volatile u32 nm_announced;
+/* Total enqueue events observed on the mutex under test. Read through
+ * native_mutex_stat() (out[3]), which returns the object's own monotonic
+ * counter. The queue LENGTH cannot serve this purpose: m_waiters counts
+ * queue SLOTS, and a slot stays occupied by the holder until it unlocks
+ * (the direct handoff pops the head at unlock time), so m_waiters is not
+ * "number of blocked contenders" — after W0 wins, the queue still holds
+ * its slot, and using m_waiters as the "contender N is queued" signal
+ * fires one step early and lets a later contender enqueue first. */
 
-/* Wait until contender `id` has announced it is about to block. */
-static void nm_wait_announced(u32 id, u32 timeout_ticks) {
+/* Read the mutex's monotonic enqueue counter. */
+static u32 nm_enqueue_count(void) {
+    u32 st[4];
+    if (native_mutex_stat(nm_handle, st) != 0) {
+        return 0;
+    }
+    return st[3];
+}
+
+/* Wait until the mutex has seen `n` enqueue events in total. This is the
+ * exact "n contenders are actually blocked on the mutex" fact: the counter
+ * moves only inside the enqueue path, so it cannot fire early the way a
+ * pre-block announcement can (an announced contender may still be between
+ * the announcement and the enqueue, letting a later contender overtake
+ * it). */
+static void nm_wait_enqueues(u32 n, u32 timeout_ticks) {
     u64 until = sched_clock_ticks() + timeout_ticks;
-    while (((nm_announced >> id) & 1u) == 0 && sched_clock_ticks() < until) {
+    while (nm_enqueue_count() < n && sched_clock_ticks() < until) {
         sched_yield();
     }
 }
-
 /* Sleep until nm_stage == want under the park-admission contract: the stage
  * read and the park registration are ONE nc_test_lock transaction, and the
  * controller publishes the stage BEFORE waking the channel, so every
@@ -793,15 +883,6 @@ static void nm_contender(u64 arg) {
     u32 lock_stage = id == 0 ? 1u : (id == 1 ? 3u : 4u);
     s32 rc;
     nm_wait_stage(id, lock_stage);
-    /* Announce BEFORE blocking: from here on this contender is committed to
-     * enqueueing on the mutex, so the controller may arm the next one. */
-    {
-        u64 f = cpu_irq_save();
-        spin_lock(&nc_test_lock);
-        nm_announced = nm_announced | (1u << id);
-        spin_unlock(&nc_test_lock);
-        cpu_irq_restore(f);
-    }
     rc = native_mutex_lock_intr(nm_handle, 1);
     nm_rc[id] = (u32)rc;
     {
@@ -1008,7 +1089,6 @@ void native_object_selftest(void) {
     nm_handle = tx;
     ok &= nc_expect((native_mutex_lock_intr(tx, 1) == 0), 82);
     nm_stage = 0; nm_order_n = 0;
-    nm_announced = 0;
     nm_rc[0] = 0xFFFFFFFFu; nm_rc[1] = 0xFFFFFFFFu; nm_rc[2] = 0xFFFFFFFFu;
     flags = cpu_irq_save();
     created = 0;
@@ -1023,16 +1103,16 @@ void native_object_selftest(void) {
      * yet loses nothing. */
     nm_stage = 1;
     sched_wakeup((u64)&nm_wchan[0]);
-    nm_wait_announced(0, 800);
-    ok &= nc_expect(((nm_announced >> 0) & 1u) != 0, 84);
+    nm_wait_enqueues(1, 800);
+    ok &= nc_expect((nm_enqueue_count() >= 1), 84);
     nm_stage = 3;
     sched_wakeup((u64)&nm_wchan[1]);
-    nm_wait_announced(1, 800);
-    ok &= nc_expect(((nm_announced >> 1) & 1u) != 0, 85);
+    nm_wait_enqueues(2, 800);
+    ok &= nc_expect((nm_enqueue_count() >= 2), 85);
     nm_stage = 4;
     sched_wakeup((u64)&nm_wchan[2]);
-    nm_wait_announced(2, 800);
-    ok &= nc_expect(((nm_announced >> 2) & 1u) != 0, 86);
+    nm_wait_enqueues(3, 800);
+    ok &= nc_expect((nm_enqueue_count() >= 3), 86);
     ok &= nc_expect((native_mutex_unlock(tx) == 0), 87);       /* handoff -> W0 */
     ok &= nc_expect((native_mutex_lock_intr(tx, 0) == NC_AGAIN), 88);
     ok &= nc_expect((native_mutex_lock_intr(tx, 0) == NC_AGAIN), 89);

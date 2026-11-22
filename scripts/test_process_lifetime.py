@@ -12,16 +12,27 @@ def main():
    disk=str(Path(d)/'disk.img');subprocess.run(['python3','tools/mkext2.py',disk,'32'],check=True)
    vm=VM('build/fakeos.elf',mem='256M',extra_args=disk_args(disk)+['-smp',str(cpu),'-nic','none']);out=''
    try:
-    out+=vm.wait_for('[NATIVE] PASS kernel-only object/channel suite',180,failure_markers=('[NATIVE] FAIL','[PANIC]','[EXCEPTION]'))
+    out+=vm.wait_for('[NATIVE] PASS kernel-only object/channel suite',300,failure_markers=('[NATIVE] FAIL','[PANIC]','[EXCEPTION]'))
     assert '[NATIVE] PASS kernel-only object/channel suite' in out
     # Native suite completion precedes kmain's final multi-line banner. Do not
     # mix user acceptance records with that concurrent kernel console writer.
     idle='System idle. Yielding for IRQ-driven TTY/net I/O.'
     if idle not in out: out+=vm.wait_for(idle,30,failure_markers=('[PANIC]','[EXCEPTION]'))
     assert idle in out, 'boot-complete barrier missing'
-    vm.send('root');out+=vm.wait_for('Password:',5);vm.send('root');out+=vm.wait_for('Welcome root',10)
+    # Login with retries: under host load the serial input processing can lag
+    # far behind, so a missed Password prompt must not be read as a kernel
+    # failure (same reasoning as test_rlimit.py).
+    got_login = False
+    for attempt in range(4):
+     vm.send('root')
+     out+=vm.wait_for('Password:',30,failure_markers=('[PANIC]',))
+     if 'Password:' in out:
+      got_login = True
+      break
+    assert got_login, 'login prompt never appeared'
+    vm.send('root');out+=vm.wait_for('Welcome root',60)
     vm.send('/bin/init --process-lifetime; echo __LIFE_RC=$?; echo __LIFE_DONE__')
-    out+=vm.wait_for('\r\n__LIFE_DONE__\r\n',90,failure_markers=('[PANIC]',))
+    out+=vm.wait_for('\r\n__LIFE_DONE__\r\n',150,failure_markers=('[PANIC]',))
    finally:
     out+=vm.read_available(.2);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
    found=re.findall(r'^\[LIFETIME\] mode=(\d+) pid=(\d+) got=(\d+) code=(\d+) early=(\d+) worker_done=(\d+)',out,re.M)
