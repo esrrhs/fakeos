@@ -233,10 +233,10 @@ The test runs one QEMU at a time with `-nic none` and a fresh disposable disk.
 Kernel callers must close owned handles before normal exit: no implicit kernel
 thread-death cleanup is provided for CHANNEL handles. The robust-mutex exit
 walk (owner death -> OWNER_DIED) IS wired for user tasks (proc_exit_task) and
-kernel threads (kthread_exit), outside scheduler spinlocks.
-
-Kernel callers must close owned handles before normal exit: no implicit kernel
-thread-death cleanup is provided. User exit cannot use this contract as-is.
+kernel threads (kthread_exit), outside scheduler spinlocks. The user-side
+asymmetry is deliberate and implemented: the process-relative capability table
+is closed by the final task exit (kernel/natcap.c), which kernel threads do not
+have — they own no table.
 
 ## 8. Migration and acceptance gates
 
@@ -362,5 +362,31 @@ single attached/resident task. FD/credential/cwd/signal adapters still live in T
 A further [fatal-cancellation-before-park admission gap](evidence/native-process-owner-20261117/KNOWN-WAIT-ADMISSION-GAP.md)
 was found by source review, not a deterministic executed repro. Waking an already
 sleeping peer is not proof against a signal arriving just before sleep publication.
-This and the VM/resource-namespace blockers remain before native user capability
+That gap is since closed and gated; see [wait-admission gate status](#wait-admission-gate-status--2026-11-22).
+The VM/resource-namespace blockers remain before further native user capability
 exposure, even if the currently covered lifecycle acceptance passes.
+
+## Wait-admission gate status — 2026-11-22
+
+The 2026-11-17 blocker above was closed by the interruptible park-admission
+contract (`docs/evidence/native-wait-cancel-20261118/`): `sched_park_prepare`
+registers the intent, and `sched_park_commit` decides park-versus-refuse in the
+SAME run_lock transaction that publishes `TCB_SLEEPING`, so a fatal or caught
+nonrestartable signal that arrived while the target was still on-CPU refuses the
+park instead of stranding it. Call sites carrying that contract: futex
+(kernel/sysproc.c), wait4 (`sched_sleep_unlock_spin_intr`, kernel/proc.c),
+select/poll (kernel/sysfile.c), epoll (kernel/epoll.c), and the native channel
+and mutex waits (kernel/native.c). Kernel-internal sleeps — native core, net
+worker, kmutex/ksem/waitqueue, probe rendezvous gate — stay uninterruptible by
+decision, because their cleanup obligations differ from a user syscall rewind.
+
+What is NOT claimed: the proof is the 18-case boot suite (9 injection modes x 2
+rounds, `rescues` must be zero) at the exact post-predicate/pre-publication
+boundary, on SMP1/2/4. It is an injected barrier over enumerated interleavings,
+not coverage of every possible one.
+
+One gap this closes is procedural rather than semantic: that suite had been run
+by hand since 2026-11-18 but was never listed in `make test`, so no CI run had
+ever executed it. It is now stage 8 of the gate, with the same 300-second
+boot-complete barrier as its siblings and a default evidence directory, so a
+healthy-but-slow guest is not read as a failure.

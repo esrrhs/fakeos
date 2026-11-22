@@ -1,5 +1,11 @@
 # Interruptible park admission remains a native-ABI blocker
 
+**STATUS 2026-11-22: closed and gated.** The recommended slice below was
+implemented and accepted (`docs/evidence/native-wait-cancel-20261118/`), and the
+18-case suite that proves it now runs inside `make test` rather than by hand.
+The interleaving described here is retained as the reason the contract exists.
+Line numbers and the "not started in this gate" note below are as of 2026-11-17.
+
 Source review during the immutable full gate, 2026-11-17 23:50 Asia/Shanghai.
 This is a **source-level interleaving**, NOT a claimed executed UAF/deadlock repro.
 
