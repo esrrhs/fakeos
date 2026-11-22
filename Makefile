@@ -581,6 +581,7 @@ $(BUILD_DIR)/kmain.o: kernel/kmain.c
 
 # Run automated test
 test: build
+	@FCC='$(FCC)' PYTHONUNBUFFERED=1 python3 scripts/test_host_units.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_objects.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_caps.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_mutex.py
