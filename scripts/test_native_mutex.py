@@ -39,7 +39,7 @@ def main():
     vm.send('/bin/init --native-mutex; echo __NM_RC=$?; echo __NM_DONE__')
     out+=vm.wait_for('\r\n__NM_DONE__\r\n',300,failure_markers=('[PANIC]',))
    finally:
-    out+=vm.read_available(.2);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
+    out+=vm.read_available(2.0);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
    steps=re.findall(r'^\[NATIVE-MUTEX\] (step\d+) PASS (.+)$',out,re.M)
    assert len(steps)==8, f'SMP{cpu}: mutex steps incomplete ({len(steps)}/8)'
    rows.append({'cpus':cpu,'steps':[s[0] for s in steps],

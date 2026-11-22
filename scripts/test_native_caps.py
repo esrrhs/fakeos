@@ -37,7 +37,7 @@ def main():
     vm.send('/bin/init --native-caps; echo __CAPS_RC=$?; echo __CAPS_DONE__')
     out+=vm.wait_for('\r\n__CAPS_DONE__\r\n',150,failure_markers=('[PANIC]',))
    finally:
-    out+=vm.read_available(.2);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
+    out+=vm.read_available(2.0);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
    steps=re.findall(r'^\[NATIVE-CAPS\] (step\d+) PASS (.+)$',out,re.M)
    assert len(steps)==9, f'SMP{cpu}: capability steps incomplete ({len(steps)}/9)'
    rows.append({'cpus':cpu,'steps':[s[0] for s in steps],

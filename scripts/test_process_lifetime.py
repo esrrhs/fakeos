@@ -38,7 +38,7 @@ def main():
     vm.send('/bin/init --process-lifetime; echo __LIFE_RC=$?; echo __LIFE_DONE__')
     out+=vm.wait_for('\r\n__LIFE_DONE__\r\n',150,failure_markers=('[PANIC]',))
    finally:
-    out+=vm.read_available(.2);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
+    out+=vm.read_available(2.0);vm.close();(e/f'smp{cpu}.serial.log').write_text(out)
    found=re.findall(r'^\[LIFETIME\] mode=(\d+) pid=(\d+) got=(\d+) code=(\d+) early=(\d+) worker_done=(\d+)',out,re.M)
    assert len(found)==2, f'SMP{cpu}: probe incomplete'
    rows.append({'cpus':cpu,'observed_modes':found,'desired_pass':'[LIFETIME] PASS process/task semantics' in out})

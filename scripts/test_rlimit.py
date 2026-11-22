@@ -26,7 +26,7 @@ def run_cpu(cpus, evidence_dir):
    vm.send('/bin/init --rlimit; echo __RL_RC=$?; echo __RL_DONE__')
    out+=vm.wait_for('__RL_DONE__',150,failure_markers=('[PANIC]',))
   finally:
-   out+=vm.read_available(.2);vm.close();(evidence_dir/f'smp{cpus}.serial.log').write_text(out)
+   out+=vm.read_available(2.0);vm.close();(evidence_dir/f'smp{cpus}.serial.log').write_text(out)
   assert '__RL_RC=0' in out, f'rlimit probe failed on SMP{cpus}'
   assert '[RLIMIT] PASS deterministic EAGAIN limit + slot recovery' in out
   assert '[FAIL]' not in out

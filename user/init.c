@@ -3611,6 +3611,12 @@ static int vdso_probe(void) {
     struct { long s; long ns; } req, rem, tp;
     unsigned int i;
 
+    /* Announce entry before touching the clock page. The page lives at a
+     * fixed VA and is only mapped when the kernel could allocate it, so a
+     * fault here would kill the probe silently and the harness would see
+     * "no output at all". This line tells the two cases apart. */
+    puts("[VD] probe entered");
+
     c = (volatile unsigned int *)VD_VA;
     if (c[0] != 0x646F7376u || c[1] != 1u) {
         puts("[VD] FAIL magic/version");

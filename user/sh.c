@@ -5943,6 +5943,15 @@ static long run_pipeline(char **tokens, long rc_in) {
             int saved_in;
             int saved_out;
             child = u_fork();
+            if (child < 0) {
+                /* The fork was refused (process limit, no address space, no
+                 * slot). Report it: without this the code fell through with
+                 * child == -1, called job_set_pgrp(-1, -1) and then
+                 * u_wait4(-1, ...), which waits for ANY process to exit —
+                 * the shell then hung with no output at all. */
+                puts("sh: fork failed");
+                return 1;
+            }
             if (child == 0) {
                 job_set_pgrp(0, 0); /* new pgrp = self */
                 if (push_redirects(in_path, out_path, append, &saved_in,

@@ -31,7 +31,7 @@ def run_cpu(cpus, evidence_dir):
    vm.send('/bin/init --vdso; echo __VD_RC=$?; echo __VD_DONE__')
    out+=vm.wait_for('__VD_DONE__',150,failure_markers=('[PANIC]',))
   finally:
-   out+=vm.read_available(.2);vm.close();(evidence_dir/f'smp{cpus}.serial.log').write_text(out)
+   out+=vm.read_available(2.0);vm.close();(evidence_dir/f'smp{cpus}.serial.log').write_text(out)
   assert '__VD_RC=0' in out, f'vdso probe failed on SMP{cpus}'
   assert '[VD] PASS vDSO clock: monotonic, matches syscall, sleep precise' in out
   assert '[FAIL]' not in out

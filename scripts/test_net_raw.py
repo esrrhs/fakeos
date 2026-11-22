@@ -38,7 +38,7 @@ def main():
    vm.send('/bin/init --net-raw; echo __RAW_RC=$?; echo __RAW_DONE__')
    out+=vm.wait_for('__RAW_DONE__',150,failure_markers=('[PANIC]',))
   finally:
-   out+=vm.read_available(.2);vm.close();(e/'smp2.serial.log').write_text(out)
+   out+=vm.read_available(2.0);vm.close();(e/'smp2.serial.log').write_text(out)
   assert '__RAW_RC=0' in out, f'net-raw probe failed: see {e}'
   assert '[NETRAW] zero-copy turnaround: TX slot == RX slot, payload intact' in out
   assert '[NETRAW] PASS zero-copy rings + protocol dual-path' in out

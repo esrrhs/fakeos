@@ -1792,7 +1792,21 @@ u32 sched_process_image_begin(void) {
     u64 flags=cpu_irq_save();u32 ok=0;struct process_owner *p;
     runlock_lock();p=process_find(threads[sched_cur()].pid);
     if(p && p->live==1 && p->resident==1 && !p->exiting && !p->image_busy) {p->image_busy=1;ok=1;}
-    runlock_unlock();cpu_irq_restore(flags);return ok;
+    runlock_unlock();cpu_irq_restore(flags);
+    /* Fork admission refused. Say WHY: the caller (the shell) can only
+     * report a generic failure, and a silently refused fork used to leave
+     * the shell waiting for a child that was never created. */
+    if(!ok) {
+        u32 live=0,res=0,busy=0,exit=0;
+        u64 f2=cpu_irq_save();runlock_lock();
+        p=process_find(threads[sched_cur()].pid);
+        if(p){live=p->live;res=p->resident;busy=p->image_busy;exit=p->exiting;}
+        runlock_unlock();cpu_irq_restore(f2);
+        kprintf("[PROCESS] fork refused: owner live=%u resident=%u busy=%u exiting=%u pid=%u\n",
+                (u64)live,(u64)res,(u64)busy,(u64)exit,
+                (u64)threads[sched_cur()].pid);
+    }
+    return ok;
 }
 void sched_process_image_end(void) {
     u64 flags=cpu_irq_save();struct process_owner *p;

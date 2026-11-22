@@ -32,7 +32,7 @@ def main():
                 output = vm.wait_for("[NATIVE] PASS kernel-only object/channel suite", 180,
                                      failure_markers=("[NATIVE] FAIL", "[PANIC]", "[EXCEPTION]"))
             finally:
-                output += vm.read_available(0.2)
+                output += vm.read_available(2.0)
                 vm.close()
                 (evidence / f"run{run}-smp{cpus}.serial.log").write_text(output)
             expected = "[NATIVE] PASS kernel-only object/channel suite"
