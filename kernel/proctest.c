@@ -105,11 +105,14 @@ extern void sched_wakeup(u64 chan);
  * and explicitly yields after every critical section. */
 static void lock_worker(u64 id) {
     u64 i;
+    extern void kprintf(const char *fmt, ...);
+    kprintf("[TLW] worker enter %u\n", (u64)id);
     for (i = 0; i < WORK_EACH; i++) {
         spin_lock(&g_lock);
         g_shared = g_shared + 1;
         spin_unlock(&g_lock);
         sched_yield();
+        if ((i & 31) == 0) kprintf("[TLW] w%u i=%u\n", (u64)id, (u64)i);
     }
     spin_lock(&g_lock);
     g_completed = g_completed + 1;
@@ -145,9 +148,11 @@ static void spinner(u64 id) {
 static int test_lock_workers(void) {
     u32 ids[LOCK_WORKERS];
     u64 i;
+    extern void kprintf(const char *fmt, ...);
     g_lock = 0;
     g_shared = 0;
     g_completed = 0;
+    kprintf("[TLW] start\n");
 
     for (i = 0; i < LOCK_WORKERS; i++) {
         ids[i] = kthread_create((u64)(&lock_worker), i);
@@ -156,6 +161,7 @@ static int test_lock_workers(void) {
             return 0;
         }
     }
+    kprintf("[TLW] spawned %u\n", (u64)LOCK_WORKERS);
 
     /* Cooperative workers finish almost instantly: slot 0 is idle-only and
      * each yield rotates straight to the next worker. Spin here (still
@@ -1235,7 +1241,9 @@ static int test_sock_kmutex_blocking(void) {
 
 void sched_selftest(void) {
     kprintf("\n[SCHED] Kernel Threads & CFS rbtree + task_group SE Hierarchical Fair Scheduler Online:\n");
-    kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n", (u64)32);
+    { extern u32 sched_max_threads(void);
+      kprintf("      Threads      : %u TCB slots, 16 KiB buddy-backed stacks\n",
+              (u64)sched_max_threads()); }
     kprintf("      Switch       : callee-saved RSP context, per-CPU CFS + nested group SE rbtree shares\n");
     kprintf("      Spinlock     : xchg TAS, IRQ save/restore primitives\n");
     kprintf("      Sleep locks  : kmutex + ksem + wait_queue_head (pipe/tty/sock)\n");

@@ -562,7 +562,7 @@ def run_checks(disk):
         "[kbuild] identical kernel/kmain.o",
         # every kernel module recompiled by the in-OS compiler matches the
         # host reference object byte-for-byte
-        re.compile(r"\[kbuild\] all 40 kernel objects byte-identical"),
+        re.compile(r"\[kbuild\] all 43 kernel objects byte-identical"),
         # ldfake linked the multiboot kernel image
         "[ldfake] wrote /mnt/fakeos-new",
         "[kbuild] kernel image linked: /mnt/fakeos-new",
@@ -633,10 +633,10 @@ def run_checks(disk):
         ("ls /bin lists ldfake", "\nldfake\n" in norm),
         ("ls /bin lists dumpbin", "\ndumpbin\n" in norm),
         # every module accounted for, and all of them identical
-        ("all 40 modules accounted for",
-         identical + mismatches == 40),
-        (f"all 40 modules byte-identical (saw {identical} identical, "
-         f"{mismatches} mismatched)", identical == 40 and mismatches == 0),
+        ("all 43 modules accounted for",
+         identical + mismatches == 43),
+        (f"all 43 modules byte-identical (saw {identical} identical, "
+         f"{mismatches} mismatched)", identical == 43 and mismatches == 0),
         ("no kbuild FAIL line", "[kbuild] FAIL" not in stdout),
         ("no ldfake error line", "ldfake: " not in stdout
                                  or "[ldfake] wrote" in stdout),

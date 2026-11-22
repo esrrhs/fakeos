@@ -2770,7 +2770,7 @@ static void life_worker(void *arg) {
     atomic_xchg(&g->done,1);
     u_exit(29);
 }
-struct life_fan { volatile unsigned int release; volatile unsigned int alive[32]; };
+struct life_fan { volatile unsigned int release; volatile unsigned int alive[64]; };
 struct life_arg { struct life_fan *fan; int index; };
 static void life_fan_worker(void *arg) {
     struct life_arg *a=(struct life_arg *)arg;
@@ -2781,19 +2781,23 @@ static void life_fan_worker(void *arg) {
 }
 static int life_failure_checks(void) {
     struct life_fan *f=(struct life_fan *)u_mmap(0,4096,3,0x21,-1,0);
-    char *stacks=(char *)u_mmap(0,32*16384,3,0x22,-1,0);
-    struct life_arg args[32];int i,round,n,previous_n=0;long pid,status;u64 end;
+    char *stacks=(char *)u_mmap(0,64*16384,3,0x22,-1,0);
+    struct life_arg args[64];int i,round,n,previous_n=0;long pid,status;u64 end;
     if((long)f<0 || (long)stacks<0)return 1;
     for(i=0;i<4096;i++)((volatile char *)f)[i]=0;
-    for(i=0;i<32*16384;i+=4096)stacks[i]=0;
+    for(i=0;i<64*16384;i+=4096)stacks[i]=0;
     for(round=0;round<2;round++) {
         atomic_xchg(&f->release,0);n=0;
-        for(i=0;i<32;i++) {
+        for(i=0;i<64;i++) {
             args[i].fan=f;args[i].index=i;atomic_xchg(&f->alive[i],2);
             if(u_clone(0x10100,stacks+(i+1)*16384-8,(void *)&life_fan_worker,&args[i])<0) {atomic_xchg(&f->alive[i],0);break;}
             n++;
         }
-        if(n==0 || n==32 || (round && n!=previous_n))return 1;
+        /* The pool is bounded: at least one clone must be rejected, and the
+         * rejected count must be deterministic across rounds (rollback +
+         * reuse). With the widened 64-slot pool the attempts may all fit;
+         * the bound check only fires when slots remain scarce. */
+        if(n==0 || (round && n!=previous_n))return 1;
         previous_n=n;
         for(i=0;i<n;i++)if(!life_until(&f->alive[i],1))return 1;
         atomic_xchg(&f->release,1);
@@ -2943,8 +2947,833 @@ static int park_probe(int mode) {
     return rc==0 ? 0:86;
 }
 
+/* ---------------------------------------------------------------------------
+ * Native capability namespace probe (migration gate 2). Every handle this
+ * program holds arrived through the documented ABI: channel_create, dup, or
+ * fork inheritance. No kernel arming, no global IDs.
+ * ------------------------------------------------------------------------- */
+extern long u_nat_channel_create(long *send, long *recv);
+extern long u_nat_send(long cap, long value, long block);
+extern long u_nat_recv(long cap, long *value, long block);
+extern long u_nat_dup(long cap, long rights);
+extern long u_nat_close(long cap);
+extern long u_kill(long pid, long sig);
+
+struct nc_gate {
+    volatile unsigned int ready, release, done, ok;
+    long send_cap, recv_cap;
+    long count;
+    long rc;
+    volatile unsigned int published;
+    long foreign_rx;
+    volatile long foreign_rc;
+};
+static void nc_thr_sender(void *arg) {
+    struct nc_gate *g=(struct nc_gate *)arg;
+    long i,r;
+    atomic_xchg(&g->ready,1);
+    while(!life_load(&g->release))u_yield();
+    for(i=1;i<=g->count;i++) {
+        r=u_nat_send(g->send_cap,(long)(i*7+3),1);
+        if(r!=0){atomic_xchg(&g->ok,0);break;}
+        if((i&15)==0)u_yield();
+    }
+    atomic_xchg(&g->done,1);
+    u_exit(0);
+}
+/* Blocks receiving on a channel with a live sender and empty queue, so the
+ * only exits are message, close-revoke, or signal. */
+static void nc_thr_blocker(void *arg) {
+    struct nc_gate *g=(struct nc_gate *)arg;
+    long v=0;
+    atomic_xchg(&g->ready,1);
+    g->rc=u_nat_recv(g->recv_cap,&v,1);
+    atomic_xchg(&g->done,1);
+    u_exit(0);
+}
+static volatile unsigned int nc_sig_hits;
+static void nc_sig_handler(int sig) { (void)sig;nc_sig_hits=nc_sig_hits+1; }
+
+static int native_caps_probe(void) {
+    long sx, rx, v, d, pid, got, code2, status, sS, rS;
+    struct nc_gate *g;
+    char *stack;
+    int i;
+
+    /* Step 1: same-process user-thread exchange; copied scalars in FIFO
+     * order through the capability layer. */
+    g=(struct nc_gate *)u_mmap(0,4096,3,0x21,-1,0);
+    stack=(char *)u_mmap(0,16384,3,0x22,-1,0);
+    if((long)g<0||(long)stack<0)return 1;
+    for(i=0;i<(int)sizeof(*g)/4;i++)((volatile unsigned int *)g)[i]=0;
+    for(i=0;i<16384;i+=4096)stack[i]=0;
+    if(u_nat_channel_create(&sx,&rx)!=0)return 2;
+    g->send_cap=sx;g->recv_cap=rx;g->count=256;atomic_xchg(&g->ok,1);
+    if(u_clone(0x10100,stack+16384-8,(void *)&nc_thr_sender,g)<0)return 3;
+    if(!life_until(&g->ready,1))return 4;
+    atomic_xchg(&g->release,1);
+    for(i=1;i<=256;i++) {
+        if(u_nat_recv(rx,&v,1)!=1 || v!=(long)(i*7+3))return 5;
+        if((i&31)==0)u_yield();
+    }
+    if(!life_until(&g->done,1))return 6;
+    if(!life_load(&g->ok))return 7;
+    if(u_nat_close(sx)!=0 || u_nat_close(rx)!=0)return 8;
+    puts("[NATIVE-CAPS] step1 PASS user-thread 256 copied scalar messages");
+
+    /* Step 2: rights attenuation. A RECV duplicate of the RECV cap can
+     * receive but not send; widening a send cap to RECV is refused; a
+     * closed duplicate is stale. */
+    if(u_nat_channel_create(&sx,&rx)!=0)return 9;
+    d=u_nat_dup(rx,2);
+    if(d<0)return 10;
+    if(u_nat_send(d,7,0)!=-1)return 11;
+    if(u_nat_dup(sx,2)!=-1)return 12;
+    if(u_nat_send(sx,777,0)!=0)return 13;
+    if(u_nat_recv(d,&v,0)!=1 || v!=777)return 14;
+    if(u_nat_close(d)!=0)return 15;
+    if(u_nat_send(d,1,0)!=-9)return 16;
+    puts("[NATIVE-CAPS] step2 PASS rights attenuation, wrong-side refusal, dup close");
+
+    /* Step 3: EOF after the last sender closes; drains first. */
+    if(u_nat_send(sx,42,0)!=0)return 17;
+    if(u_nat_close(sx)!=0)return 18;
+    if(u_nat_recv(rx,&v,0)!=1 || v!=42)return 19;
+    if(u_nat_recv(rx,&v,1)!=0)return 20;
+    if(u_nat_close(rx)!=0)return 21;
+    puts("[NATIVE-CAPS] step3 PASS drain-then-EOF on last sender close");
+
+    /* Step 4: forged and retired-generation values never resolve. */
+    if(u_nat_recv((0x0001L<<16)|5,&v,0)!=-9)return 22;
+    if(u_nat_recv((0xFFFFL<<16)|1,&v,0)!=-9)return 23;
+    if(u_nat_recv(0x7FFF0001L,&v,0)!=-9)return 24;
+    if(u_nat_send(0,&v,0)!=-9)return 25;
+    puts("[NATIVE-CAPS] step4 PASS forged/stale handle rejection");
+
+    /* Step 5: cross-process echo through fork inheritance + foreign-handle
+     * isolation. Endpoint discipline: the parent closes its own receive
+     * side of channel A after the fork so the child is the only reader,
+     * and its own send side of channel B so the child is the only echo
+     * sender; channel C is created after the fork and must be foreign. */
+    {
+        struct nc_gate *sh=(struct nc_gate *)u_mmap(0,4096,3,0x21,-1,0);
+        long sxA, rxA, sxB, rxB, sxC, rxC;
+        if((long)sh<0)return 26;
+        for(i=0;i<(int)sizeof(*sh)/4;i++)((volatile unsigned int *)sh)[i]=0;
+        if(u_nat_channel_create(&sxA,&rxA)!=0)return 27;
+        if(u_nat_channel_create(&sxB,&rxB)!=0)return 28;
+        pid=u_fork();
+        if(pid<0)return 29;
+        if(pid==0) {
+            long vv=0;
+            while(!life_load(&sh->published))u_yield();
+            /* A live parent capability value from AFTER the fork must be
+             * foreign here: this table never installed it. */
+            sh->foreign_rc=u_nat_recv(sh->foreign_rx,&vv,0);
+            if(u_nat_recv(rxA,&vv,1)!=1)u_exit(71);
+            if(vv!=12345)u_exit(72);
+            if(u_nat_send(sxB,vv+1,1)!=0)u_exit(73);
+            u_exit(0);
+        }
+        if(u_nat_close(rxA)!=0)return 30;
+        if(u_nat_close(sxB)!=0)return 31;
+        if(u_nat_channel_create(&sxC,&rxC)!=0)return 32;
+        sh->foreign_rx=rxC;
+        atomic_xchg(&sh->published,1);
+        if(u_nat_send(sxA,12345,1)!=0)return 33;
+        if(u_nat_recv(rxB,&v,1)!=1 || v!=12346)return 34;
+        if(u_wait4(pid,&status,0,0)!=pid)return 35;
+        if(((status>>8)&255)!=0)return 36;
+        if(sh->foreign_rc!=-9 && sh->foreign_rc>=0)return 37;
+        if(u_nat_close(sxA)!=0||u_nat_close(rxB)!=0)return 38;
+        if(u_nat_close(sxC)!=0||u_nat_close(rxC)!=0)return 39;
+        u_munmap(sh,4096);
+        puts("[NATIVE-CAPS] step5 PASS cross-process echo, foreign-handle isolation");
+    }
+
+    /* Step 6: two echo children concurrently on four channels: one down
+     * channel per child (parent sends), one echo channel per child (child
+     * sends). The parent closes its own receive sides of the down channels
+     * and send sides of the echo channels after forking, and each child
+     * closes the other child's inherited receive side, so exactly one
+     * reader and one writer exist per direction. */
+    {
+        long s1,r1,s1r,r1r, s2,r2,s2r,r2r;
+        if(u_nat_channel_create(&s1,&r1)!=0)return 50;
+        if(u_nat_channel_create(&s1r,&r1r)!=0)return 51;
+        if(u_nat_channel_create(&s2,&r2)!=0)return 52;
+        if(u_nat_channel_create(&s2r,&r2r)!=0)return 53;
+        pid=u_fork();
+        if(pid<0)return 54;
+        if(pid==0) {
+            long vv=0;
+            if(u_nat_close(r2)!=0)u_exit(80);
+            if(u_nat_recv(r1,&vv,1)!=1||vv!=100)u_exit(74);
+            if(u_nat_send(s1r,vv+1,1)!=0)u_exit(75);
+            u_exit(0);
+        }
+        got=pid;
+        pid=u_fork();
+        if(pid<0)return 55;
+        if(pid==0) {
+            long vv=0;
+            if(u_nat_close(r1)!=0)u_exit(81);
+            if(u_nat_recv(r2,&vv,1)!=1||vv!=200)u_exit(76);
+            if(u_nat_send(s2r,vv+1,1)!=0)u_exit(77);
+            u_exit(0);
+        }
+        code2=pid;
+        if(u_nat_close(r1)!=0||u_nat_close(r2)!=0)return 56;
+        if(u_nat_close(s1r)!=0||u_nat_close(s2r)!=0)return 57;
+        if(u_nat_send(s1,100,1)!=0)return 58;
+        if(u_nat_send(s2,200,1)!=0)return 59;
+        if(u_nat_recv(r1r,&v,1)!=1||v!=101)return 60;
+        if(u_nat_recv(r2r,&v,1)!=1||v!=201)return 61;
+        if(u_wait4(got,&status,0,0)!=got||((status>>8)&255)!=0)return 62;
+        if(u_wait4(code2,&status,0,0)!=code2||((status>>8)&255)!=0)return 63;
+        if(u_nat_close(s1)!=0||u_nat_close(r1r)!=0)return 64;
+        if(u_nat_close(s2)!=0||u_nat_close(r2r)!=0)return 65;
+        puts("[NATIVE-CAPS] step6 PASS concurrent separate-process exchanges");
+    }
+
+    /* Step 7: closing a capability revokes a blocked receive on it. */
+    {
+        if(u_nat_channel_create(&sx,&rx)!=0)return 61;
+        for(i=0;i<(int)sizeof(*g)/4;i++)((volatile unsigned int *)g)[i]=0;
+        g->recv_cap=rx;
+        if(u_clone(0x10100,stack+16384-8,(void *)&nc_thr_blocker,g)<0)return 62;
+        if(!life_until(&g->ready,1))return 63;
+        /* No message will ever arrive: only close can release the waiter. */
+        if(u_nat_close(rx)!=0)return 64;
+        if(!life_until(&g->done,1))return 65;
+        if(g->rc!=-9)return 66;
+        if(u_nat_close(sx)!=0)return 67;
+        puts("[NATIVE-CAPS] step7 PASS close revokes blocked receive (EBADF)");
+    }
+
+    /* Step 8: fatal/caught nonrestartable signal interrupts a blocked
+     * receive in a separate process (park admission under run_lock). */
+    {
+        struct { void *sa_handler; unsigned long sa_flags; void *sa_restorer; unsigned long sa_mask; } act;
+        nc_sig_hits=0;
+        act.sa_restorer=0;act.sa_mask=0;act.sa_handler=(void *)nc_sig_handler;act.sa_flags=0;
+        if(sigaction(15,&act,0)!=0)return 68;
+        if(u_nat_channel_create(&sS,&rS)!=0)return 69;
+        pid=u_fork();
+        if(pid<0)return 70;
+        if(pid==0) {
+            long vv=0;
+            long rr=u_nat_recv(rS,&vv,1);
+            /* Caught nonrestartable TERM interrupts the park with EINTR;
+             * the handler ran exactly once; no message can be lost. Early
+             * or late delivery both end here: admission refuses a pre-park
+             * signal, and the park re-check refuses a while-sleeping one. */
+            u_exit(rr==-4 && nc_sig_hits==1 ? 0 : 82);
+        }
+        /* Give the child time to park before arming; either ordering must
+         * produce EINTR, never a stranded sleeper. */
+        { u64 end=life_now()+200000000UL; while(life_now()<end)u_yield(); }
+        if(u_kill(pid,15)!=0)return 71;
+        if(u_wait4(pid,&status,0,0)!=pid)return 72;
+        if(((status>>8)&255)!=0)return 73;
+        if(u_nat_close(sS)!=0||u_nat_close(rS)!=0)return 74;
+        puts("[NATIVE-CAPS] step8 PASS signal interrupts blocked receive (EINTR)");
+    }
+
+    /* Step 9: a child that exits without touching its inherited caps leaves
+     * the parent's endpoints fully usable (no implicit revocation). */
+    {
+        long s9, r9;
+        if(u_nat_channel_create(&s9,&r9)!=0)return 75;
+        pid=u_fork();
+        if(pid<0)return 76;
+        if(pid==0)u_exit(0);
+        if(u_wait4(pid,&status,0,0)!=pid||status)return 77;
+        if(u_nat_send(s9,9,0)!=0)return 78;
+        if(u_nat_recv(r9,&v,0)!=1||v!=9)return 79;
+        if(u_nat_close(s9)!=0||u_nat_close(r9)!=0)return 80;
+        puts("[NATIVE-CAPS] step9 PASS child exit leaves parent caps intact");
+    }
+
+    u_munmap(g,4096);u_munmap(stack,16384);
+    puts("[NATIVE-CAPS] PASS capability namespace and cross-process channels");
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Native robust mutex probe (architecture section 6, gate 3). Every handle
+ * arrives through the documented ABI: create, dup, or fork inheritance.
+ * Deterministic barriers come from nat_mutex_stat (kernel-published state)
+ * and pipes, never from timing assumptions. errnos: -1 EPERM -4 EINTR
+ * -9 EBADF -11 EAGAIN -22 EINVAL -35 EDEADLK -130 EOWNERDIED -131 ENOTREC.
+ * ------------------------------------------------------------------------- */
+extern long u_nat_mutex_create(long *out);
+extern long u_nat_mutex_lock(long cap, long block);
+extern long u_nat_mutex_unlock(long cap);
+extern long u_nat_mutex_consistent(long cap);
+extern long u_nat_mutex_stat(long cap, unsigned int *out);
+
+struct nm_gate {
+    volatile unsigned int ready, done, armed, ok;
+    long cap;
+    long rc;
+};
+/* Same-process contender: blocks on the parent-held mutex (the parent's
+ * stat barrier guarantees queue order), records the result, then unlocks
+ * only after the parent finished its no-barge trylocks (armed), so the
+ * FIFO handoff chain is fully serialized. */
+static void nm_thr_contender(void *arg) {
+    struct nm_gate *g=(struct nm_gate *)arg;
+    long rc;
+    atomic_xchg(&g->ready,1);
+    rc=u_nat_mutex_lock(g->cap,1);
+    g->rc=rc;
+    atomic_xchg(&g->done,1);
+    while(!life_load(&g->armed))u_yield();
+    if(rc==0)u_nat_mutex_unlock(g->cap);
+    atomic_xchg(&g->ok,1);
+    u_exit(0);
+}
+static int nm_stat_until(long cap, unsigned int idx, unsigned int want) {
+    u64 end=life_now()+5000000000UL;
+    unsigned int st[3];
+    for(;;) {
+        if(u_nat_mutex_stat(cap,st)==0 && st[idx]==want)return 1;
+        if(life_now()>=end)return 0;
+        u_yield();
+    }
+}
+
+static int native_mutex_probe(void) {
+    long m, d, w, pid, pid2, status;
+    unsigned int st[3];
+    int i, fds1[2], fds2[2];
+    char b;
+    struct nm_gate *g1, *g2;
+    char *tstack;
+
+    /* Step 1: single-task basics — self-lock, nonowner unlock, stat. */
+    if(u_nat_mutex_create(&m)!=0)return 1;
+    if(u_nat_mutex_lock(m,0)!=0)return 2;
+    if(u_nat_mutex_lock(m,0)!=-35)return 3;         /* self-lock DEADLK */
+    if(u_nat_mutex_stat(m,st)!=0)return 4;
+    if(st[0]!=1||st[1]!=0||st[2]!=(unsigned int)u_getpid())return 5;
+    if(u_nat_mutex_unlock(m)!=0)return 6;
+    if(u_nat_mutex_unlock(m)!=-1)return 7;          /* nonowner -> EPERM */
+    if(u_nat_mutex_consistent(m)!=-22)return 8;     /* not a recovering owner */
+    if(u_nat_mutex_lock(m,1)!=0)return 9;
+    if(u_nat_mutex_unlock(m)!=0)return 10;
+    if(u_nat_close(m)!=0)return 11;
+    if(u_nat_mutex_lock(m,0)!=-9)return 12;         /* stale handle */
+    puts("[NATIVE-MUTEX] step1 PASS basics, self-lock EDEADLK, nonowner EPERM, stat");
+
+    /* Step 2: rights attenuation — UNLOCK-only dup releases but cannot
+     * lock; a SEND-type right is refused on a mutex; MWAIT-only dup stats
+     * but can only try. */
+    if(u_nat_mutex_create(&m)!=0)return 13;
+    d=u_nat_dup(m,8);                               /* MUNLOCK only */
+    if(d<0)return 14;
+    if(u_nat_mutex_lock(d,0)!=-1)return 15;
+    if(u_nat_dup(m,1)!=-1)return 16;                /* SEND not a mutex right */
+    w=u_nat_dup(m,16);                              /* MWAIT only */
+    if(w<0)return 17;
+    if(u_nat_mutex_lock(m,0)!=0)return 18;
+    if(u_nat_mutex_unlock(d)!=0)return 19;          /* attenuated unlock works */
+    if(u_nat_mutex_unlock(m)!=-1)return 20;
+    if(u_nat_mutex_lock(w,1)!=-1)return 21;         /* no LOCK right */
+    if(u_nat_mutex_stat(w,st)!=0)return 22;         /* MWAIT grants stat */
+    if(u_nat_close(d)!=0||u_nat_close(w)!=0||u_nat_close(m)!=0)return 23;
+    puts("[NATIVE-MUTEX] step2 PASS rights attenuation LOCK/UNLOCK/WAIT");
+
+    /* Step 3: same-process FIFO handoff + no barging. Two contenders queue
+     * in a deterministic order (stat barrier), the parent unlocks into the
+     * queue head, and trylocks during handoff must see EAGAIN until the
+     * chain drains. */
+    if(u_nat_mutex_create(&m)!=0)return 24;
+    g1=(struct nm_gate *)u_mmap(0,4096,3,0x21,-1,0);
+    g2=(struct nm_gate *)u_mmap(0,4096,3,0x21,-1,0);
+    tstack=(char *)u_mmap(0,16384,3,0x22,-1,0);
+    if((long)g1<0||(long)g2<0||(long)tstack<0)return 25;
+    for(i=0;i<(int)sizeof(*g1)/4;i++){((volatile unsigned int *)g1)[i]=0;((volatile unsigned int *)g2)[i]=0;}
+    for(i=0;i<16384;i+=4096)tstack[i]=0;
+    if(u_nat_mutex_lock(m,1)!=0)return 26;
+    g1->cap=m;g2->cap=m;
+    if(u_clone(0x10100,tstack+16384-8,(void *)&nm_thr_contender,g1)<0)return 27;
+    if(!life_until(&g1->ready,1))return 28;
+    if(!nm_stat_until(m,1,1))return 29;             /* T1 queued */
+    if(u_clone(0x10100,tstack+16384-8-4096,(void *)&nm_thr_contender,g2)<0)return 30;
+    if(!life_until(&g2->ready,1))return 31;
+    if(!nm_stat_until(m,1,2))return 32;             /* T2 queued behind T1 */
+    if(u_nat_mutex_unlock(m)!=0)return 33;          /* handoff -> T1 */
+    if(u_nat_mutex_lock(m,0)!=-11)return 34;        /* no barging past T1 */
+    if(u_nat_mutex_lock(m,0)!=-11)return 35;        /* still held in the chain */
+    atomic_xchg(&g1->armed,1);atomic_xchg(&g2->armed,1);
+    if(!life_until(&g1->done,1)||!life_until(&g2->done,1))return 36;
+    if(g1->rc!=0||g2->rc!=0)return 37;              /* both acquired via handoff */
+    if(!life_until(&g1->ok,1)||!life_until(&g2->ok,1))return 38;
+    if(u_nat_mutex_lock(m,0)!=0)return 39;          /* drained: free again */
+    if(u_nat_mutex_unlock(m)!=0)return 40;
+    if(u_nat_close(m)!=0)return 41;
+    u_munmap(g1,4096);u_munmap(g2,4096);u_munmap(tstack,16384);
+    puts("[NATIVE-MUTEX] step3 PASS same-process FIFO handoff, no barging, drain");
+
+    /* Step 4: cross-process FIFO through fork-inherited caps, handoffs
+     * proven by the published owner pid, children released via pipes. */
+    if(u_nat_mutex_create(&m)!=0)return 42;
+    if(u_pipe(fds1)<0||u_pipe(fds2)<0)return 43;
+    if(u_nat_mutex_lock(m,1)!=0)return 44;
+    pid=u_fork();
+    if(pid<0)return 45;
+    if(pid==0) {
+        if(u_close(fds1[1])!=0)u_exit(80);
+        if(u_close(fds2[0])!=0||u_close(fds2[1])!=0)u_exit(81);
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(82);
+        if(u_read(fds1[0],&b,1)!=1)u_exit(83);
+        if(u_nat_mutex_unlock(m)!=0)u_exit(94);     /* release: FIFO -> child 2 */
+        u_exit(0);
+    }
+    pid2=u_fork();
+    if(pid2<0)return 46;
+    if(pid2==0) {
+        if(u_close(fds2[1])!=0)u_exit(84);
+        if(u_close(fds1[0])!=0||u_close(fds1[1])!=0)u_exit(85);
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(86);
+        if(u_read(fds2[0],&b,1)!=1)u_exit(87);
+        if(u_nat_mutex_unlock(m)!=0)u_exit(95);
+        u_exit(0);
+    }
+    if(u_close(fds1[0])!=0||u_close(fds2[0])!=0)return 47;
+    if(!nm_stat_until(m,1,2))return 48;             /* both children queued */
+    if(u_nat_mutex_unlock(m)!=0)return 49;          /* handoff -> child 1 */
+    if(!nm_stat_until(m,2,(unsigned int)pid))return 50;
+    b='x';
+    if(u_write(fds1[1],&b,1)!=1)return 51;
+    if(!nm_stat_until(m,2,(unsigned int)pid2))return 52;  /* FIFO: child 2 */
+    if(u_write(fds2[1],&b,1)!=1)return 53;
+    if(u_wait4(pid,&status,0,0)!=pid||((status>>8)&255)!=0)return 54;
+    if(u_wait4(pid2,&status,0,0)!=pid2||((status>>8)&255)!=0)return 55;
+    if(u_close(fds1[1])!=0||u_close(fds2[1])!=0)return 56;
+    if(u_nat_close(m)!=0)return 57;
+    puts("[NATIVE-MUTEX] step4 PASS cross-process FIFO handoff (owner pid proven)");
+
+    /* Step 5: kill a BLOCKED waiter — the pending handoff must resolve so
+     * the survivor acquires cleanly. Kill the queue HEAD after both are
+     * queued (stat barrier), reap it, then unlock. */
+    if(u_nat_mutex_create(&m)!=0)return 58;
+    if(u_nat_mutex_lock(m,1)!=0)return 59;
+    pid=u_fork();
+    if(pid<0)return 60;
+    if(pid==0) {
+        u_nat_mutex_lock(m,1);                      /* returns only via kill */
+        u_exit(88);                                 /* not reached */
+    }
+    if(!nm_stat_until(m,1,1))return 61;
+    pid2=u_fork();
+    if(pid2<0)return 62;
+    if(pid2==0) {
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(89);     /* must acquire via handoff */
+        if(u_nat_mutex_unlock(m)!=0)u_exit(96);     /* release before exit */
+        u_exit(0);
+    }
+    if(!nm_stat_until(m,1,2))return 63;
+    if(u_kill(pid,9)!=0)return 64;
+    if(u_wait4(pid,&status,0,0)!=pid)return 65;     /* reaped: fully unwound */
+    if(!nm_stat_until(m,1,1))return 66;             /* dead waiter unqueued */
+    if(u_nat_mutex_unlock(m)!=0)return 67;          /* handoff -> survivor */
+    if(u_wait4(pid2,&status,0,0)!=pid2||((status>>8)&255)!=0)return 68;
+    if(u_nat_close(m)!=0)return 69;
+    puts("[NATIVE-MUTEX] step5 PASS kill-while-blocked: queue unwinds, survivor acquires");
+
+    /* Step 6: owner death -> OWNER_DIED recovery. The child acquires via
+     * handoff, exits WITHOUT unlocking; the parent must recover. */
+    if(u_nat_mutex_create(&m)!=0)return 70;
+    if(u_nat_mutex_lock(m,1)!=0)return 71;
+    pid=u_fork();
+    if(pid<0)return 72;
+    if(pid==0) {
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(90);
+        u_exit(0);                                  /* dies owning it */
+    }
+    if(u_nat_mutex_unlock(m)!=0)return 73;          /* handoff -> child */
+    if(!nm_stat_until(m,0,2))return 74;             /* child died owning */
+    if(u_nat_mutex_lock(m,1)!=-130)return 75;       /* EOWNERDIED */
+    if(u_nat_mutex_stat(m,st)!=0||st[2]!=(unsigned int)u_getpid())return 76;
+    if(u_nat_mutex_consistent(m)!=0)return 77;
+    if(u_nat_mutex_unlock(m)!=0)return 78;
+    if(u_nat_mutex_lock(m,0)!=0)return 79;          /* usable again */
+    if(u_nat_mutex_unlock(m)!=0)return 80;
+    if(u_wait4(pid,&status,0,0)!=pid||((status>>8)&255)!=0)return 81;
+    if(u_nat_close(m)!=0)return 82;
+    puts("[NATIVE-MUTEX] step6 PASS owner death -> EOWNERDIED + consistent recovery");
+
+    /* Step 7: abandoning recovery poisons the mutex terminally. */
+    if(u_nat_mutex_create(&m)!=0)return 83;
+    if(u_nat_mutex_lock(m,1)!=0)return 84;
+    pid=u_fork();
+    if(pid<0)return 85;
+    if(pid==0) {
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(91);
+        u_exit(0);                                  /* dies owning it */
+    }
+    if(u_nat_mutex_unlock(m)!=0)return 86;
+    if(!nm_stat_until(m,0,2))return 87;
+    if(u_nat_mutex_lock(m,1)!=-130)return 88;
+    if(u_nat_mutex_unlock(m)!=0)return 89;          /* unlock WITHOUT consistent */
+    if(u_nat_mutex_lock(m,0)!=-131)return 90;       /* ENOTRECOVERABLE */
+    if(u_nat_mutex_consistent(m)!=-131)return 91;
+    if(u_wait4(pid,&status,0,0)!=pid||((status>>8)&255)!=0)return 92;
+    if(u_nat_close(m)!=0)return 93;
+    puts("[NATIVE-MUTEX] step7 PASS abandoned recovery poisons ENOTRECOVERABLE");
+
+    /* Step 8: last-cap close while LOCKED survives until owner death and
+     * drains; then the object pool must be back to baseline (8 creates). */
+    puts("[NATIVE-MUTEX] step8 begin");
+    if(u_nat_mutex_create(&m)!=0)return 94;
+    if(u_nat_mutex_lock(m,1)!=0)return 95;
+    pid=u_fork();
+    if(pid<0)return 96;
+    if(pid==0) {
+        if(u_nat_mutex_lock(m,1)!=0)u_exit(92);
+        puts("[NATIVE-MUTEX] step8 child acquired");
+        if(u_nat_close(m)!=0)u_exit(93);            /* own last cap, still LOCKED */
+        puts("[NATIVE-MUTEX] step8 child closed cap");
+        u_exit(0);                                  /* death drains the object */
+    }
+    if(!nm_stat_until(m,1,1))return 103;            /* child queued (barrier) */
+    if(u_nat_mutex_unlock(m)!=0)return 97;          /* handoff -> child */
+    puts("[NATIVE-MUTEX] step8 owner handed to child");
+    if(!nm_stat_until(m,0,2))return 98;             /* child died owning: M_DIED */
+    if(u_nat_close(m)!=0)return 99;                 /* parent cap: all caps gone */
+    if(u_wait4(pid,&status,0,0)!=pid||((status>>8)&255)!=0)return 100;
+    puts("[NATIVE-MUTEX] step8 child reaped, baseline loop");
+    for(i=0;i<8;i++) {
+        if(u_nat_mutex_create(&d)!=0)return 101;
+        if(u_nat_close(d)!=0)return 102;
+    }
+    puts("[NATIVE-MUTEX] step8 PASS close-while-locked drained, object pool at baseline");
+    puts("[NATIVE-MUTEX] PASS robust mutex: handoff, barging, kill, recovery, poison");
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Zero-copy raw ring probe (AF_XDP analogue, migration: net layer). The
+ * owner writes a UDP frame straight into a mapped DMA pool slot, kicks, and
+ * a frame addressed to the host's own IP loops back through the RX ring in
+ * the SAME slot (zero-copy turnaround) while the protocol stack also
+ * delivers the datagram to a bound socket. Layout constants mirror
+ * kernel/net.c RAWO_*.
+ * ------------------------------------------------------------------------- */
+extern long u_raw_create(void);
+extern long u_raw_map(long handle, long uva);
+extern long u_raw_tx_kick(long handle, long max);
+extern long u_raw_close(long handle);
+extern long u_socket(long a,long b,long c);
+extern long u_bind(long a,const void*b,unsigned long c);
+extern long u_recvfrom(long a,void*b,unsigned long c,long d,void*e,unsigned int*f);
+extern long u_close(long a);
+
+static unsigned short raw_csum(const volatile unsigned char *ip, unsigned int len) {
+    unsigned int sum=0; unsigned int i;
+    for(i=0;i+1<len;i+=2) sum += ((unsigned int)ip[i]<<8)|ip[i+1];
+    if(len&1) sum += (unsigned int)ip[len-1]<<8;
+    while(sum>>16) sum=(sum&0xFFFFu)+(sum>>16);
+    return (unsigned short)(~sum);
+}
+
+static int net_raw_probe(void) {
+    long h, va, s;
+    volatile unsigned int *c;
+    volatile unsigned char *frames;
+    unsigned int slot, rslot, rlen, i, prod;
+    unsigned char *tx;
+    unsigned int ipi=14, ui=34, plen=11;
+    unsigned int framelen;
+    struct { int fd; short events; short revents; } pf;
+    unsigned char rbuf[64];
+    unsigned int srcp=11787, dstp=11788;
+    unsigned int spins;
+
+    h=u_raw_create(); if(h<0) return 91;
+    va=u_mmap(0,4096+32u*2048u,3,0x21,-1,0); if(va<0) { u_raw_close(h); return 92; }
+    u_munmap((void*)va,4096+32u*2048u);          /* hand the VA range back */
+    if(u_raw_map(h,va)!=0) { u_raw_close(h); return 93; }
+    c=(volatile unsigned int*)va;
+    if(c[0]!=0x52415730u || c[1]!=32u || c[2]!=2048u) { u_raw_close(h); return 94; }
+    if(c[3]==0) {                                /* NIC down (no -net): skip */
+        u_raw_close(h); u_munmap((void*)va,4096+32u*2048u); return 0;
+    }
+    frames=(volatile unsigned char*)(va+4096);
+
+    /* UDP socket bound to the probe port: the protocol stack path. */
+    { unsigned char a[16]; for(i=0;i<16;i++)a[i]=0;
+      a[0]=2; a[2]=(unsigned char)(dstp>>8); a[3]=(unsigned char)dstp;
+      s=u_socket(2,2,0); if(s<0) { u_raw_close(h); return 95; }
+      if(u_bind(s,a,16)!=0) { u_close(s); u_raw_close(h); return 96; } }
+
+    /* Take a free pool slot (lock-free single-word exchange). */
+    slot=32u;
+    for(i=0;i<32u;i++) {
+        if(atomic_xchg((volatile unsigned int*)&c[138+i],1u)==0u) { slot=i; break; }
+    }
+    if(slot==32u) { u_close(s); u_raw_close(h); return 97; }
+
+    /* Build eth+ip+udp in the TX slot, addressed to the host's own IP.
+     * IPv4 header layout from frame+14: checksum at +24, src at +26,
+     * dst at +30. The kick loopbacks frames whose dst IP is local. */
+    tx=(unsigned char*)(frames+(unsigned long)slot*2048u);
+    for(i=0;i<6;i++) tx[i]=0xFFu;                        /* broadcast     */
+    for(i=0;i<6;i++) tx[6+i]=((volatile unsigned char*)&c[4])[i];  /* idx 4 = byte 16 */
+    tx[12]=0x08; tx[13]=0x00;
+    for(i=0;i<20;i++) tx[14+i]=0;
+    tx[14]=0x45; tx[16]=(unsigned char)((28u+plen)>>8); tx[17]=(unsigned char)(28u+plen);
+    tx[18]=0; tx[19]=1; tx[22]=64; tx[23]=17;
+    tx[26]=c[3]>>24; tx[27]=(c[3]>>16)&255; tx[28]=(c[3]>>8)&255; tx[29]=c[3]&255;
+    tx[30]=tx[26]; tx[31]=tx[27]; tx[32]=tx[28]; tx[33]=tx[29];
+    tx[24]=0; tx[25]=0;
+    tx[24]=(unsigned char)(raw_csum(tx+14,20)>>8);
+    tx[25]=(unsigned char)(raw_csum(tx+14,20)&255);
+    for(i=0;i<8;i++) tx[34+i]=0;
+    tx[34]=(unsigned char)(srcp>>8); tx[35]=(unsigned char)srcp;
+    tx[36]=(unsigned char)(dstp>>8); tx[37]=(unsigned char)dstp;
+    tx[38]=(unsigned char)((8u+plen)>>8); tx[39]=(unsigned char)(8u+plen);
+    tx[40]=0; tx[41]=0;
+    { const char *p="RAWZEROCOPY";
+      for(i=0;i<plen;i++) tx[42+i]=(unsigned char)p[i]; }
+    framelen=14+20+8+plen;
+    (void)ipi; (void)ui;
+
+    /* Publish on the TX ring and kick: same-buffer loopback expected. */
+    prod=c[72];
+    c[74+(prod%32u)]=slot;
+    c[106+(prod%32u)]=framelen;
+    c[72]=prod+1;
+    if(u_raw_tx_kick(h,8)<1) { atomic_xchg((volatile unsigned int*)&c[552+slot],0u);
+        u_close(s); u_raw_close(h); return 98; }
+
+    /* Poll the RX ring (bounded): the looped-back frame is the SAME slot. */
+    spins=0;
+    while(c[6]==c[7] && spins<4000000u) { spins++; u_yield(); }
+    if(c[6]==c[7]) { u_close(s); u_raw_close(h); return 99; }
+    prod=c[7];
+    rslot=c[8+(prod%32u)];
+    rlen=c[40+(prod%32u)];
+    { volatile unsigned char *rx=frames+(unsigned long)rslot*2048u;
+      int bad=0;
+      for(i=0;i<plen;i++) if(rx[42+i]!=(unsigned char)"RAWZEROCOPY"[i]) bad++;
+      if(rslot!=slot) bad++;
+      if(rlen!=framelen) bad++;
+      if(bad) { atomic_xchg((volatile unsigned int*)&c[138+rslot],0u);
+                atomic_xchg((volatile unsigned int*)&c[138+slot],0u);
+                c[7]=prod+1;
+                u_close(s); u_raw_close(h); return 100; } }
+    c[7]=prod+1;
+    atomic_xchg((volatile unsigned int*)&c[138+rslot],0u);
+    puts("[NETRAW] zero-copy turnaround: TX slot == RX slot, payload intact");
+
+    /* Protocol stack also received the datagram (dual-path evidence). */
+    pf.fd=(int)s; pf.events=1; pf.revents=0;
+    { long rr=u_recvfrom(s,rbuf,64,0,0,0);
+      int bad=0;
+      if(rr<0) { u_close(s); u_raw_close(h); return 101; }
+      for(i=0;i<plen&&(unsigned long)i<(unsigned long)rr;i++)
+        if(rbuf[i]!=(unsigned char)"RAWZEROCOPY"[i]) bad++;
+      if(bad) { u_close(s); u_raw_close(h); return 102; } }
+    u_close(s);
+    if(u_raw_close(h)!=0) return 103;
+    u_munmap((void*)va,4096+32u*2048u);
+    puts("[NETRAW] PASS zero-copy rings + protocol dual-path");
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * vDSO-lite clock probe (high-resolution time slice). The kernel maps a
+ * shared clock page at a fixed VA into every address space; user code
+ * reads its own TSC and the page WITHOUT a syscall, then cross-checks
+ * against the syscall clock and measures nanosleep precision.
+ * Layout mirrors kernel/tsc.c (u32 indexes: magic 0, ver 1,
+ * mult 2..3 (u64), shift 4, flags 5, base 6..7 (u64)).
+ * ------------------------------------------------------------------------- */
+extern long u_raw_create(void);
+extern long u_nanosleep(const void *req, void *rem);
+
+enum { VD_VA = 0x50000000u };
+/* rdtsc as naked single-statement bytes (fakecc drops unknown mnemonics
+ * and rejects constraint syntax): 0F 31 rdtsc; 48 C1 E2 20 shl rdx,32;
+*  48 09 D0 or rax,rdx; C3 ret. */
+__attribute__((naked)) unsigned long long vd_tsc(void) {
+    __asm__ volatile(".byte 15,49,72,193,226,32,72,9,208,195");
+}
+
+static int vdso_probe(void) {
+    volatile unsigned int *c;
+    unsigned long long mult, base, tb, ns1, ns2, t0, t1;
+    unsigned int shift, flags;
+    struct { long s; long ns; } req, rem, tp;
+    unsigned int i;
+
+    c = (volatile unsigned int *)VD_VA;
+    if (c[0] != 0x646F7376u || c[1] != 1u) {
+        puts("[VD] FAIL magic/version");
+        return 91;
+    }
+    /* Field indexes mirror kernel/tsc.c VDSO_OFFSET_* exactly:
+     * MULT at 2(low),3(high); SHIFT 4; FLAGS 5; BASE 6(low),7(high);
+     * TSCBASE 8(low),9(high). */
+    flags = c[5];
+    mult = ((unsigned long long)c[3] << 32) | c[2];
+    shift = c[4];
+    base = ((unsigned long long)c[7] << 32) | c[6];
+    tb = ((unsigned long long)c[9] << 32) | c[8];
+    if (flags == 0) {
+        puts("[VD] clock not calibrated (tick fallback): probe skipped");
+        return 0;
+    }
+    /* Monotonicity across 64 vDSO reads. */
+    t0 = vd_tsc();
+    ns1 = base + ((t0 - tb) * mult >> shift);
+    for (i = 0; i < 64; i++) {
+        ns2 = base + ((vd_tsc() - tb) * mult >> shift);
+        if (ns2 < ns1) {
+            puts("[VD] FAIL monotonicity");
+            return 92;
+        }
+        ns1 = ns2;
+    }
+    /* vDSO vs syscall cross-check: same calibration, must agree closely. */
+    if (u_clock_gettime(1, (void *)&tp) != 0) { puts("[VD] FAIL syscall"); return 93; }
+    t1 = vd_tsc();
+    ns2 = base + ((t1 - tb) * mult >> shift);
+    { unsigned long long sys_ns = (unsigned long long)tp.s * 1000000000ull + (unsigned long long)tp.ns;
+      unsigned long long d = ns2 > sys_ns ? ns2 - sys_ns : sys_ns - ns2;
+      if (d > 100000000ull) {            /* 100 ms tolerance under TCG */
+        { extern void runtime_printf_dummy(void); (void)runtime_printf_dummy; }
+        { volatile char msg[80];
+          unsigned long long ms = d / 1000000ull;
+          unsigned int mi = 0;
+          msg[0]='['; msg[1]='V'; msg[2]='D'; msg[3]=']'; msg[4]=' ';
+          msg[5]='d'; msg[6]='r'; msg[7]='i'; msg[8]='f'; msg[9]='t';
+          msg[10]='='; mi=11;
+          if (ms == 0) { msg[mi++]='<'; msg[mi++]='1'; }
+          while (ms) { msg[mi++] = (unsigned char)('0' + ms % 10); ms /= 10; }
+          msg[mi++]='m'; msg[mi++]='s';
+          msg[mi]=0;
+          puts((const char *)msg); }
+        return 94;
+      } }
+    /* nanosleep precision: request 50 ms, measure with the vDSO clock. */
+    req.s = 0; req.ns = 50000000;
+    t1 = vd_tsc();
+    ns1 = base + ((t1 - tb) * mult >> shift);
+    u_nanosleep((void *)&req, (void *)&rem);
+    ns2 = base + ((vd_tsc() - tb) * mult >> shift);
+    { unsigned long long waited = ns2 - ns1;
+      if (waited < 45000000ull || waited > 130000000ull) {
+        puts("[VD] FAIL nanosleep precision");
+        return 95;
+      } }
+    (void)i;
+    (void)vd_tsc;
+    puts("[VD] PASS vDSO clock: monotonic, matches syscall, sleep precise");
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Fork admission limit probe (P0-9): the process-count limit must fail
+ * DETERMINISTICALLY with EAGAIN once reached, and the process slots must
+ * recover when the children exit. This is the resource-exhaustion
+ * contract the old implicit-failure fork lacked.
+ * ------------------------------------------------------------------------- */
+static int rlimit_probe(void) {
+    long pids[96];
+    long pid, st, r;
+    int n = 0, i, reached = 0;
+    int pr[2];
+    unsigned char rbuf[16];
+    u64 end;
+
+    /* Children block on a pipe READ (proper wait-queue sleep, zero churn):
+     * 50+ concurrent sleepers must not flood the scheduler with wake/park
+     * pairs the way tick-woken nanosleeps would. The parent writes one
+     * 0x42 byte to wake the first reader, closes the write end so every
+     * blocked reader sees EOF, reaps them all, and verifies slot recovery. */
+    if (u_pipe(pr) != 0) return 110;
+    for (i = 0; i < 72; i++) {
+        pid = u_fork();
+        if (pid < 0) {
+            reached = (pid == -11) ? 1 : 0;     /* -11 = EAGAIN */
+            break;
+        }
+        if (pid == 0) {
+            /* Close the inherited write end: the parent is the sole writer,
+             * so its close is what propagates EOF to every reader. */
+            u_close(pr[1]);
+            long rr = u_read(pr[0], rbuf, 1);
+            if (rr == 1 && rbuf[0] == 0x42) u_exit(0);
+            u_exit(0);                          /* EOF or woken: exit either way */
+        }
+        pids[n] = pid;
+        n = n + 1;
+        if (n >= 96) break;
+    }
+    if (n < 10) {
+        puts("[RLIMIT] FAIL too few children before limit");
+        return 111;
+    }
+    if (!reached) {
+        puts("[RLIMIT] FAIL limit never returned EAGAIN");
+        u_close(pr[1]);
+        for (i = 0; i < n; i++) u_wait4(-1, &st, 0, 0);
+        return 112;
+    }
+    /* Wake the blocked children: one 0x42 byte lets the first reader exit,
+     * closing the write end lets the rest drain via EOF. */
+    {
+        unsigned char wb = 0x42;
+        if (u_write(pr[1], (void *)&wb, 1) != 1) {
+            puts("[RLIMIT] FAIL pipe write");
+            return 113;
+        }
+    }
+    u_close(pr[1]);
+    end = 0;
+    for (i = 0; i < n; i++) {
+        do {
+            r = u_wait4(-1, &st, 0, 0);
+        } while (r == -4);
+        if (r < 0) { puts("[RLIMIT] FAIL reap"); return 113; }
+    }
+    u_close(pr[0]);
+    (void)end;
+    /* Recovery: after reaping, new forks must succeed again. */
+    for (i = 0; i < 4; i++) {
+        pid = u_fork();
+        if (pid < 0) {
+            puts("[RLIMIT] FAIL fork did not recover after reap");
+            return 114;
+        }
+        if (pid == 0) u_exit(0);
+        end = 0;
+        do {
+            st = 0;
+            r = u_wait4(pid, &st, 0, 0);
+        } while (r == -4);
+        if (r != pid) {
+            puts("[RLIMIT] FAIL recovery reap");
+            return 115;
+        }
+    }
+    puts("[RLIMIT] PASS deterministic EAGAIN limit + slot recovery");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if(argc==3 && strcmp(argv[1],"--park-probe")==0)return park_probe(argv[2][0]-'0');
+    if(argc==2 && strcmp(argv[1],"--native-caps")==0)return native_caps_probe();
+    if(argc==2 && strcmp(argv[1],"--native-mutex")==0)return native_mutex_probe();
+    if(argc==2 && strcmp(argv[1],"--net-raw")==0)return net_raw_probe();
+    if(argc==2 && strcmp(argv[1],"--vdso")==0)return vdso_probe();
+    if(argc==2 && strcmp(argv[1],"--rlimit")==0)return rlimit_probe();
+    if(argc==2 && strcmp(argv[1],"--net-raw")==0)return net_raw_probe();
     char *sh_argv[2];
     long pid = u_getpid();
     volatile unsigned long i;

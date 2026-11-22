@@ -51,6 +51,7 @@ enum {
     VMA_FREE   = 0,
     VMA_ANON   = 1,
     VMA_FILE   = 2,
+    VMA_PHYS   = 3,                /* device/driver frames at a fixed phys  */
 
     FS_KIND_RAMFS = 0,
     FS_KIND_EXT2  = 1,
@@ -88,7 +89,8 @@ struct vma {
     u32 shared;                /* MAP_SHARED: keep W across fork */
     u32 fs_kind;               /* FS_KIND_* when kind == VMA_FILE */
     u32 ino;                   /* backing inode */
-    u64 file_off;              /* file offset of vma->start */
+    u64 file_off;              /* file offset of vma->start; VMA_PHYS reuses
+                                * this field as the mapping's physical base  */
 };
 
 struct address_space {
@@ -103,7 +105,140 @@ struct address_space {
 
 /* Per-frame share count for COW. 1 = single owner (plain writable page),
  * >=2 = mapped read-only into that many address spaces / PTEs. */
-static u16 frame_refs[MAX_FRAMES_AS];
+/* Frame reference counts. ATOMIC (lock cmpxchg loops): fault paths on one
+ * CPU mutate counts while other CPUs fork/unmap the same frames — the old
+ * non-atomic u16 counters lost updates under SMP and could free a frame
+ * that was still COW-shared. */
+static u32 frame_refs[MAX_FRAMES_AS];
+
+/* Frame-refcount mutations are serialised by ref_lock (a leaf spinlock —
+ * the handler-free alternative, lock cmpxchg, cannot be used because
+ * fakecc's .S assembler SILENTLY DROPS `lock cmpxchg`: the instruction
+ * vanished leaving only mov+ret, and a naked-C-bytes variant corrupts the
+ * caller's frame through the retained prologue spills). Lock ordering:
+ * ref_lock -> pmm_lock; ref_lock must NEVER be held across the shootdown
+ * hook (a target CPU faults on ref_lock with IRQs off and would deadlock
+ * the sender's ack spin). Read-only decisions outside the lock are safe:
+ * a concurrent ref_add only makes a frame MORE shared, and the COW fault
+ * re-decides under the lock when it matters. */
+static volatile u32 ref_lock;
+
+static u32 ref_read(volatile u32 *p) {
+    return *p;
+}
+
+/* Requires ref_lock. Returns the PREVIOUS count. */
+static u32 ref_add_locked(volatile u32 *p, u32 v) {
+    u32 old = *p;
+    *p = old + v;
+    return old;
+}
+
+/* Requires ref_lock. Decrement by one, never crossing zero; returns the
+ * PREVIOUS count (1 means the caller released the last reference). */
+static u32 ref_sub_ge1_locked(volatile u32 *p) {
+    u32 old = *p;
+    if (old > 0) {
+        *p = old - 1;
+    }
+    return old;
+}
+
+/* ---------------------------------------------------------------------------
+ * Per-CPU current address-space tracker + TLB shootdown
+ *
+ * as_current_h[cpu] mirrors the CR3 installed on each CPU (written by
+ * as_activate below). When a VMA mutation (munmap/mprotect/COW-fork RO
+ * pass) edits page tables of a space that is current on OTHER CPUs, those
+ * CPUs hold stale TLB entries the local invlpg cannot reach — without a
+ * shootdown, a stale writable entry bypasses COW and corrupts data.
+ *
+ * The mem package stays IPI-agnostic: mutation sites call
+ * as_shootdown_range(), which delegates through as_shootdown_hook to the
+ * kernel scheduler (vector-35 IPI + per-CPU ack counters, see
+ * kernel/sched.c and kernel/isr.c). The unmap path flushes BEFORE freeing
+ * frames: a freed frame reachable through a stale TLB is corruption.
+ * ------------------------------------------------------------------------- */
+/* Public mirror of current_as_cpu (kernel shootdown sender + IPI handler
+ * read it; handles are the AS struct pointers, same identity as as_h). */
+volatile u64 as_current_h[8];      /* AS_MAX_CPUS; declared before the enum */
+u64 (*as_shootdown_hook)(u64 handle, u64 start, u64 end) = 0;
+
+/* Per-CPU shootdown mailboxes (Linux smp_call_function shape): a sender
+ * pushes one entry per target CPU and sends a vector-35 IPI; the target's
+ * handler drains its own queue at IRQ speed. NO global lock: two CPUs can
+ * fork concurrently and each wait for their own acknowledgements without
+ * deadlock — a sender never holds a lock while waiting, and a handler only
+ * ever takes its own queue lock. */
+enum { AS_SD_QDEPTH = 16 };
+enum { AS_SD_SLOTS = 128 };
+/* Flat slot table: CPU i owns slots [i*16, i*16+16). Parallel arrays and
+ * flat indexing throughout — fakecc's parser mishandles struct-array
+ * declarations later in this file, so no structs here. */
+u64 as_sd_handle[AS_SD_SLOTS];
+u64 as_sd_start[AS_SD_SLOTS];
+u64 as_sd_end[AS_SD_SLOTS];
+u32 as_sd_eseq[AS_SD_SLOTS];
+volatile u32 as_sd_qhead[8];       /* entries pushed by senders             */
+volatile u32 as_sd_qtail[8];       /* entries drained by the owner CPU      */
+volatile u32 as_sd_qlock[8];       /* per-queue push/drain mutual exclusion */
+volatile u32 as_sd_seq[8];         /* monotonic per-queue generation        */
+volatile u64 as_sd_done[8];        /* last drained seq per CPU              */
+volatile u64 as_shootdown_count;
+
+/* vDSO-lite clock page: one shared page mapped RW-... read-only into every
+ * address space at a fixed VA (user TSC clock without a syscall). The
+ * physical page is owned by the kernel time module (hook, same pattern as
+ * the shootdown hook); frame_refs=2 pins it against unmap. */
+u64 (*as_vdso_phys_hook)(void) = 0;
+static const u64 VDSO_USER_VA = 0x0000000050000000ULL;
+static const u64 VDSO_MAGIC_V = 0x646F7376u;
+
+static void as_vdso_attach(struct address_space *as) {
+    u64 phys;
+    u64 end;
+    u32 i;
+    if (as_vdso_phys_hook == 0) {
+        return;
+    }
+    phys = as_vdso_phys_hook();
+    if (phys == 0) {
+        return;
+    }
+    /* Idempotent: fork copies the parent's vDSO VMA verbatim. */
+    for (i = 0; i < as->nvma; i++) {
+        if (as->vmas[i].start == VDSO_USER_VA) {
+            return;
+        }
+    }
+    if (as->nvma >= MAX_VMA) {
+        return;
+    }
+    end = VDSO_USER_VA + PAGE_SIZE;
+    for (i = 0; i < as->nvma; i++) {
+        if (VDSO_USER_VA < as->vmas[i].end && as->vmas[i].start < end) {
+            return;                        /* mapped range collision */
+        }
+    }
+    as->vmas[as->nvma].start = VDSO_USER_VA;
+    as->vmas[as->nvma].end = end;
+    as->vmas[as->nvma].prot = 1;           /* PROT_READ */
+    as->vmas[as->nvma].kind = VMA_PHYS;
+    as->vmas[as->nvma].shared = 1;
+    as->vmas[as->nvma].fs_kind = 0;
+    as->vmas[as->nvma].ino = 0;
+    as->vmas[as->nvma].file_off = phys;
+    as->nvma++;
+}
+
+void as_shootdown_range(u64 handle, u64 start, u64 end) {
+    if (as_shootdown_hook != 0 && end > start) {
+        as_shootdown_hook(handle, start & ~0xFFFULL,
+                          (end + 0xFFFULL) & ~0xFFFULL);
+        as_shootdown_count = as_shootdown_count + 1;
+    }
+    /* Uniprocessor fallback (no hook): callers flush locally already. */
+}
 
 /* Shared demand-zero page: read faults map this RO frame; write faults
  * always allocate a private copy (never lift W on the shared zero). */
@@ -120,6 +255,8 @@ static struct address_space *current_as_cpu[AS_MAX_CPUS];
 extern u32 smp_cpuid(void);
 extern u64 cpu_irq_save(void);
 extern void cpu_irq_restore(u64 flags);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
 
 static u32 as_cpu_index(void) {
     u32 cpu = smp_cpuid();
@@ -129,6 +266,10 @@ static u32 as_cpu_index(void) {
 static struct address_space *as_current(void) {
     return current_as_cpu[as_cpu_index()];
 }
+
+/* Forward declaration: the handle decoder is defined near the handle-based
+ * wrappers at the end of this file, but as_fault_in_h() above uses it. */
+static struct address_space *as_of(u64 handle);
 
 extern void kprintf(const char *fmt, ...);
 
@@ -235,6 +376,7 @@ void as_init(struct address_space *as) {
 void as_activate(struct address_space *as) {
     u64 flags = cpu_irq_save();
     current_as_cpu[as_cpu_index()] = as;
+    as_current_h[as_cpu_index()] = (u64)as;
     if (as) {
         cr3_write(as->pml4);
     } else {
@@ -343,6 +485,21 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
         if ((err & 0x2) && !(vma->prot & PROT_WRITE)) {
             return 0;                 /* Write to a read-only VMA */
         }
+        if (vma->kind == VMA_PHYS) {
+            /* Fixed physical frame (device/driver memory): no allocation,
+             * no reclaim — pin with refs=2 so a later munmap decrements to
+             * the driver's own pin and never frees to the buddy. */
+            u64 frame = vma->file_off + (page_va - vma->start);
+            u32 pfn = (u32)(frame / PAGE_SIZE);
+            if (pfn >= MAX_FRAMES_AS) {
+                return 0;
+            }
+            frame_refs[pfn] = 2;
+            pt[i] = frame | leaf_perms(vma);
+            private_faults = private_faults + 1;
+            invlpg_page(page_va);
+            return 1;
+        }
         if (vma->kind == VMA_FILE) {
             u64 frame = alloc_zero_frame();
             u64 foff;
@@ -400,7 +557,9 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
             if (!(vma->prot & PROT_EXEC)) {
                 e |= ((u64)1 << 63);
             }
-            frame_refs[(u32)(zero_frame / PAGE_SIZE)]++;
+            spin_lock(&ref_lock);
+            ref_add_locked(&frame_refs[(u32)(zero_frame / PAGE_SIZE)], 1);
+            spin_unlock(&ref_lock);
             pt[i] = zero_frame | e;
             zero_faults++;
             invlpg_page(page_va);
@@ -424,13 +583,20 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
             invlpg_page(page_va);
             return 1;
         }
-        /* Shared zero must always COW; never promote it writable. */
+        /* Decide + mutate under ref_lock: a concurrent fork's ref_add must
+         * not slip between the shared-check and the demotion, or two
+         * writers end up on one frame. pmm_alloc inside the lock is safe
+         * (ref_lock -> pmm_lock, no IPI/wait inside). */
+        u64 flags_ref = cpu_irq_save();
+        spin_lock(&ref_lock);
         if (old_phys == zero_frame || frame_refs[pfn] > 1) {
             u64 fresh = alloc_zero_frame();
             u32 k;
             volatile u8 *src;
             volatile u8 *dst;
             if (fresh == 0) {
+                spin_unlock(&ref_lock);
+                cpu_irq_restore(flags_ref);
                 return 0;
             }
             src = (volatile u8 *)(HHDM_BASE + old_phys);
@@ -439,18 +605,19 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
                 dst[k] = src[k];
             }
             frame_refs[(u32)(fresh / PAGE_SIZE)] = 1;
-            if (frame_refs[pfn] > 0) {
-                frame_refs[pfn]--;
-            }
+            ref_sub_ge1_locked(&frame_refs[pfn]);
             pt[i] = fresh | leaf_perms(vma);
             private_faults++;
             invlpg_page(page_va);
+            spin_unlock(&ref_lock);
+            cpu_irq_restore(flags_ref);
             return 1;
         }
         /* Last private owner: just lift write protection. */
-        frame_refs[pfn] = 1;
         pt[i] = pte | PTE_W;
         invlpg_page(page_va);
+        spin_unlock(&ref_lock);
+        cpu_irq_restore(flags_ref);
         return 1;
     }
 
@@ -482,7 +649,12 @@ static void cow_copy_pt(struct address_space *as, u64 va_base,
             continue;
         }
         u32 pfn = (u32)(entry_phys(e) / PAGE_SIZE);
-        frame_refs[pfn]++;
+        u64 flags_ref = cpu_irq_save();
+        spin_lock(&ref_lock);                    /* parent may COW-fault on
+                                                  * another CPU concurrently */
+        ref_add_locked(&frame_refs[pfn], 1);
+        spin_unlock(&ref_lock);
+        cpu_irq_restore(flags_ref);
         if ((e & PTE_W) && !vma_is_shared_at(as, page_va)) {
             u64 ro = (e & ~(u64)PTE_W) | ((u64)1 << 63);
             src_pt[i] = ro;
@@ -491,6 +663,10 @@ static void cow_copy_pt(struct address_space *as, u64 va_base,
             dst_pt[i] = e;            /* Already RO, or MAP_SHARED keep W */
         }
     }
+    /* The RO demotion is only safe once every CPU holding this address
+     * space flushed its TLB: a sibling thread's stale pre-fork writable
+     * entry would otherwise bypass COW and corrupt the shared page. */
+    as_shootdown_range((u64)as, va_base, va_base + ((u64)PT_ENTRIES << 12));
 }
 
 static void cow_walk_pd(struct address_space *as, u64 va_base,
@@ -549,6 +725,7 @@ void as_cow_clone(struct address_space *dst, struct address_space *src) {
     for (i = 0; i < src->nvma; i++) {
         dst->vmas[i] = src->vmas[i];
     }
+    as_vdso_attach(dst);
 
     /* Deep-copy the private PML4 slots. Each present entry gets a fresh
      * PDPT frame f which is linked into the child PML4 and then recursively
@@ -590,12 +767,17 @@ static void release_pt(volatile u64 *pt, u64 pt_phys) {
         u64 e = pt[i];
         if (e & PTE_P) {
             u32 pfn = (u32)(entry_phys(e) / PAGE_SIZE);
-            if (frame_refs[pfn] > 1) {
-                frame_refs[pfn]--;
-            } else {
-                frame_refs[pfn] = 0;
-                pmm_free_page(entry_phys(e));
+            u64 flags_ref = cpu_irq_save();
+            spin_lock(&ref_lock);
+            {
+                u32 old = ref_sub_ge1_locked(&frame_refs[pfn]);
+                if (old <= 1) {
+                    frame_refs[pfn] = 0;
+                    pmm_free_page(entry_phys(e));
+                }
             }
+            spin_unlock(&ref_lock);
+            cpu_irq_restore(flags_ref);
         }
     }
     pmm_free_page(pt_phys);
@@ -673,6 +855,21 @@ u64 as_current_handle(void) {
 int as_dispatch_fault(u64 handle, u64 vaddr, u64 err) {
     struct address_space *as = as_current();
     (void)handle;
+    if (as == 0) {
+        return 0;
+    }
+    return as_handle_fault(as, vaddr, err);
+}
+
+/* Fault a VA in an EXPLICIT address space, bypassing the per-CPU installed
+ * one. The #PF handler must use the installed space (as_dispatch_fault), but
+ * a kernel stress worker that owns a private AS cannot rely on it: the
+ * scheduler reloads CR3 from the TASK's as_h on resume, and the vector-35
+ * shootdown handler may install a different AS on this CPU meanwhile, so
+ * as_current() can name another space than the one the caller asked for.
+ * Naming the target explicitly removes that race. */
+int as_fault_in_h(u64 handle, u64 vaddr, u64 err) {
+    struct address_space *as = as_of(handle);
     if (as == 0) {
         return 0;
     }
@@ -918,6 +1115,7 @@ u64 as_create(void) {
         return 0;
     }
     as_init(as);
+    as_vdso_attach(as);
     return (u64)as;
 }
 
@@ -933,6 +1131,43 @@ void as_activate_h(u64 handle) {
 /* Reserve a demand-paged anonymous range in the target space. */
 int as_map_anon_h(u64 handle, u64 start, u64 size, u32 prot) {
     return as_map_anon(as_of(handle), start, size, prot, 0);
+}
+
+/* Device-memory mapping (AF_XDP-style zero-copy rings): [start, start+size)
+ * resolves directly to [phys, phys+size) — frames are NOT owned by the AS,
+ * are demand-filled from the fixed physical base on fault, and munmap never
+ * returns them to the buddy (frame_refs pins them at 2 so one unmap leaves
+ * the driver's pin intact). Mapped RW, always NX-cleared-... kept writable:
+ * device buffers are shared scratch. DELIBERATE 4-ARGUMENT LIMIT: the
+ * current fakecc miscompiles 5-argument calls (see
+ * docs/evidence/native-caps-20261121/RESULT.md), so the protection is fixed
+ * to read-write here instead of a parameter. */
+int as_map_phys_h(u64 handle, u64 start, u64 size, u64 phys) {
+    struct address_space *as = as_of(handle);
+    u64 end;
+    u32 i;
+    if (as == 0 || (start & 0xFFF) != 0 || (phys & 0xFFF) != 0 || size == 0) {
+        return 0;
+    }
+    end = (start + size + 0xFFF) & ~0xFFFULL;
+    for (i = 0; i < as->nvma; i++) {
+        if (start < as->vmas[i].end && as->vmas[i].start < end) {
+            return 0;                 /* Overlap */
+        }
+    }
+    if (as->nvma >= MAX_VMA) {
+        return 0;
+    }
+    as->vmas[as->nvma].start = start;
+    as->vmas[as->nvma].end = end;
+    as->vmas[as->nvma].prot = (u32)(1 | 2);            /* READ | WRITE     */
+    as->vmas[as->nvma].kind = VMA_PHYS;
+    as->vmas[as->nvma].shared = 1;
+    as->vmas[as->nvma].fs_kind = 0;
+    as->vmas[as->nvma].ino = 0;
+    as->vmas[as->nvma].file_off = phys;
+    as->nvma++;
+    return 1;
 }
 
 /* brk(): lazily reserve the fixed 64 MiB heap VMA on first use and move the
@@ -1115,9 +1350,16 @@ u64 as_mmap_file_h(u64 handle, u64 addr, u64 len, u32 prot, u32 shared,
  * Page-table frames themselves stay behind (empty tables are harmless and
  * reused by later demand faults). Shared COW frames drop one reference and
  * are returned to the buddy only when the last owner goes away. */
+enum { SD_BATCH = 64 };
+
+/* Tear down present leaf PTEs over [va, va+len). Frames are freed only
+ * AFTER a TLB shootdown: a remote CPU running this address space may hold
+ * stale TLB entries, and a freed frame reachable through one is corruption.
+ * Bounded batches (64 pages) keep the pending-frame arrays fixed-size. */
 static void unmap_present_pages(struct address_space *as, u64 va, u64 len,
                                  struct vma *vma) {
     u64 off = 0;
+    (void)va;
     while (off < len) {
         u64 page_va = (va + off) & ~0xFFFULL;
         volatile u64 *pt = resolve_pt(as->pml4, page_va, 0, PTE_U);
@@ -1135,16 +1377,17 @@ static void unmap_present_pages(struct address_space *as, u64 va, u64 len,
                 }
                 pt[pt_i(page_va)] = 0;
                 invlpg_page(page_va);
-                if (frame < (u64)MAX_FRAMES_AS * PAGE_SIZE
-                    && frame_refs[(u32)(frame / PAGE_SIZE)] > 0) {
-                    frame_refs[(u32)(frame / PAGE_SIZE)]--;
-                    if (frame_refs[(u32)(frame / PAGE_SIZE)] == 0) {
-                        if (frame != zero_frame) {
+                {
+                    u64 flags_ref = cpu_irq_save();
+                    spin_lock(&ref_lock);
+                    {
+                        u32 old = ref_sub_ge1_locked(&frame_refs[(u32)(frame / PAGE_SIZE)]);
+                        if (old == 1 && frame != zero_frame) {
                             pmm_free_page(frame);
-                        } else {
-                            frame_refs[(u32)(frame / PAGE_SIZE)] = 1;
                         }
                     }
+                    spin_unlock(&ref_lock);
+                    cpu_irq_restore(flags_ref);
                 }
             }
         }
@@ -1160,6 +1403,7 @@ static void apply_prot_present(struct address_space *as, u64 va, u64 len,
                                u32 prot, u32 shared) {
     u64 off = 0;
     u64 nx = ((u64)1 << 63);
+    u32 prot_changed = 0;
     u32 none = (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0 ? 1 : 0;
     while (off < len) {
         u64 page_va = (va + off) & ~0xFFFULL;
@@ -1180,8 +1424,14 @@ static void apply_prot_present(struct address_space *as, u64 va, u64 len,
                     ne &= ~nx;
                     ne |= PTE_U;          /* restore after PROT_NONE */
                     if ((prot & PROT_WRITE) != 0 && frame != zero_frame) {
+                        u32 refs_now;
+                        u64 flags_ref = cpu_irq_save();
+                        spin_lock(&ref_lock);
+                        refs_now = frame_refs[pfn];
+                        spin_unlock(&ref_lock);
+                        cpu_irq_restore(flags_ref);
                         if (shared != 0 || (pfn < (u32)MAX_FRAMES_AS
-                                            && frame_refs[pfn] <= 1)) {
+                                            && refs_now <= 1)) {
                             ne |= PTE_W;
                         }
                     }
@@ -1191,9 +1441,16 @@ static void apply_prot_present(struct address_space *as, u64 va, u64 len,
                 }
                 pt[pt_i(page_va)] = ne;
                 invlpg_page(page_va);
+                prot_changed = 1;
             }
         }
         off += PAGE_SIZE;
+    }
+    if (prot_changed != 0) {
+        /* mprotect edits leaf PTEs of a space that may be current on other
+         * CPUs: new PROT_NONE/RO entries are useless while a stale writable
+         * TLB entry survives there. Shoot the range before returning. */
+        as_shootdown_range((u64)as, va, va + len);
     }
 }
 

@@ -24,7 +24,7 @@ extern void kprintf(const char *fmt, ...);
  * ------------------------------------------------------------------------- */
 
 enum {
-    MAX_EXIT = 32,
+    MAX_EXIT = 64,                     /* matches the widened TCB pool      */
     WNOHANG     = 1,
     WUNTRACED   = 2,
     WCONTINUED  = 8
@@ -46,6 +46,7 @@ extern u64 cpu_irq_save(void);
 extern void cpu_irq_restore(u64 flags);
 extern void sched_yield(void);
 extern void sched_sleep_unlock_spin(u64 chan, volatile u32 *condition_lock);
+extern u32 sched_sleep_unlock_spin_intr(u64 chan, volatile u32 *condition_lock);
 
 
 /* sched.c */
@@ -249,9 +250,12 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
             return 0;
         }
         /* IRQ masking alone does not exclude a producer on another CPU.
-         * Hold the exit condition lock until run_lock has armed this sleep. */
+         * Hold the exit condition lock until run_lock has armed this sleep —
+         * or until admission refuses to park because a fatal / caught
+         * nonrestartable signal is already pending. */
         {
             u64 chan = sched_wait4_chan(parent);
+            u32 parked;
             arch.cpu_cli();
             spin_lock(&exit_lock);
             if (exit_exists_locked(want, parent)
@@ -266,9 +270,9 @@ u64 sys_wait4(u64 pid, u64 status_u, u64 options, u64 ruspace) {
                 arch.cpu_sti();
                 return (u64)(-1);
             }
-            sched_sleep_unlock_spin(chan, &exit_lock);
+            parked = sched_sleep_unlock_spin_intr(chan, &exit_lock);
             arch.cpu_sti();
-            if (sched_should_eintr()) {
+            if (parked == 0 || sched_should_eintr()) {
                 return (u64)-4;         /* EINTR */
             }
         }

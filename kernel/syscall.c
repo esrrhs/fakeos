@@ -4,6 +4,8 @@ import types;
 
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
+typedef types.int32_t s32;
+typedef types.int64_t s64;
 
 extern void kprintf(const char *fmt, ...);
 extern u64 msr_read(u32 msr);
@@ -74,6 +76,32 @@ extern u64 sys_brk(u64 newbrk);
 extern u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
 extern u64 sys_mprotect(u64 addr, u64 len, u64 prot);
 extern u64 sys_nice(u64 inc);
+
+/* natcap.c */
+extern s64 sys_nat_channel_create(u64 send_out, u64 recv_out);
+extern s64 sys_nat_send(u64 cap, u64 value, u64 block);
+extern s64 sys_nat_recv(u64 cap, u64 value_out, u64 block);
+extern s64 sys_nat_dup(u64 cap, u64 rights);
+extern s64 sys_nat_close(u64 cap);
+extern s64 sys_nat_mutex_create(u64 out);
+extern s64 sys_nat_mutex_lock(u64 cap, u64 block);
+extern s64 sys_nat_mutex_unlock(u64 cap);
+extern s64 sys_nat_mutex_consistent(u64 cap);
+extern s64 sys_nat_mutex_stat(u64 cap, u64 out);
+extern void nat_process_exit(u32 pid);
+extern void native_mutex_owner_died_key(u64 key);
+extern u64 sched_current_owner_key(void);
+
+/* net.c raw rings */
+extern u64 sys_raw_create(void);
+extern u64 sys_raw_map(u64 handle, u64 uva);
+extern u64 sys_raw_tx_kick(u64 handle, u64 max);
+extern u64 sys_raw_close(u64 handle);
+/* epoll.c: eventfd(2) + epoll(2)-lite */
+extern u64 sys_eventfd2(u64 initval, u64 flags);
+extern u64 sys_epoll_create1(u64 flags);
+extern u64 sys_epoll_ctl(u64 epfd, u64 op, u64 fd, u64 ev_u);
+extern u64 sys_epoll_wait(u64 epfd, u64 events_u, u64 maxevents, u64 timeout_ms);
 extern u64 sys_munmap(u64 addr, u64 len);
 extern u64 sys_chmod(u64 path, u64 mode);
 extern u64 sys_umask(u64 mask);
@@ -220,6 +248,30 @@ enum {
     SC_SYMLINK = 88,
     SC_READLINK = 89,
     SC_NICE = 503,            /* fakeos-specific; Linux has no nice(2) nr */
+    /* Native capability namespace (process-relative handles over kernel
+     * native objects). fakeos-specific numbers, no Linux ABI collision. */
+    SC_NAT_CHANNEL_CREATE = 504,
+    SC_NAT_SEND = 505,
+    SC_NAT_RECV = 506,
+    SC_NAT_DUP = 507,
+    SC_NAT_CLOSE = 508,
+    /* Native robust mutex (architecture section 6). */
+    SC_NAT_MUTEX_CREATE = 513,
+    SC_NAT_MUTEX_LOCK = 514,
+    SC_NAT_MUTEX_UNLOCK = 515,
+    SC_NAT_MUTEX_CONSISTENT = 516,
+    SC_NAT_MUTEX_STAT = 517,
+    /* Zero-copy raw device rings (AF_XDP analogue). */
+    SC_RAW_CREATE = 509,
+    SC_RAW_MAP = 510,
+    SC_RAW_TX_KICK = 511,
+    SC_RAW_CLOSE = 512,
+    /* eventfd(2) + epoll(2)-lite (modern readiness multiplexing).
+     * Linux-native numbers; the ABI matches upstream exactly. */
+    SC_EPOLL_WAIT = 232,
+    SC_EPOLL_CTL = 233,
+    SC_EVENTFD2 = 290,
+    SC_EPOLL_CREATE1 = 291,
     SC_FTRUNCATE = 77,
     SC_STAT = 4,
     SC_FSTAT = 5,
@@ -315,21 +367,31 @@ static u64 sys_clone(u64 flags, u64 stack, u64 fn, u64 arg) {
     return (u64)child_tid;
 }
 
+extern u32 sched_live_process_count(void);
+extern u32 sched_fork_proc_limit(void);
+
+/* P0-9 fork admission: a deterministic process-count limit (pool size
+ * minus kernel-thread headroom) checked BEFORE any allocation —
+ * exhaustion fails with clean EAGAIN instead of depending on which
+ * resource happens to run out first. */
 static u64 fork_exclusive(struct syscall_frame *f) {
     u64 parent_as = sched_current_as_h();
     if (parent_as == 0) {
         return (u64)(-1);               /* kernel threads cannot fork */
     }
+    if (sched_live_process_count() + 1 > sched_fork_proc_limit()) {
+        return (u64)-11;                /* EAGAIN: process limit */
+    }
     u64 child_as = mem.as_fork_h(parent_as);
     if (child_as == 0) {
-        return (u64)(-1);
+        return (u64)(-1);               /* ENOMEM: AS clone failed */
     }
     u32 child_pid = sched_alloc_pid();
-    if (!child_pid) {mem.as_destroy_h(child_as);return (u64)-1;}
+    if (!child_pid) {mem.as_destroy_h(child_as);return (u64)-12;}
     u32 slot = sched_clone_user((u64)f, child_as, child_pid);
     if (slot == 0xFFFFFFFF) {
         mem.as_destroy_h(child_as);
-        return (u64)(-1);
+        return (u64)-12;
     }
     return child_pid;                   /* parent sees the child pid */
 }
@@ -347,10 +409,16 @@ static u64 sys_fork(struct syscall_frame *f) {
 /* Raw task exit and native process exit deliberately differ. */
 static void proc_exit_task(u64 code) {
     u32 pid=sched_current_pid();u32 ppid;u64 as;
+    /* Robust mutexes owned by THIS task die with it (architecture section 6:
+     * group exit walks owned mutexes only outside scheduler spinlocks). Runs
+     * for leaders and secondary threads alike; nat_process_exit below then
+     * closes the capabilities. */
+    native_mutex_owner_died_key(sched_current_owner_key());
     sched_fd_close_all();
     sched_do_clear_child_tid();
     as=sched_process_leave(code);
     if(as) {
+        nat_process_exit(pid);          /* final task exit: close native caps */
         mem.as_release_h(as);
         code=sched_process_exit_ready();
         kprintf("[UPROC] pid %u exited (code %u)\n",(u64)pid,code);
@@ -544,6 +612,60 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     }
     if (f->rax == SC_NICE) {
         return sys_nice(f->rdi);
+    }
+    if (f->rax == SC_NAT_CHANNEL_CREATE) {
+        return sys_nat_channel_create(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NAT_SEND) {
+        return sys_nat_send(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_RECV) {
+        return sys_nat_recv(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_DUP) {
+        return sys_nat_dup(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NAT_CLOSE) {
+        return sys_nat_close(f->rdi);
+    }
+    if (f->rax == SC_NAT_MUTEX_CREATE) {
+        return sys_nat_mutex_create(f->rdi);
+    }
+    if (f->rax == SC_NAT_MUTEX_LOCK) {
+        return sys_nat_mutex_lock(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NAT_MUTEX_UNLOCK) {
+        return sys_nat_mutex_unlock(f->rdi);
+    }
+    if (f->rax == SC_NAT_MUTEX_CONSISTENT) {
+        return sys_nat_mutex_consistent(f->rdi);
+    }
+    if (f->rax == SC_NAT_MUTEX_STAT) {
+        return sys_nat_mutex_stat(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_RAW_CREATE) {
+        return sys_raw_create();
+    }
+    if (f->rax == SC_RAW_MAP) {
+        return sys_raw_map(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_RAW_TX_KICK) {
+        return sys_raw_tx_kick(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_RAW_CLOSE) {
+        return sys_raw_close(f->rdi);
+    }
+    if (f->rax == SC_EVENTFD2) {
+        return sys_eventfd2(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_EPOLL_CREATE1) {
+        return sys_epoll_create1(f->rdi);
+    }
+    if (f->rax == SC_EPOLL_CTL) {
+        return sys_epoll_ctl(f->rdi, f->rsi, f->rdx, f->r10);
+    }
+    if (f->rax == SC_EPOLL_WAIT) {
+        return sys_epoll_wait(f->rdi, f->rsi, f->rdx, f->r10);
     }
     if (f->rax == SC_GETPID) {
         return (u64)sched_current_pid();

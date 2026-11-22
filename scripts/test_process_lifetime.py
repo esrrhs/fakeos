@@ -34,6 +34,6 @@ def main():
     for mode,pid,got,code,early,done in found:
      assert pid==got and early=='0' and ((mode=='0' and code=='29' and done=='1') or (mode=='1' and code=='42' and done=='0')), 'unexpected completion/order semantics'
     masks=[int(x,16) for x in re.findall(r'\[PROCESS\] AS drained pid=\d+ task-exit CPU-mask=0x([0-9a-fA-F]+)',out)]
-    if cpu>1: assert any(m.bit_count()>1 for m in masks), 'no actual multi-CPU task teardown evidence'
+    if cpu>1: assert any(bin(m).count("1")>1 for m in masks), 'no actual multi-CPU task teardown evidence'
    print(f'SMP{cpu} ' +('observed baseline' if a.observe else 'PASS')+f': {found}',flush=True)
 if __name__=='__main__':main()

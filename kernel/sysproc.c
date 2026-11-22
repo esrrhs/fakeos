@@ -471,6 +471,10 @@ enum {
 /* futex(2) basics: WAIT/WAKE (+ PRIVATE). Channel is the user VA; works for
  * same-AS threads and MAP_SHARED across fork. No PI/bitset/requeue yet. */
 extern void sched_wait_probe_point(u64 chan);
+extern void sched_park_prepare(u64 chan);
+extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
+enum { PARK_INTERRUPTED_F = 2 }; /* matches sched.c park commit result */
+
 u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
     u64 as;
     u32 cmd;
@@ -490,11 +494,21 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
     if (cmd == FUTEX_WAIT) {
         volatile u32 *p = (volatile u32 *)uaddr;
         u32 cur = *p;
+        u32 pr;
         if (cur != (u32)val) {
             return EAGAIN_NEG;
         }
+        /* Register the park intent BEFORE the trusted injection point, then
+         * commit in one run_lock transaction: a producer holding run_lock
+         * (WAKE or sched_signal_send) either precedes the commit check — the
+         * latch or pending-signal refusal is visible — or observes the
+         * published sleeper. No user memory is read under run_lock. */
+        sched_park_prepare(uaddr);
         sched_wait_probe_point(uaddr);
-        sched_sleep(uaddr);
+        pr = sched_park_commit(uaddr, 0);
+        if (pr == PARK_INTERRUPTED_F) {
+            return EINTR_NEG;
+        }
         if (sched_should_eintr()) {
             return EINTR_NEG;
         }
@@ -515,6 +529,7 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
  * ------------------------------------------------------------------------- */
 
 extern u64 sched_clock_ticks(void);
+extern u64 nanosleep_chan;
 extern void sched_yield(void);
 extern void sched_check_signals(void);
 extern u32 sched_current_ppid(void);
@@ -568,8 +583,18 @@ static void ticks_to_timespec(u64 ticks, volatile u64 *sec_p, volatile u64 *nsec
     *nsec_p = (ticks % TICKS_PER_SEC) * NS_PER_TICK;
 }
 
-/* clock_gettime(2): REALTIME/MONOTONIC/BOOTTIME from 100 Hz elapsed ticks
- * (no RTC yet — REALTIME tracks boot-relative time like MONOTONIC). */
+static void ns_to_timespec(u64 ns, volatile u64 *sec_p, volatile u64 *nsec_p) {
+    *sec_p = ns / NS_PER_SEC;
+    *nsec_p = ns % NS_PER_SEC;
+}
+
+extern u64 tsc_hz(void);
+extern u64 tsc_ns(void);
+
+/* clock_gettime(2): REALTIME/MONOTONIC/BOOTTIME. With a calibrated TSC the
+ * resolution is nanoseconds (see kernel/tsc.c); without one the 100 Hz
+ * elapsed-tick clock remains. No RTC yet — REALTIME tracks boot-relative
+ * time like MONOTONIC. */
 u64 sys_clock_gettime(u64 clockid, u64 utp) {
     u64 as = sched_current_as_h();
     u64 ticks;
@@ -579,6 +604,10 @@ u64 sys_clock_gettime(u64 clockid, u64 utp) {
     if (clockid != CLOCK_REALTIME_ID && clockid != CLOCK_MONOTONIC_ID
         && clockid != CLOCK_BOOTTIME_ID) {
         return EINVAL_NEG;
+    }
+    if (tsc_hz() != 0) {
+        ns_to_timespec(tsc_ns(), (volatile u64 *)utp, (volatile u64 *)(utp + 8));
+        return 0;
     }
     ticks = sched_clock_ticks();
     ticks_to_timespec(ticks, (volatile u64 *)utp, (volatile u64 *)(utp + 8));
@@ -594,6 +623,8 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
     u64 ticks;
     u64 deadline;
     u64 now;
+    u64 tsc_deadline_ns = 0;           /* per-call: exact TSC deadline      */
+    u32 tsc_deadline_active = 0;
     if (as == 0 || ureq == 0 || !mem.as_user_range_ok(as, ureq, 16)) {
         return (u64)(-1);
     }
@@ -616,13 +647,45 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
     now = sched_clock_ticks();
     if (ticks > ~0ULL - now) return EINVAL_NEG;
     deadline = now + ticks;
+    {
+        /* Exact deadline in TSC nanoseconds (calibrated clock): the tick
+         * sleep overshoots by up to one tick; the caller then spin-waits
+         * the sub-tick remainder, so the total wait is never short and
+         * precise to the calibrated TSC. */
+        extern u64 tsc_hz(void);
+        extern u64 tsc_ns(void);
+        if (tsc_hz() != 0) {
+            u64 req_ns = (u64)sec * NS_PER_SEC + (u64)nsec;
+            u64 start = tsc_ns();
+            if (req_ns > ~0ULL - start) return EINVAL_NEG;
+            tsc_deadline_ns = start + req_ns;
+            tsc_deadline_active = 1;
+        } else {
+            tsc_deadline_active = 0;
+        }
+    }
     for (;;) {
+        if (tsc_deadline_active) {
+            u64 now_ns = tsc_ns();
+            if (now_ns >= tsc_deadline_ns) {
+                tsc_deadline_active = 0;
+                return 0;
+            }
+            if (urem != 0) {
+                /* Exact POSIX remainder on EINTR. */
+                volatile u64 *rp = (volatile u64 *)urem;
+                u64 rem_ns = tsc_deadline_ns - now_ns;
+                rp[0] = rem_ns / NS_PER_SEC;
+                rp[1] = rem_ns % NS_PER_SEC;
+            }
+        }
         now = sched_clock_ticks();
-        if (now >= deadline) {
+        if (now >= deadline && !tsc_deadline_active) {
             return 0;
         }
         sched_check_signals();
         if (sched_should_eintr_timer()) {
+            tsc_deadline_active = 0;
             if (urem != 0) {
                 u64 left = deadline - now;
                 ticks_to_timespec(left, (volatile u64 *)urem,
@@ -637,7 +700,7 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
             }
             return EINTR_NEG;
         }
-        sched_yield();
+        sched_yield();   /* BISECT: busy-yield instead of tick park */
     }
 }
 

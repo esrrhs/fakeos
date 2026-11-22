@@ -42,7 +42,7 @@ def main():
             if not match or int(match[1]) != cpus:
                 raise AssertionError(f"SMP{cpus}: CPU count evidence missing")
             mask = int(match[2], 16)
-            if not mask or mask >= (1 << cpus) or (cpus > 1 and mask.bit_count() < 2):
+            if not mask or mask >= (1 << cpus) or (cpus > 1 and bin(mask).count("1") < 2):
                 raise AssertionError(f"SMP{cpus}: actual multicore execution missing: {mask:#x}")
             rows = re.findall(r"native CPU (\d+): send=(\d+) recv=(\d+)", output)
             if len(rows) != cpus or {int(row[0]) for row in rows} != set(range(cpus)):

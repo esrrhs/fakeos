@@ -21,6 +21,8 @@ extern void net_schedule_work(void);
 extern void sched_check_signals_frame(u64 *f_rip, u64 *f_rflags, u64 *f_rsp,
                                       u64 *f_rdi, u64 *f_rax);
 extern void sched_resched_from_ipi(void);
+extern void spin_lock(volatile u32 *lock);
+extern void spin_unlock(volatile u32 *lock);
 
 /* Layout produced by isr_common in arch/x86_64/desc.asm (offsets grow as
  * registers are popped in reverse push order): */
@@ -160,6 +162,37 @@ void isr_dispatch(struct trap_frame *f) {
             /* Idle CPUs: claim balanced/stolen work immediately. */
             sched_resched_from_ipi();
         }
+        return;
+    }
+
+    /* Vector 35: TLB shootdown — drain this CPU's mailbox (mem/as.c).
+     * Flush every queued range while this CPU still runs the targeted
+     * address space (a CR3 reload covers >64-page ranges), then advance
+     * the drained marker so waiting senders proceed. */
+    if (v == 35) {
+        u32 cpu = arch.smp_cpuid();
+        arch.lapic_send_eoi();
+        spin_lock(&mem.as_sd_qlock[cpu]);
+        while (mem.as_sd_qtail[cpu] != mem.as_sd_qhead[cpu]) {
+            u32 qi = cpu * 16u + (mem.as_sd_qtail[cpu] % 16u);
+            u64 pml4 = mem.as_sd_handle[qi];
+            u64 s = mem.as_sd_start[qi];
+            u64 e = mem.as_sd_end[qi];
+            u32 seq = mem.as_sd_eseq[qi];
+            if (e > s && mem.as_current_h[cpu] == pml4) {
+                if (e - s > 64 * 4096) {
+                    mem.as_activate_h(pml4);      /* full CR3 reload */
+                } else {
+                    while (s < e) {
+                        mem.invlpg_page(s);
+                        s += 4096;
+                    }
+                }
+            }
+            mem.as_sd_qtail[cpu] = seq;
+            mem.as_sd_done[cpu] = seq;
+        }
+        spin_unlock(&mem.as_sd_qlock[cpu]);
         return;
     }
 

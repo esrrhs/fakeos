@@ -109,6 +109,7 @@ enum {
     ETH_MAX               = 1514,
     PKT_BUF_SIZE          = 2048,
     RX_BUFS               = 16,
+    TX_HDR_BUFS           = 32,     /* async-TX virtio-net header buffers  */
     QUEUE_MAX             = 1024,
     VNET_IRQ_VECTOR_RX    = 40,
     VNET_IRQ_VECTOR_TX    = 43,
@@ -144,6 +145,9 @@ struct virtio_net {
     u64 rx_buf_phys;
     u64 tx_buf_phys;
     u16 rx_desc[RX_BUFS];
+    u64 tx_hdr_phys[TX_HDR_BUFS];      /* per-in-flight net-header buffers  */
+    u16 tx_hdr_fifo[TX_HDR_BUFS];      /* completion-ordered header indexes */
+    u32 tx_async_inflight;
     u64 common_phys;
     u64 notify_phys;
     u64 isr_phys;
@@ -513,6 +517,183 @@ u32 virtio_net_rx(void *frame, u32 maxlen) {
     return len;
 }
 
+/* ---------------------------------------------------------------------------
+ * Zero-copy raw-device interface (AF_XDP analogue)
+ *
+ * RX: virtio_net_rx_take hands a completed driver buffer to the caller
+ * WITHOUT copying — the caller owns the slot until virtio_net_rx_post_slot
+ * returns it to the receive queue. Slow consumers apply natural
+ * backpressure (fewer posted buffers, frames dropped by the NIC).
+ *
+ * TX: virtio_net_tx_submit chains a pre-allocated virtio-net header
+ * descriptor with the CALLER's buffer descriptor and notifies the device —
+ * no copy into a staging buffer and no synchronous wait. Completions are
+ * recycled by virtio_net_tx_poll_completed; submissions complete in the
+ * order they were placed on the avail ring (single queue, in-order), so
+ * callers keep a simple FIFO of their own pending frames.
+ * ------------------------------------------------------------------------- */
+u64 virtio_net_rx_take(u32 *slot_out, u32 *len_out) {
+    u16 used_idx;
+    u16 ring_i;
+    u32 id;
+    u32 len;
+    u32 i;
+    u64 buf;
+    u16 slot;
+    u64 va;
+
+    if (!vn.present || slot_out == 0 || len_out == 0) {
+        return 0;
+    }
+    used_idx = *hhdm16(vn.rx.used_phys + 2);
+    if (used_idx == vn.rx.last_used_idx) {
+        return 0;
+    }
+    ring_i = (u16)(vn.rx.last_used_idx % vn.rx.size);
+    id = *hhdm32(vn.rx.used_phys + 4 + ((u64)ring_i) * 8 + 0);
+    len = *hhdm32(vn.rx.used_phys + 4 + ((u64)ring_i) * 8 + 4);
+    vn.rx.last_used_idx = (u16)(vn.rx.last_used_idx + 1);
+    (void)isr_read();
+
+    slot = 0xFFFF;
+    for (i = 0; i < RX_BUFS; i++) {
+        if (vn.rx_desc[i] == (u16)id) {
+            slot = (u16)i;
+            break;
+        }
+    }
+    if (slot == 0xFFFF || len <= net_hdr_size()) {
+        if (slot != 0xFFFF) {
+            free_desc(&vn.rx, (u16)id);
+            rx_post(slot);
+        }
+        return 0;
+    }
+    free_desc(&vn.rx, (u16)id);
+    buf = vn.rx_buf_phys + ((u64)slot) * PKT_BUF_SIZE;
+    len = len - net_hdr_size();
+    if (len > ETH_MAX) {
+        len = ETH_MAX;
+    }
+    *slot_out = (u32)slot;
+    *len_out = len;
+    va = HHDM_BASE + buf + (u64)net_hdr_size();
+    return va;
+}
+
+void virtio_net_rx_post_slot(u32 slot) {
+    u64 irq;
+    if (!vn.present || slot >= RX_BUFS) {
+        return;
+    }
+    irq = cpu_irq_save();
+    spin_lock(&vnet_tx_lock);
+    rx_post(slot);
+    spin_unlock(&vnet_tx_lock);
+    cpu_irq_restore(irq);
+}
+
+static u32 vnet_tx_hdr_used[TX_HDR_BUFS];
+
+u32 virtio_net_tx_submit(u64 buf_phys, u32 len) {
+    u64 irq;
+    u16 d0;
+    u16 d1;
+    u16 avail_idx;
+    u32 hidx;
+    u32 i;
+    u32 ok = 0;
+
+    if (!vn.present || buf_phys == 0 || len == 0 || len > ETH_MAX) {
+        return 0;
+    }
+    irq = cpu_irq_save();
+    spin_lock(&vnet_tx_lock);
+    if (!vn.present || vn.tx_async_inflight >= TX_HDR_BUFS) {
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
+    }
+    hidx = 0xFFFFFFFFu;
+    for (i = 0; i < (u32)TX_HDR_BUFS; i++) {
+        if (vnet_tx_hdr_used[i] == 0) {
+            hidx = i;
+            break;
+        }
+    }
+    if (hidx == 0xFFFFFFFFu) {
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
+    }
+    for (i = 0; i < net_hdr_size(); i++) {
+        hhdm8(vn.tx_hdr_phys[hidx])[i] = 0;
+    }
+    d0 = alloc_desc(&vn.tx);
+    if (d0 == 0xFFFF) {
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
+    }
+    d1 = alloc_desc(&vn.tx);
+    if (d1 == 0xFFFF) {
+        free_desc(&vn.tx, d0);
+        spin_unlock(&vnet_tx_lock); cpu_irq_restore(irq); return 0;
+    }
+    desc_write(&vn.tx, d0, vn.tx_hdr_phys[hidx], net_hdr_size(),
+               VRING_DESC_F_NEXT, d1);
+    desc_write(&vn.tx, d1, buf_phys, net_hdr_size() + len, 0, 0);
+    avail_idx = *hhdm16(vn.tx.avail_phys + 2);
+    *hhdm16(vn.tx.avail_phys + 4 + ((u64)(avail_idx % vn.tx.size)) * 2) = d0;
+    (void)isr_read();
+    *hhdm16(vn.tx.avail_phys + 2) = (u16)(avail_idx + 1);
+    (void)isr_read();
+    queue_notify(1);
+    vnet_tx_hdr_used[hidx] = 1;
+    vn.tx_hdr_fifo[vn.tx_async_inflight] = (u16)hidx;
+    vn.tx_async_inflight = vn.tx_async_inflight + 1;
+    ok = 1;
+    spin_unlock(&vnet_tx_lock);
+    cpu_irq_restore(irq);
+    return ok;
+}
+
+/* Recycle completed submissions (in-order FIFO). Returns the number of
+ * frames the device has finished since the previous poll. */
+u32 virtio_net_tx_poll_completed(u32 max) {
+    u64 irq;
+    u32 got = 0;
+    u32 i;
+    u16 d0;
+    u16 d1;
+    if (!vn.present) {
+        return 0;
+    }
+    irq = cpu_irq_save();
+    spin_lock(&vnet_tx_lock);
+    while (got < max && vn.tx_async_inflight > 0) {
+        u16 used_idx = *hhdm16(vn.tx.used_phys + 2);
+        if (used_idx == vn.tx.last_used_idx) {
+            break;
+        }
+        d0 = *hhdm32(vn.tx.used_phys + 4
+                     + ((u64)(vn.tx.last_used_idx % vn.tx.size)) * 8 + 0);
+        d1 = *hhdm16(vn.tx.desc_phys + ((u64)d0) * 16 + 14);
+        free_desc(&vn.tx, d1);
+        free_desc(&vn.tx, d0);
+        vn.tx.last_used_idx = (u16)(vn.tx.last_used_idx + 1);
+        (void)isr_read();
+        i = (u32)vn.tx_hdr_fifo[0];
+        vnet_tx_hdr_used[i] = 0;
+        for (i = 0; i + 1 < vn.tx_async_inflight; i++) {
+            vn.tx_hdr_fifo[i] = vn.tx_hdr_fifo[i + 1];
+        }
+        vn.tx_async_inflight = vn.tx_async_inflight - 1;
+        got++;
+    }
+    spin_unlock(&vnet_tx_lock);
+    cpu_irq_restore(irq);
+    return got;
+}
+
+u32 virtio_net_tx_async_inflight(void) {
+    return vn.tx_async_inflight;
+}
+
 /* Ack RX interrupt. MSI/MSI-X deliveries are edge and need no ISR ack;
  * INTx / legacy ISR is read-to-clear. */
 u32 virtio_net_irq(void) {
@@ -682,7 +863,14 @@ static u32 finish_queues_and_mac(u8 bus, u8 slot, u8 func) {
     vn.rx_buf_phys = cursor;
     cursor += (u64)RX_BUFS * PKT_BUF_SIZE;
     vn.tx_buf_phys = align_up(cursor, 4096);
-    if (vn.tx_buf_phys + PKT_BUF_SIZE > vn.arena_phys + ARENA_BYTES) {
+    cursor = vn.tx_buf_phys + PKT_BUF_SIZE;
+    cursor = align_up(cursor, 64);
+    for (i = 0; i < (u32)TX_HDR_BUFS; i++) {
+        vn.tx_hdr_phys[i] = cursor;
+        cursor = align_up(cursor + 64, 64);
+    }
+    vn.tx_async_inflight = 0;
+    if (cursor > vn.arena_phys + ARENA_BYTES) {
         status_write(STATUS_FAILED);
         kprintf("[VNET] arena too small for RX/TX buffers\n");
         return 0;

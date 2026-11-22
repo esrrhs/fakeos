@@ -44,6 +44,7 @@ spin_test_and_set:
     xchg %eax, (%rdi)
     ret
 
+
 spin_lock:
     mov $1, %eax
 .retry:

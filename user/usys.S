@@ -1,7 +1,8 @@
 /* fakeos userland SYSCALL wrappers (Gas AT&T for fakecc) */
     .text
     .globl atomic_cmpxchg, atomic_xchg, u_accept, u_arch_prctl, u_bind, u_brk, u_chdir, u_chmod
-    .globl u_chown, u_clock_gettime, u_clone, u_close, u_connect, u_dup2, u_execve, u_exit
+    .globl u_chown, u_clock_gettime, u_clone, u_close, u_connect, u_dup2, u_epoll_create1
+    .globl u_epoll_ctl, u_epoll_wait, u_eventfd2, u_execve, u_exit
     .globl u_fork, u_fstat, u_fsync, u_ftruncate, u_futex, u_getcwd, u_getdents, u_getegid
     .globl u_geteuid, u_getgid, u_getgroups, u_getpeername, u_getpgid, u_getpid, u_getppid, u_getsid
     .globl u_getsockname, u_getsockopt, u_gettid, u_getuid, u_ioctl, u_kill, u_link, u_listen
@@ -35,6 +36,22 @@
     USYSC1 u_nanosleep, 35
     USYSC1 u_clock_gettime, 228
     USYSC1 u_nice, 503
+    USYSC1 u_nat_channel_create, 504
+    USYSC1 u_nat_send, 505
+    USYSC1 u_nat_recv, 506
+    USYSC1 u_nat_dup, 507
+    USYSC1 u_nat_close, 508
+    USYSC1 u_nat_mutex_create, 513
+    USYSC1 u_nat_mutex_lock, 514
+    USYSC1 u_nat_mutex_unlock, 515
+    USYSC1 u_nat_mutex_consistent, 516
+    USYSC1 u_nat_mutex_stat, 517
+    USYSC1 u_raw_create, 509
+    USYSC1 u_raw_map, 510
+    USYSC1 u_raw_tx_kick, 511
+    USYSC1 u_raw_close, 512
+    USYSC1 u_eventfd2, 290
+    USYSC1 u_epoll_create1, 291
     USYSC1 u_yield, 24
     USYSC1 u_fork, 57
     USYSC1 u_execve, 59
@@ -174,6 +191,20 @@ u_clone:
 u_futex:
     mov %rcx, %r10
     mov $202, %eax
+    syscall
+    ret
+
+/* long u_epoll_ctl - 4th C arg RCX -> R10 */
+u_epoll_ctl:
+    mov %rcx, %r10
+    mov $233, %eax
+    syscall
+    ret
+
+/* long u_epoll_wait - 4th C arg RCX -> R10 */
+u_epoll_wait:
+    mov %rcx, %r10
+    mov $232, %eax
     syscall
     ret
 

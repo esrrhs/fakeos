@@ -37,8 +37,22 @@ extern void net_init(void);
 extern void net_selftest(void);
 
 extern void native_object_selftest(void);
+extern types.uint32_t smp_cpuid(void);
+extern types.uint32_t (*kmalloc_cpu_hook)(void);
+extern types.uint64_t sched_tlb_shootdown_hook(types.uint64_t handle,
+                                               types.uint64_t va_start,
+                                               types.uint64_t va_end);
+extern types.uint64_t (*as_shootdown_hook)(types.uint64_t handle,
+                                           types.uint64_t va_start,
+                                           types.uint64_t va_end);
+extern void tsc_calibrate(void);
+extern void tsc_vdso_init(void);
+extern types.uint64_t tsc_vdso_phys(void);
+extern types.uint64_t (*as_vdso_phys_hook)(void);
 
 extern void sched_wait_cancel_selftest(void);
+extern void slab_concurrent_selftest(void);
+extern void vm_concurrent_selftest(void);
 void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     // Initialize hardware drivers
     drivers.uart_init();
@@ -139,6 +153,15 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     mem.pmm_init(mbi_addr);
     pmm_selftest();
     vmm_selftest();
+    /* Per-CPU kmalloc caches key off the scheduler's CPU index; VM
+     * mutations route TLB shootdowns through the scheduler's IPI path. */
+    mem.kmalloc_cpu_hook = &smp_cpuid;
+    as_shootdown_hook = &sched_tlb_shootdown_hook;
+    /* High-resolution TSC clock + shared vDSO-lite clock page (mapped into
+     * every address space at a fixed VA by as_init's attach). */
+    tsc_calibrate();
+    tsc_vdso_init();
+    as_vdso_phys_hook = &tsc_vdso_phys;
     slab_selftest();
 
     // Virtual file system: inode/dentry/open-file core, Ramfs instance and
@@ -182,6 +205,8 @@ void kmain(types.uint64_t magic, types.uint64_t mbi_addr) {
     sched_ap_sysret_selftest();
     sched_allocator_selftest();
     native_object_selftest();
+    slab_concurrent_selftest();
+    vm_concurrent_selftest();
     sched_wait_cancel_selftest();
 
     // Perform verification self-tests

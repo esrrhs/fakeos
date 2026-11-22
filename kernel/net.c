@@ -12,6 +12,14 @@ extern void virtio_net_init(void);
 extern u32 virtio_net_present(void);
 extern void virtio_net_mac(u8 *out);
 extern u32 virtio_net_tx(const void *frame, u32 len);
+extern u64 virtio_net_rx_take(u32 *slot_out, u32 *len_out);
+extern void virtio_net_rx_post_slot(u32 slot);
+extern u32 virtio_net_tx_submit(u64 buf_phys, u32 len);
+extern u32 virtio_net_tx_poll_completed(u32 max);
+extern u32 virtio_net_tx_async_inflight(void);
+extern u32 sched_current_pid(void);
+extern u64 sched_current_as_h(void);
+extern void spin_unlock(volatile u32 *lock);
 extern u32 virtio_net_rx(void *frame, u32 maxlen);
 extern void virtio_net_msix_selftest(void);
 extern void sched_yield(void);
@@ -226,6 +234,315 @@ static u32 ping_got_reply;
 static u32 ping_target;
 static struct sock socks[MAX_SOCKS];
 static u16 next_eph = EPHEMERAL_BASE;
+
+/* ---------------------------------------------------------------------------
+ * RAW zero-copy device rings (AF_XDP / umem analogue)
+ *
+ * Each ring owns one contiguous frame pool (32 x 2048 B, buddy order 4)
+ * plus one shared control page. The pool is mapped read-write into the
+ * owner's address space, so packet bytes live ONCE in DMA-visible memory:
+ *
+ *   RX  zero-copy: the net worker takes completed driver buffers
+ *       (virtio_net_rx_take — no copy), publishes (slot,len) into the
+ *       control-page RX ring, and the user reads the frame bytes in place
+ *       from the mapped pool. Consumed slots return via the slot-flag
+ *       array (single-word atomic exchanges from both sides).
+ *   TX  zero-copy: the user writes a frame into a pool slot, publishes
+ *       (slot,len) on the TX ring and kicks; the kernel chains the SAME
+ *       physical buffer into the NIC asynchronously (virtio_net_tx_submit
+ *       — no staging copy, no spin). Frames addressed to the host stack
+ *       loop back through the RX ring in the kick instead, giving a
+ *       deterministic zero-copy turnaround without any responder.
+ *
+ * Single-producer/single-consumer per direction: the kernel is the only RX
+ * producer and TX consumer; the owner process is the only RX consumer and
+ * TX producer. Slot flags are one-word atomic exchanges, so the pool is
+ * shared lock-free between kernel and user. The easy path (sockets above)
+ * is untouched and keeps per-socket locks.
+ * ------------------------------------------------------------------------- */
+enum {
+    RAW_MAX        = 2,
+    RAW_FRAMES     = 32,
+    RAW_FRAME_SIZE = 2048,
+    RAW_ORDER      = 4,              /* 16 pages = RAW_FRAMES * RAW_FRAME_SIZE */
+    RAW_MAGIC      = 0x52415730u,    /* "RAW0"                                 */
+    /* Control-page layout, all values are u32 INDEXES (c[RAWO_x]): the
+     * kernel and the mapped user page share this table verbatim. */
+    RAWO_MAGIC       = 0,
+    RAWO_COUNT       = 1,
+    RAWO_FSIZE       = 2,
+    RAWO_IP          = 3,            /* host-order local IP                    */
+    RAWO_MAC         = 4,            /* 6 bytes spanning indexes 4..5          */
+    RAWO_RX_PROD     = 6,            /* kernel                                 */
+    RAWO_RX_CONS     = 7,            /* user                                   */
+    RAWO_RX_SLOT     = 8,            /* RAW_FRAMES entries                     */
+    RAWO_RX_LEN      = 40,
+    RAWO_TX_PROD     = 72,           /* user                                   */
+    RAWO_TX_CONS     = 73,           /* kernel                                 */
+    RAWO_TX_SLOT     = 74,
+    RAWO_TX_LEN      = 106,
+    RAWO_SLOT_FLAG   = 138,          /* 0 free / 1 in use; xchg discipline     */
+    RAWO_ST_TXLOCAL  = 170,
+    RAWO_ST_TXWIRE   = 171,
+    RAWO_ST_RXDROP   = 172,
+    RAWO_ST_TXDONE   = 173,
+    RAWO_POOL_LO     = 174
+};
+
+struct raw_ring {
+    u32 used;
+    u32 owner_pid;
+    u64 ctrl_page;                 /* physical                                */
+    volatile u32 *ctrl;            /* HHDM alias                              */
+    u64 frame_pool;                /* physical base of RAW_FRAMES slots       */
+    volatile u32 raw_lock;         /* serialises kick/close against worker    */
+};
+
+static struct raw_ring raw_rings[RAW_MAX];
+static u32 raw_rr;                 /* delivery round-robin over open rings    */
+
+static void raw_slot_release(volatile u32 *ctrl, u32 slot) {
+    ctrl[RAWO_SLOT_FLAG + slot] = 0;
+}
+
+/* Kernel RX producer: publish one completed buffer to open rings. A slot
+ * is handed to exactly one ring (exclusive ownership); with no ring open,
+ * or when the ring is full, the buffer returns to the driver immediately. */
+static void raw_deliver(u32 slot, u32 len) {
+    u32 tried;
+    for (tried = 0; tried < RAW_MAX; tried++) {
+        struct raw_ring *r = &raw_rings[(raw_rr + tried) % RAW_MAX];
+        volatile u32 *c;
+        u32 prod;
+        u32 cons;
+        u32 i;
+        if (!r->used || r->ctrl == 0) {
+            continue;
+        }
+        c = r->ctrl;
+        prod = c[RAWO_RX_PROD];
+        cons = c[RAWO_RX_CONS];
+        if (prod - cons >= RAW_FRAMES) {
+            c[RAWO_ST_RXDROP] = c[RAWO_ST_RXDROP] + 1;
+            virtio_net_rx_post_slot(slot);      /* backpressure: drop */
+            return;
+        }
+        i = prod % RAW_FRAMES;
+        c[RAWO_RX_SLOT + i] = slot;
+        c[RAWO_RX_LEN + i] = len;
+        c[RAWO_RX_PROD] = prod + 1;
+        raw_rr = (raw_rr + 1) % RAW_MAX;
+        return;
+    }
+    virtio_net_rx_post_slot(slot);              /* nobody listening */
+}
+
+/* TX: recycle completed wire submissions, then process pending entries in
+ * order — local destinations loop back through the RX ring (same physical
+ * buffer, zero-copy turnaround), everything else chains into the NIC
+ * asynchronously. Processing stops at the first wire submission so ring
+ * order equals completion order. Returns entries processed. */
+static u32 raw_kick_locked(struct raw_ring *r, u32 max) {
+    volatile u32 *c = r->ctrl;
+    u32 cons;
+    u32 prod;
+    u32 processed = 0;
+    u32 recycled;
+    recycled = virtio_net_tx_poll_completed(max);
+    c[RAWO_TX_CONS] = c[RAWO_TX_CONS] + recycled;
+    c[RAWO_ST_TXDONE] = c[RAWO_ST_TXDONE] + recycled;
+    cons = c[RAWO_TX_CONS];
+    prod = c[RAWO_TX_PROD];
+    while (processed < max && cons != prod) {
+        u32 i = cons % RAW_FRAMES;
+        u32 slot = c[RAWO_TX_SLOT + i];
+        u32 len = c[RAWO_TX_LEN + i];
+        u64 frame_va = HHDM_BASE_NC + r->frame_pool + (u64)slot * RAW_FRAME_SIZE;
+        if (len >= 34 && get16((const u8 *)frame_va + 12) == ETH_TYPE_IP) {
+            u32 dst_ip = get32((const u8 *)frame_va + 30);
+            if (is_local_dst(dst_ip)) {
+                /* Local: protocol path sees the frame in place, then the
+                 * same buffer is published on the RX ring zero-copy. */
+                handle_ip((const u8 *)frame_va + ETH_HDR, len - ETH_HDR,
+                          (const u8 *)frame_va + 6);
+                raw_deliver(slot, len);
+                c[RAWO_ST_TXLOCAL] = c[RAWO_ST_TXLOCAL] + 1;
+                cons = cons + 1;
+                c[RAWO_TX_CONS] = cons;
+                processed = processed + 1;
+                continue;
+            }
+        }
+        if (!virtio_net_tx_submit(r->frame_pool + (u64)slot * RAW_FRAME_SIZE,
+                                  len)) {
+            break;                             /* descriptors exhausted */
+        }
+        c[RAWO_ST_TXWIRE] = c[RAWO_ST_TXWIRE] + 1;
+        processed = processed + 1;             /* submitted (completes later) */
+        /* Wire completion arrives via a later kick; cons stays until then,
+         * so ordering between wire and local completions is preserved. */
+        break;
+    }
+    return processed;
+}
+
+u64 sys_raw_create(void) {
+    u32 i;
+    u32 idx = RAW_MAX;
+    struct raw_ring *r = 0;
+    for (i = 0; i < RAW_MAX; i++) {
+        if (!raw_rings[i].used) {
+            r = &raw_rings[i];
+            idx = i;
+            break;
+        }
+    }
+    if (r == 0) {
+        return (u64)(-1);                      /* EBUSY-ish: rings exhausted */
+    }
+    r->ctrl_page = mem.pmm_alloc_page();
+    r->frame_pool = mem.pmm_alloc_pages((u32)RAW_ORDER);
+    if (r->ctrl_page == 0 || r->frame_pool == 0) {
+        if (r->ctrl_page) mem.pmm_free_page(r->ctrl_page);
+        if (r->frame_pool) mem.pmm_free_pages(r->frame_pool, (u32)RAW_ORDER);
+        r->ctrl_page = 0;
+        r->frame_pool = 0;
+        return (u64)(-12);                     /* ENOMEM */
+    }
+    r->ctrl = (volatile u32 *)(HHDM_BASE_NC + r->ctrl_page);
+    for (i = 0; i < RAW_PAGE/4; i++) {
+        r->ctrl[i] = 0;
+    }
+    r->ctrl[RAWO_MAGIC] = RAW_MAGIC;
+    r->ctrl[RAWO_COUNT] = RAW_FRAMES;
+    r->ctrl[RAWO_FSIZE] = RAW_FRAME_SIZE;
+    r->ctrl[RAWO_IP] = local_ip;
+    for (i = 0; i < 6; i++) {
+        *((volatile u8 *)&r->ctrl[RAWO_MAC] + i) = local_mac[i];  /* idx 4 = byte 16 */
+    }
+    r->owner_pid = sched_current_pid();
+    r->used = 1;
+    r->raw_lock = 0;
+    (void)i;
+    return (u64)(idx + 1);                     /* handle 1..RAW_MAX */
+}
+
+u64 sys_raw_map(u64 handle, u64 uva) {
+    struct raw_ring *r;
+    u64 as;
+    u32 idx = (u32)handle;
+    if (idx == 0 || idx > RAW_MAX) {
+        return (u64)(-9);
+    }
+    r = &raw_rings[idx - 1];
+    if (!r->used || r->owner_pid != sched_current_pid()) {
+        return (u64)(-9);
+    }
+    if ((uva & 0xFFF) != 0) {
+        return (u64)(-22);
+    }
+    as = sched_current_as_h();
+    if (as == 0) {
+        return (u64)(-9);
+    }
+    if (!mem.as_map_phys_h(as, uva, RAW_PAGE, r->ctrl_page)) {
+        return (u64)(-14);
+    }
+    if (!mem.as_map_phys_h(as, uva + RAW_PAGE,
+                           (u64)RAW_FRAMES * RAW_FRAME_SIZE, r->frame_pool)) {
+        return (u64)(-14);
+    }
+    r->ctrl = (volatile u32 *)(HHDM_BASE_NC + r->ctrl_page);
+    r->ctrl[RAWO_IP] = local_ip;               /* refresh post-DHCP */
+    return 0;
+}
+
+/* Kick: recycle wire completions, then process pending TX entries in
+ * order. Concurrent kicks on the same ring are serialised by raw_lock;
+ * different rings kick independently on different CPUs. */
+u64 sys_raw_tx_kick(u64 handle, u64 max) {
+    struct raw_ring *r;
+    u32 idx = (u32)handle;
+    u64 irq;
+    u32 n;
+    if (idx == 0 || idx > RAW_MAX) {
+        return (u64)(-9);
+    }
+    r = &raw_rings[idx - 1];
+    if (!r->used || r->owner_pid != sched_current_pid() || r->ctrl == 0) {
+        return (u64)(-9);
+    }
+    if (max > RAW_FRAMES) {
+        max = RAW_FRAMES;
+    }
+    irq = cpu_irq_save();
+    if (spin_test_and_set(&r->raw_lock)) {
+        cpu_irq_restore(irq);
+        return 0;                              /* another kick in flight */
+    }
+    n = raw_kick_locked(r, (u32)max);
+    spin_unlock(&r->raw_lock);
+    cpu_irq_restore(irq);
+    return (u64)n;
+}
+
+/* Close: the owner munmaps its range first; the kernel returns every
+ * buffer that is still parked in the RX ring or pending on TX to the
+ * driver, then releases the ring. */
+u64 sys_raw_close(u64 handle) {
+    struct raw_ring *r;
+    volatile u32 *c;
+    u32 idx = (u32)handle;
+    u64 irq;
+    u32 i;
+    u32 inflight;
+    if (idx == 0 || idx > RAW_MAX) {
+        return (u64)(-9);
+    }
+    r = &raw_rings[idx - 1];
+    if (!r->used || r->owner_pid != sched_current_pid()) {
+        return (u64)(-9);
+    }
+    irq = cpu_irq_save();
+    if (spin_test_and_set(&r->raw_lock)) {
+        cpu_irq_restore(irq);
+        return 0;                              /* retry after in-flight kick */
+    }
+    c = r->ctrl;
+    if (c != 0) {
+        /* RX entries parked for the user return to the driver. */
+        u32 prod = c[RAWO_RX_PROD];
+        u32 cons = c[RAWO_RX_CONS];
+        while (cons != prod) {
+            virtio_net_rx_post_slot(c[RAWO_RX_SLOT + (cons % RAW_FRAMES)]);
+            cons = cons + 1;
+        }
+        /* TX entries submitted to the driver complete asynchronously; poll
+         * hard here (bounded) so their buffers are simply dropped. */
+        inflight = virtio_net_tx_async_inflight();
+        while (inflight > 0) {
+            if (virtio_net_tx_poll_completed((u32)inflight) == 0) break;
+            inflight = virtio_net_tx_async_inflight();
+        }
+        for (i = 0; i < RAW_FRAMES; i++) {
+            c[RAWO_SLOT_FLAG + i] = 0;
+        }
+    }
+    r->used = 0;
+    r->owner_pid = 0;
+    r->ctrl = 0;
+    spin_unlock(&r->raw_lock);
+    cpu_irq_restore(irq);
+    mem.pmm_free_page(r->ctrl_page);
+    mem.pmm_free_pages(r->frame_pool, (u32)RAW_ORDER);
+    r->ctrl_page = 0;
+    r->frame_pool = 0;
+    return 0;
+}
+
+
+static const u64 HHDM_BASE_NC = 0xFFFF800000000000ULL;  /* direct map   */
+static const u32 RAW_PAGE = 4096;
 
 /* True if dst is our QEMU lease or IPv4 loopback. */
 static u32 is_local_dst(u32 ip) {
@@ -957,17 +1274,27 @@ void net_poll(void) {
     irq = cpu_irq_save();
     if (spin_test_and_set(&net_rx_busy)) { cpu_irq_restore(irq); return; }
     while (1) {
-        n = virtio_net_rx(rx_frame, FRAME_MAX);
-        if (n < ETH_HDR) {
+        u32 rslot = 0;
+        u64 rva = virtio_net_rx_take(&rslot, &n);
+        const u8 *fr;
+        if (rva == 0) {
             break;
         }
-        mac_copy(src_mac, rx_frame + 6);
-        etype = get16(rx_frame + 12);
-        if (etype == ETH_TYPE_ARP) {
-            handle_arp(rx_frame + ETH_HDR, n - ETH_HDR);
-        } else if (etype == ETH_TYPE_IP) {
-            handle_ip(rx_frame + ETH_HDR, n - ETH_HDR, src_mac);
+        if (n < ETH_HDR) {
+            virtio_net_rx_post_slot(rslot);
+            continue;
         }
+        fr = (const u8 *)rva;
+        /* Protocol handlers read the driver buffer in place — the payload
+         * copies that remain (socket queues) are the same as before. */
+        mac_copy(src_mac, fr + 6);
+        etype = get16(fr + 12);
+        if (etype == ETH_TYPE_ARP) {
+            handle_arp(fr + ETH_HDR, n - ETH_HDR);
+        } else if (etype == ETH_TYPE_IP) {
+            handle_ip(fr + ETH_HDR, n - ETH_HDR, src_mac);
+        }
+        raw_deliver(rslot, n);
     }
     spin_unlock(&net_rx_busy);
     cpu_irq_restore(irq);

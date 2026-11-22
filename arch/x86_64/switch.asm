@@ -76,6 +76,9 @@ spin_test_and_set:
     xchg [rdi], eax
     ret
 
+; u32 atomic_cmpxchg_u32(volatile u32 *p, u32 expected, u32 new)
+;   rdi = p, esi = expected, edx = new; returns the original value in eax.
+
 spin_lock:
     mov     eax, 1
 .retry:

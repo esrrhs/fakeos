@@ -135,13 +135,16 @@ OBJS := \
 	$(BUILD_DIR)/ext2.o \
 	$(BUILD_DIR)/memtest.o \
 	$(BUILD_DIR)/sched.o \
+	$(BUILD_DIR)/tsc.o \
 	$(BUILD_DIR)/proctest.o \
 	$(BUILD_DIR)/native.o \
+	$(BUILD_DIR)/natcap.o \
 	$(BUILD_DIR)/syscall.o \
 	$(BUILD_DIR)/sysfile.o \
 	$(BUILD_DIR)/sysproc.o \
 	$(BUILD_DIR)/proc.o \
 	$(BUILD_DIR)/pipe.o \
+	$(BUILD_DIR)/epoll.o \
 	$(BUILD_DIR)/net.o \
 	$(BUILD_DIR)/tty.o \
 	$(BUILD_DIR)/uproc.o \
@@ -496,6 +499,16 @@ $(BUILD_DIR)/native.o: kernel/native.c
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/natcap.o: kernel/natcap.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tsc.o: kernel/tsc.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/proctest.o: kernel/proctest.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
@@ -527,6 +540,11 @@ $(BUILD_DIR)/proc.o: kernel/proc.c
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pipe.o: kernel/pipe.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  [FAKECC]  $<"
+	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/epoll.o: kernel/epoll.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  [FAKECC]  $<"
 	@FAKECC_PKG='$(ROOT_DIR)' '$(FCC)' $(FCCFLAGS) -c $< -o $@
@@ -564,6 +582,11 @@ $(BUILD_DIR)/kmain.o: kernel/kmain.c
 # Run automated test
 test: build
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_objects.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_native_caps.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_native_mutex.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_net_raw.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_vdso.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_rlimit.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_process_lifetime.py
 	@python3 scripts/test_qemu_fixture.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_ext2_reclaim.py

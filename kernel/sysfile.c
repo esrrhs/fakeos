@@ -53,6 +53,9 @@ extern u32 tty_input_pending(void);
 extern u64 sched_clock_ticks(void);
 extern void sched_yield(void);
 extern void sched_sleep(u64 chan);
+extern void sched_park_prepare(u64 chan);
+extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
+enum { PARK_INTERRUPTED_F = 2 }; /* matches sched.c park commit result */
 extern void sched_wakeup(u64 chan);
 extern u32 pipe_can_read(u32 fh);
 extern u32 pipe_can_write(u32 fh);
@@ -67,6 +70,20 @@ extern u32 sched_should_eintr_timer(void);
 extern void sched_check_signals(void);
 extern u32 sock_can_read(u32 fh);
 extern u32 sock_can_write(u32 fh);
+
+/* kernel/epoll.c */
+extern u32 eventfd_fh_is(u32 fh);
+extern u32 epoll_fh_is(u32 fh);
+extern u32 eventfd_can_read(u32 fh);
+extern u32 eventfd_can_write(u32 fh);
+extern u32 epoll_can_read(u32 fh);
+extern u32 epoll_can_write(u32 fh);
+extern u64 eventfd_read(u32 fh, char *kbuf, u64 len);
+extern u64 eventfd_write(u32 fh, const char *kbuf, u64 len);
+extern u32 eventfd_retain(u32 fh);
+extern u32 epoll_retain(u32 fh);
+extern u32 eventfd_close(u32 fh);
+extern u32 epoll_close(u32 fh);
 
 /* kernel/pipe.c */
 extern u32 pipe_fh_is(u32 fh);
@@ -361,6 +378,10 @@ u64 sys_close(u64 fd) {
         ok = pipe_close(fh);
     } else if (sock_fh_is(fh)) {
         ok = sock_close(fh);
+    } else if (eventfd_fh_is(fh)) {
+        ok = eventfd_close(fh);
+    } else if (epoll_fh_is(fh)) {
+        ok = epoll_close(fh);
     } else {
         ok = fs.fs_close(fh);
     }
@@ -390,6 +411,10 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
             pipe_close(nfh);
         } else if (sock_fh_is(nfh)) {
             sock_close(nfh);
+        } else if (eventfd_fh_is(nfh)) {
+            eventfd_close(nfh);
+        } else if (epoll_fh_is(nfh)) {
+            epoll_close(nfh);
         } else {
             fs.fs_close(nfh);
         }
@@ -401,6 +426,10 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
         pipe_retain(ofh);
     } else if (sock_fh_is(ofh)) {
         sock_retain(ofh);
+    } else if (eventfd_fh_is(ofh)) {
+        eventfd_retain(ofh);
+    } else if (epoll_fh_is(ofh)) {
+        epoll_retain(ofh);
     } else {
         fs.fs_file_retain(ofh);
     }
@@ -431,6 +460,23 @@ u64 sys_read_fd(u64 fd, u64 buf, u64 len) {
     fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD || as == 0) {
         return (u64)(-1);
+    }
+
+    if (eventfd_fh_is(fh)) {
+        u64 n;
+        if (!mem.as_user_range_ok(as, buf, 8) || len < 8) {
+            return (u64)(-22);
+        }
+        n = eventfd_read(fh, kbuf, 8);
+        if (n == 8) {
+            /* 8-byte little-endian counter to user memory. */
+            volatile char *u = (volatile char *)buf;
+            u64 i;
+            for (i = 0; i < 8; i++) {
+                u[i] = kbuf[i];
+            }
+        }
+        return n;
     }
 
     /* fd 0: serial console with canonical line discipline. */
@@ -517,6 +563,22 @@ u64 sys_write_fd(u64 fd, u64 buf, u64 len) {
     fh = sched_fd_get((u32)fd);
     if (fh == FD_BAD || as == 0) {
         return (u64)(-1);
+    }
+
+    if (eventfd_fh_is(fh)) {
+        u64 n;
+        if (!mem.as_user_range_ok(as, buf, 8) || len < 8) {
+            return (u64)(-22);
+        }
+        {
+            volatile char *u = (volatile char *)buf;
+            u64 i;
+            for (i = 0; i < 8; i++) {
+                kbuf[i] = u[i];
+            }
+        }
+        n = eventfd_write(fh, kbuf, 8);
+        return n;
     }
 
     /* fd 1/2: serial console sink. Validate the whole user range first, then
@@ -1182,8 +1244,13 @@ u64 sys_fsync(u64 fd) {
 
 
 
-/* Shared readiness probe used by select(2) and poll(2). */
-static u32 fd_ready_read(u32 fh) {
+/* Shared readiness probe used by select(2)/poll(2)/epoll(2). NOTE: these
+ * take the target object's own (possibly sleeping) locks — never call them
+ * while holding a spinlock. */
+u32 fd_ready_read(u32 fh) {
+    if (eventfd_fh_is(fh)) {
+        return eventfd_can_read(fh);
+    }
     if (sock_fh_is(fh)) {
         return sock_can_read(fh);
     }
@@ -1196,7 +1263,10 @@ static u32 fd_ready_read(u32 fh) {
     return 1; /* regular files readable */
 }
 
-static u32 fd_ready_write(u32 fh) {
+u32 fd_ready_write(u32 fh) {
+    if (eventfd_fh_is(fh)) {
+        return eventfd_can_write(fh);
+    }
     if (sock_fh_is(fh)) {
         return sock_can_write(fh);
     }
@@ -1326,9 +1396,18 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
             return EINTR_SEL;
         }
         /* Infinite block: channel-sleep. Finite timeout: yield so deadline
-         * can be observed without a timer->select ISR coupling. */
+         * can be observed without a timer->select ISR coupling. Readiness is
+         * a predicate checked outside a condition lock, so the park intent is
+         * registered before sleeping: a readiness producer latches the
+         * notification (PARK_WOKEN) instead of the wakeup being lost, and
+         * commit refuses to park when cancellation is pending (nonrestartable
+         * policy). */
         if (timeout_u == 0) {
-            sched_sleep((u64)&select_wait_token);
+            sched_park_prepare((u64)&select_wait_token);
+            if (sched_park_commit((u64)&select_wait_token, 1)
+                == PARK_INTERRUPTED_F) {
+                return EINTR_SEL;
+            }
         } else {
             sched_yield();
         }
@@ -1421,7 +1500,11 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
             return EINTR_SEL;
         }
         if ((i64)timeout_ms < 0) {
-            sched_sleep((u64)&select_wait_token);
+            sched_park_prepare((u64)&select_wait_token);
+            if (sched_park_commit((u64)&select_wait_token, 1)
+                == PARK_INTERRUPTED_F) {
+                return EINTR_SEL;
+            }
         } else {
             sched_yield();
         }

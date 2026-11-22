@@ -226,6 +226,7 @@ u64 pmm_alloc_pages(u32 order) {
 }
 
 
+static volatile u32 pmm_trace;
 u64 pmm_alloc_page(void) {
     return pmm_alloc_pages(0);
 }
