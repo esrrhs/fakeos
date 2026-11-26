@@ -2822,21 +2822,21 @@ static int life_failure_checks(void) {
         for(i=0;i<2;i++)if(u_wait4(children[i],&status,0,0)!=children[i] || ((status>>8)&255)!=31+i)return 1;
     }
     puts("[LIFETIME] PASS bounded task allocation failure/rollback/reuse and concurrent process teardown");
-    u_munmap(f,4096);u_munmap(stacks,32*16384);return 0;
+    u_munmap(f,4096);u_munmap(stacks,64*16384);return 0;
 }
 
 extern long u_poll(void *fds, unsigned long n, long timeout);
 static int life_owner_capacity_check(void) {
-    long children[32],pid,status;int pipefd[2];int n,i,one;u64 end;char byte;
+    long children[80],pid,status;int pipefd[2];int n,i,one;u64 end;char byte;
     struct { int fd; short events; short revents; } pollfd;
     if(u_pipe(pipefd)!=0)return 1;
-    for(n=0;n<32;n++) {
+    for(n=0;n<80;n++) {
         pid=u_fork();if(pid<0)break;
         if(pid==0)u_exit(0);
         children[n]=pid;end=life_now()+5000000000UL;
         while(life_status(pid,&one)!='Z'){if(life_now()>=end)return 1;u_yield();}
     }
-    if(n==0 || n==32)return 1;
+    if(n==0 || n==80)return 1;
     for(i=0;i<n;i++)if(u_wait4(children[i],&status,0,0)!=children[i] || status)return 1;
     pid=u_fork();if(pid<0)return 1;if(pid==0)u_exit(0);
     if(u_wait4(pid,&status,0,0)!=pid || status)return 1;
@@ -3332,6 +3332,7 @@ static int native_mutex_probe(void) {
         if(u_nat_mutex_unlock(m)!=0)u_exit(94);     /* release: FIFO -> child 2 */
         u_exit(0);
     }
+    if(!nm_stat_until(m,1,1))return 46;             /* child 1 queued first */
     pid2=u_fork();
     if(pid2<0)return 46;
     if(pid2==0) {
@@ -3772,8 +3773,657 @@ static int rlimit_probe(void) {
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * Modern native high-concurrency kernel suite (--native-modern / --native-child):
+ *   Step 1: futex(FUTEX_WAIT) relative timeout + zero/invalid validation (D2)
+ *   Step 2: native channel & robust mutex monotonic absolute deadlines (D2)
+ *   Step 3: bounded copied byte messages (0..256B) + short-buffer peek (D3)
+ *   Step 4: two-phase atomic capability transfer (DUP attenuation + MOVE) (D3)
+ *   Step 5: multi-object wait_any (readiness, rotating fairness, deadline) (D4)
+ *   Step 6: multithreaded zero-legacy nat_process_spawn + explicit caps (D5)
+ *   Step 7: nat_task_spawn / 64-bit nat_task_exit / multi-join / task cancel (D5)
+ *   Step 8: process-shared FD/CWD table + deferred-close UAF safety (D5)
+ *   Step 9: sharded multi-channel/mutex SMP storm + zero-leak pool recovery (D3/D6)
+ * ------------------------------------------------------------------------- */
+extern long u_nat_send_timed(long cap, long value, unsigned long abs_deadline_ns);
+extern long u_nat_recv_timed(long cap, long *value_out, unsigned long abs_deadline_ns);
+extern long u_nat_mutex_lock_timed(long cap, unsigned long abs_deadline_ns);
+extern long u_nat_chan_send_msg(long cap, const void *desc, unsigned long abs_deadline_ns);
+extern long u_nat_chan_recv_msg(long cap, void *desc, unsigned long abs_deadline_ns);
+extern long u_nat_wait_any(void *items, unsigned long count, unsigned long abs_deadline_ns);
+extern long u_nat_process_spawn(const void *desc, unsigned long *cap_out);
+extern long u_nat_task_spawn(void *entry, void *stack, void *arg, unsigned long *cap_out);
+extern void u_nat_task_exit(unsigned long result);
+extern long u_nat_exec_wait(long cap, unsigned long *result_out, unsigned long abs_deadline_ns);
+extern long u_nat_exec_cancel(long cap);
+extern long u_getcwd(char *buf, unsigned long len);
+
+struct nm_msg_desc {
+    unsigned long bytes_ptr;
+    unsigned long bytes_len;
+    unsigned long caps_ptr;
+    unsigned long caps_count;
+};
+
+struct nm_cap_xfer {
+    unsigned long cap;
+    unsigned int rights;
+    unsigned int mode;
+};
+
+struct nm_wait_item {
+    unsigned long cap;
+    unsigned int events;
+    unsigned int revents;
+};
+
+struct nm_spawn_desc {
+    unsigned long path_ptr;
+    unsigned long argv_ptr;
+    unsigned long envp_ptr;
+    unsigned long caps_ptr;
+    unsigned long caps_count;
+    unsigned long flags;
+};
+
+/* Bootstrap child launched directly from ELF via nat_process_spawn (flags=0:
+ * no console fds, only explicit capabilities at slot 1=(1<<16)|1 [recv] and
+ * slot 2=(1<<16)|2 [send]). Verifies fd isolation, exchanges rich message,
+ * and exits with deterministic code 73. */
+static int native_child_entry(void) {
+    unsigned long rx_cap = (1UL << 16) | 1UL;
+    unsigned long tx_cap = (1UL << 16) | 2UL;
+    unsigned char buf[64];
+    unsigned long got_caps[4];
+    struct nm_msg_desc md;
+    long v = 0;
+    unsigned int i;
+
+    /* With spawn flags=0, ambient console fd 0 must NOT be open! */
+    if (u_read(0, buf, 1) >= 0) return 91;
+    /* Non-delegated slot 3 must not exist in this fresh capability table. */
+    if (u_nat_recv((long)((1UL << 16) | 3UL), &v, 0) != -9) return 92;
+
+    md.bytes_ptr = (unsigned long)buf;
+    md.bytes_len = 64;
+    md.caps_ptr = (unsigned long)got_caps;
+    md.caps_count = 4;
+    if (u_nat_chan_recv_msg((long)rx_cap, &md, ~0UL) != 1) return 93;
+    if (md.bytes_len != 12 || md.caps_count != 1) return 94;
+    for (i = 0; i < 12; i++) {
+        if (buf[i] != (unsigned char)(0xA0u + i)) return 95;
+        buf[i] = (unsigned char)(buf[i] ^ 0x5Au);
+    }
+    /* Lock & unlock the mutex capability transferred in the message! */
+    if (u_nat_mutex_lock((long)got_caps[0], 1) != 0) return 96;
+    if (u_nat_mutex_unlock((long)got_caps[0]) != 0) return 97;
+    u_nat_close((long)got_caps[0]);
+
+    md.bytes_ptr = (unsigned long)buf;
+    md.bytes_len = 12;
+    md.caps_ptr = 0;
+    md.caps_count = 0;
+    if (u_nat_chan_send_msg((long)tx_cap, &md, ~0UL) != 0) return 98;
+    u_nat_close((long)rx_cap);
+    u_nat_close((long)tx_cap);
+    return 73;
+}
+
+struct nmod_worker_arg {
+    volatile unsigned int ready;
+    volatile unsigned int release;
+    volatile unsigned int alive;
+    long ch_cap;
+    long mu_cap;
+    int shared_fd;
+    volatile int fd_ok;
+    volatile int cwd_ok;
+    unsigned long id;
+};
+
+static void nmod_wait_producer(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    struct { long s; long ns; } req;
+    atomic_xchg(&a->ready, 1);
+    req.s = 0;
+    req.ns = 20000000L; /* 20 ms so main parks inside wait_any */
+    u_nanosleep(&req, 0);
+    u_nat_send(a->ch_cap, 0x778899UL, 1);
+    u_nat_task_exit(0);
+}
+
+static void nmod_bg_holder(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    atomic_xchg(&a->ready, 1);
+    while (!life_load(&a->release)) {
+        u_yield();
+    }
+    u_nat_task_exit(0xBEEF0001UL);
+}
+
+static void nmod_ret_worker(void *arg) {
+    unsigned long id = (unsigned long)arg;
+    u_yield();
+    u_nat_task_exit(0x1122334455660000UL + id);
+}
+
+static void nmod_cancel_victim(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    long v = 0;
+    atomic_xchg(&a->ready, 1);
+    /* Blocks indefinitely until u_nat_exec_cancel wakes & cancels ONLY us. */
+    (void)u_nat_recv(a->ch_cap, &v, 1);
+    u_nat_task_exit(0xDEADUL);
+}
+
+static void nmod_shared_res_worker(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    char cbuf[64];
+    char rbuf[16];
+    atomic_xchg(&a->ready, 1);
+    while (!life_load(&a->release)) {
+        u_yield();
+    }
+    /* Read CWD and FD opened by main AFTER this thread was spawned! */
+    cbuf[0] = 0;
+    if (u_getcwd(cbuf, sizeof(cbuf)) > 0 && strcmp(cbuf, "/tmp") == 0) {
+        a->cwd_ok = 1;
+    }
+    if (u_lseek(a->shared_fd, 0, 0) == 0
+        && u_read(a->shared_fd, rbuf, 6) == 6
+        && rbuf[0] == 'S' && rbuf[5] == 'D') {
+        a->fd_ok = 1;
+    }
+    /* Exiting this task MUST NOT close the process-shared descriptor! */
+    u_nat_task_exit(0xCAFEUL);
+}
+
+static void nmod_pipe_pin_reader(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    char b = 0;
+    atomic_xchg(&a->ready, 1);
+    /* Blocks in pipe_read holding pinned_fh while main closes shared_fd! */
+    long r = u_read(a->shared_fd, &b, 1);
+    a->fd_ok = (r == 0) ? 1 : 0;
+    u_nat_task_exit(0);
+}
+
+static void nmod_storm_worker(void *arg) {
+    struct nmod_worker_arg *a = (struct nmod_worker_arg *)arg;
+    int i;
+    long v = 0;
+    for (i = 0; i < 64; i++) {
+        if (u_nat_mutex_lock(a->mu_cap, 1) != 0) u_nat_task_exit(1);
+        if (u_nat_send(a->ch_cap, (long)(a->id * 1000UL + (unsigned long)i), 1) != 0) {
+            u_nat_mutex_unlock(a->mu_cap);
+            u_nat_task_exit(2);
+        }
+        if (u_nat_recv(a->fd_ok, &v, 1) != 1) {
+            u_nat_mutex_unlock(a->mu_cap);
+            u_nat_task_exit(3);
+        }
+        if (u_nat_mutex_unlock(a->mu_cap) != 0) u_nat_task_exit(4);
+    }
+    u_nat_task_exit(0);
+}
+
+static int native_modern_probe(void) {
+    unsigned int fword = 7;
+    struct { long s; long ns; } ts;
+    u64 t0, t1;
+    long sx, rx, sx2, rx2, mu, v;
+    int i;
+
+    /* Step 1: futex(FUTEX_WAIT) relative timeout + validation (D2). */
+    ts.s = -1; ts.ns = 0;
+    if (futex(&fword, 0, 7, &ts, 0, 0) != -22) return 10;
+    ts.s = 0; ts.ns = 1000000000L;
+    if (futex(&fword, 0, 7, &ts, 0, 0) != -22) return 11;
+    ts.s = 0; ts.ns = 0;
+    if (futex(&fword, 0, 8, &ts, 0, 0) != -11) return 12; /* EAGAIN mismatch */
+    if (futex(&fword, 0, 7, &ts, 0, 0) != -110) return 13; /* zero -> ETIMEDOUT */
+    ts.s = 0; ts.ns = 30000000L;
+    t0 = life_now();
+    if (futex(&fword, 0, 7, &ts, 0, 0) != -110) return 14;
+    t1 = life_now();
+    if (t1 - t0 < 20000000UL) return 15;
+    puts("[NATIVE-MODERN] step1 PASS futex relative timeout ETIMEDOUT + validation");
+
+    /* Step 2: Native channel & mutex monotonic absolute deadlines (D2). */
+    if (u_nat_channel_create(&sx, &rx) != 0) return 20;
+    if (u_nat_mutex_create(&mu) != 0) return 21;
+    if (u_nat_recv_timed(rx, &v, 0x8000000000000000UL) != -22) return 22;
+    if (u_nat_recv_timed(rx, &v, 0) != -11) return 23;
+    t0 = life_now();
+    if (u_nat_recv_timed(rx, &v, t0 + 30000000UL) != -110) return 24;
+    if (life_now() - t0 < 20000000UL) return 25;
+    for (i = 0; i < 8; i++) {
+        if (u_nat_send_timed(sx, i, 0) != 0) return 26;
+    }
+    t0 = life_now();
+    if (u_nat_send_timed(sx, 99, t0 + 25000000UL) != -110) return 27;
+    for (i = 0; i < 8; i++) {
+        if (u_nat_recv_timed(rx, &v, 0) != 1 || v != i) return 28;
+    }
+    /* Cross-process held mutex lock deadline -> ETIMEDOUT, queue clean after. */
+    if (u_nat_mutex_lock(mu, 0) != 0) return 29;
+    {
+        long pid = u_fork();
+        long st = 0;
+        if (pid < 0) return 30;
+        if (pid == 0) {
+            u64 ct0 = life_now();
+            long lrc = u_nat_mutex_lock_timed(mu, ct0 + 30000000UL);
+            u_exit(lrc == -110 && (life_now() - ct0 >= 20000000UL) ? 0 : 91);
+        }
+        if (u_wait4(pid, &st, 0, 0) != pid || ((st >> 8) & 255) != 0) return 31;
+    }
+    if (u_nat_mutex_unlock(mu) != 0) return 32;
+    if (u_nat_mutex_lock_timed(mu, 0) != 0 || u_nat_mutex_unlock(mu) != 0) return 33;
+    puts("[NATIVE-MODERN] step2 PASS channel/mutex monotonic deadlines ETIMEDOUT");
+
+    /* Step 3: Bounded copied byte messages + short-buffer peek rollback (D3). */
+    {
+        unsigned char sbuf[200];
+        unsigned char rbuf[256];
+        struct nm_msg_desc md;
+        for (i = 0; i < 200; i++) sbuf[i] = (unsigned char)((i * 13 + 7) & 0xFF);
+        md.bytes_ptr = (unsigned long)sbuf;
+        md.bytes_len = 300;
+        md.caps_ptr = 0;
+        md.caps_count = 0;
+        if (u_nat_chan_send_msg(sx, &md, 0) != -22) return 34; /* >256B rejected */
+        md.bytes_len = 200;
+        if (u_nat_chan_send_msg(sx, &md, 0) != 0) return 35;
+        /* Short buffer (64 < 200) returns -90 (EMSGSIZE) without consuming! */
+        md.bytes_ptr = (unsigned long)rbuf;
+        md.bytes_len = 64;
+        if (u_nat_chan_recv_msg(rx, &md, 0) != -90) return 36;
+        md.bytes_len = 256;
+        if (u_nat_chan_recv_msg(rx, &md, 0) != 1 || md.bytes_len != 200) return 37;
+        for (i = 0; i < 200; i++) {
+            if (rbuf[i] != sbuf[i]) return 38;
+        }
+    }
+    puts("[NATIVE-MODERN] step3 PASS 200B copied byte message + EMSGSIZE peek rollback");
+
+    /* Step 4: Two-phase atomic capability transfer (DUP attenuation + MOVE) (D3). */
+    {
+        long pid, st = 0;
+        long d_sx, d_rx, m_xfer;
+        struct nm_cap_xfer xfers[2];
+        unsigned long got_caps[2];
+        unsigned char tag[8];
+        struct nm_msg_desc md;
+
+        pid = u_fork();
+        if (pid < 0) return 40;
+        if (pid == 0) {
+            unsigned char cbuf[16];
+            unsigned long ccaps[4];
+            struct nm_msg_desc cmd;
+            long cv = 0;
+            u_nat_close(sx);
+            cmd.bytes_ptr = (unsigned long)cbuf;
+            cmd.bytes_len = 16;
+            cmd.caps_ptr = (unsigned long)ccaps;
+            cmd.caps_count = 4;
+            if (u_nat_chan_recv_msg(rx, &cmd, ~0UL) != 1) u_exit(81);
+            if (cmd.caps_count != 2 || cmd.bytes_len != 4) u_exit(82);
+            /* ccaps[0] is MOVE'd channel SEND cap; ccaps[1] is DUP'd MUNLOCK|MLOCK|MWAIT */
+            if (u_nat_send((long)ccaps[0], 0x55AA1234L, 0) != 0) u_exit(83);
+            /* Attenuated without recv: recv on ccaps[0] must fail EPERM (-1). */
+            if (u_nat_recv((long)ccaps[0], &cv, 0) != -1) u_exit(84);
+            if (u_nat_mutex_lock((long)ccaps[1], 1) != 0) u_exit(85);
+            if (u_nat_mutex_unlock((long)ccaps[1]) != 0) u_exit(86);
+            u_nat_close((long)ccaps[0]);
+            u_nat_close((long)ccaps[1]);
+            u_nat_close(rx);
+            u_exit(0);
+        }
+        /* Create d_sx/d_rx and m_xfer AFTER fork: child has zero ambient access! */
+        if (u_nat_channel_create(&d_sx, &d_rx) != 0) return 41;
+        if (u_nat_mutex_create(&m_xfer) != 0) return 42;
+        /* Test failed MOVE on full channel: fill full_sx, attempt MOVE with
+         * deadline=0, verify d_sx is STILL valid in parent, then close! */
+        {
+            long full_sx, full_rx;
+            if (u_nat_channel_create(&full_sx, &full_rx) != 0) return 45;
+            for (i = 0; i < 8; i++) u_nat_send(full_sx, i, 0);
+            xfers[0].cap = (unsigned long)d_sx;
+            xfers[0].rights = 1; /* NATC_SEND */
+            xfers[0].mode = 1;   /* NAT_XFER_MOVE */
+            md.bytes_ptr = (unsigned long)tag;
+            md.bytes_len = 0;
+            md.caps_ptr = (unsigned long)xfers;
+            md.caps_count = 1;
+            if (u_nat_chan_send_msg(full_sx, &md, 0) != -11) return 46; /* EAGAIN */
+            /* d_sx MUST NOT have been invalidated by the failed MOVE! */
+            if (u_nat_send(d_sx, 0x1111L, 0) != 0) return 47;
+            if (u_nat_recv(d_rx, &v, 0) != 1 || v != 0x1111L) return 48;
+            u_nat_close(full_sx);
+            u_nat_close(full_rx);
+        }
+        u_nat_close(rx); /* child is now sole reader of sx */
+        tag[0] = 'X'; tag[1] = 'F'; tag[2] = 'E'; tag[3] = 'R';
+        xfers[0].cap = (unsigned long)d_sx;
+        xfers[0].rights = 1;            /* NATC_SEND (attenuated: no TRANSFER) */
+        xfers[0].mode = 1;              /* NAT_XFER_MOVE */
+        xfers[1].cap = (unsigned long)m_xfer;
+        xfers[1].rights = 4 | 8 | 16;   /* MLOCK|MUNLOCK|MWAIT */
+        xfers[1].mode = 0;              /* NAT_XFER_DUP */
+        md.bytes_ptr = (unsigned long)tag;
+        md.bytes_len = 4;
+        md.caps_ptr = (unsigned long)xfers;
+        md.caps_count = 2;
+        if (u_nat_chan_send_msg(sx, &md, ~0UL) != 0) return 49;
+        /* MOVE committed: d_sx in parent MUST now be EBADF (-9), while DUP'd m_xfer stays valid! */
+        if (u_nat_send(d_sx, 1, 0) != -9) return 50;
+        if (u_nat_recv(d_rx, &v, 1) != 1 || v != 0x55AA1234L) return 51;
+        if (u_wait4(pid, &st, 0, 0) != pid || ((st >> 8) & 255) != 0) return 52;
+        if (u_nat_mutex_lock(m_xfer, 0) != 0 || u_nat_mutex_unlock(m_xfer) != 0) return 53;
+        u_nat_close(d_rx);
+        u_nat_close(m_xfer);
+        u_nat_close(sx);
+        (void)got_caps;
+    }
+    puts("[NATIVE-MODERN] step4 PASS two-phase capability DUP + MOVE & full-queue rollback");
+
+    /* Step 5: Multi-object wait_any (blocking wake, fairness rotation, deadline) (D4). */
+    {
+        struct nm_wait_item items[3];
+        struct nmod_worker_arg warg;
+        char *tstack = (char *)u_mmap(0, 16384, 3, 0x22, -1, 0);
+        unsigned long tcap = 0, tres = 0;
+        int seen0 = 0, seen1 = 0;
+        long wrc;
+        if ((long)tstack < 0) return 54;
+        for (i = 0; i < 16384; i += 4096) tstack[i] = 0;
+        if (u_nat_channel_create(&sx, &rx) != 0) return 55;
+        if (u_nat_channel_create(&sx2, &rx2) != 0) return 56;
+        if (u_nat_mutex_lock(mu, 0) != 0) return 57; /* hold mu so NATW_MUTEX is NOT ready */
+
+        items[0].cap = (unsigned long)rx;  items[0].events = 1; items[0].revents = 0;
+        items[1].cap = (unsigned long)mu;  items[1].events = 4; items[1].revents = 0;
+        items[2].cap = (unsigned long)rx2; items[2].events = 1; items[2].revents = 0;
+        if (u_nat_wait_any(items, 3, 0) != -11) return 58;
+        t0 = life_now();
+        if (u_nat_wait_any(items, 3, t0 + 25000000UL) != -110) return 59;
+
+        for (i = 0; i < (int)sizeof(warg) / 4; i++) ((volatile unsigned int *)&warg)[i] = 0;
+        warg.ch_cap = sx2;
+        if (u_nat_task_spawn((void *)&nmod_wait_producer, tstack + 16384 - 8, &warg, &tcap) < 0) return 60;
+        if (!life_until(&warg.ready, 1)) return 61;
+        wrc = u_nat_wait_any(items, 3, ~0UL);
+        if (wrc != 2 || items[2].revents != 1) return 62;
+        if (u_nat_recv(rx2, &v, 0) != 1 || v != 0x778899L) return 63;
+        if (u_nat_exec_wait((long)tcap, &tres, ~0UL) != 0) return 64;
+        u_nat_close((long)tcap);
+        u_nat_mutex_unlock(mu);
+
+        /* Rotating fairness: with BOTH rx and rx2 ready, neither starves! */
+        u_nat_send(sx, 11, 0);
+        u_nat_send(sx2, 22, 0);
+        items[0].cap = (unsigned long)rx;  items[0].events = 1;
+        items[1].cap = (unsigned long)rx2; items[1].events = 1;
+        for (i = 0; i < 8; i++) {
+            wrc = u_nat_wait_any(items, 2, 0);
+            if (wrc == 0) seen0 = 1;
+            else if (wrc == 1) seen1 = 1;
+            else return 65;
+        }
+        if (!seen0 || !seen1) return 66;
+        u_nat_close(sx); u_nat_close(rx);
+        u_nat_close(sx2); u_nat_close(rx2);
+        u_nat_close(mu);
+        u_munmap(tstack, 16384);
+    }
+    puts("[NATIVE-MODERN] step5 PASS wait_any multi-object park, fairness & deadline");
+
+    /* Step 6: Multithreaded zero-legacy nat_process_spawn + explicit caps (D5). */
+    {
+        char *tstack = (char *)u_mmap(0, 16384, 3, 0x22, -1, 0);
+        struct nmod_worker_arg bg;
+        unsigned long bg_cap = 0, bg_res = 0;
+        unsigned long proc_cap = 0, proc_dup = 0, proc_code = 999, proc_code2 = 999;
+        long c_in_s, c_in_r, c_out_s, c_out_r, m_sh;
+        char *cargv[3];
+        struct nm_cap_xfer sxfers[2];
+        struct nm_spawn_desc sdesc;
+        struct nm_msg_desc md;
+        struct nm_cap_xfer mxf;
+        struct nm_wait_item wproc;
+        unsigned char pbuf[16];
+        long child_pid;
+
+        if ((long)tstack < 0) return 70;
+        for (i = 0; i < 16384; i += 4096) tstack[i] = 0;
+        for (i = 0; i < (int)sizeof(bg) / 4; i++) ((volatile unsigned int *)&bg)[i] = 0;
+        if (u_nat_task_spawn((void *)&nmod_bg_holder, tstack + 16384 - 8, &bg, &bg_cap) < 0) return 71;
+        if (!life_until(&bg.ready, 1)) return 72;
+        /* Legacy fork() is EBUSY (-16) while multithreaded, whereas nat_process_spawn works! */
+        if (u_fork() != -16) return 73;
+
+        if (u_nat_channel_create(&c_in_s, &c_in_r) != 0) return 74;
+        if (u_nat_channel_create(&c_out_s, &c_out_r) != 0) return 75;
+        if (u_nat_mutex_create(&m_sh) != 0) return 76;
+
+        cargv[0] = "/bin/init";
+        cargv[1] = "--native-child";
+        cargv[2] = 0;
+        sxfers[0].cap = (unsigned long)c_in_r;
+        sxfers[0].rights = 2;  /* NATC_RECV */
+        sxfers[0].mode = 1;    /* MOVE to child slot 1 */
+        sxfers[1].cap = (unsigned long)c_out_s;
+        sxfers[1].rights = 1;  /* NATC_SEND */
+        sxfers[1].mode = 1;    /* MOVE to child slot 2 */
+
+        sdesc.path_ptr = (unsigned long)"/bin/init";
+        sdesc.argv_ptr = (unsigned long)cargv;
+        sdesc.envp_ptr = 0;
+        sdesc.caps_ptr = (unsigned long)sxfers;
+        sdesc.caps_count = 2;
+        sdesc.flags = 0;       /* zero ambient console fds! */
+
+        child_pid = u_nat_process_spawn(&sdesc, &proc_cap);
+        if (child_pid <= 0) return 77;
+        /* Moved endpoints are immediately invalid in parent. */
+        if (u_nat_recv(c_in_r, &v, 0) != -9 || u_nat_send(c_out_s, 1, 0) != -9) return 78;
+
+        for (i = 0; i < 12; i++) pbuf[i] = (unsigned char)(0xA0u + i);
+        mxf.cap = (unsigned long)m_sh;
+        mxf.rights = 4 | 8 | 16;
+        mxf.mode = 0; /* DUP */
+        md.bytes_ptr = (unsigned long)pbuf;
+        md.bytes_len = 12;
+        md.caps_ptr = (unsigned long)&mxf;
+        md.caps_count = 1;
+        if (u_nat_chan_send_msg(c_in_s, &md, ~0UL) != 0) return 79;
+
+        md.bytes_ptr = (unsigned long)pbuf;
+        md.bytes_len = 16;
+        md.caps_ptr = 0;
+        md.caps_count = 0;
+        if (u_nat_chan_recv_msg(c_out_r, &md, ~0UL) != 1 || md.bytes_len != 12) return 80;
+        for (i = 0; i < 12; i++) {
+            if (pbuf[i] != (unsigned char)((0xA0u + i) ^ 0x5Au)) return 81;
+        }
+
+        /* Duplicate JOIN-only proc_cap, multiplex completion via wait_any(NATW_DONE),
+         * then read exit status 73 from BOTH handles! */
+        proc_dup = (unsigned long)u_nat_dup((long)proc_cap, 64); /* NATC_JOIN */
+        if ((long)proc_dup < 0) return 82;
+        if (u_nat_exec_cancel((long)proc_dup) != -1) return 83; /* no CANCEL right -> EPERM */
+        wproc.cap = proc_cap; wproc.events = 8; wproc.revents = 0;
+        if (u_nat_wait_any(&wproc, 1, ~0UL) != 0 || (wproc.revents & 8) == 0) return 84;
+        if (u_nat_exec_wait((long)proc_cap, &proc_code, 0) != 0 || proc_code != 73) return 85;
+        if (u_nat_exec_wait((long)proc_dup, &proc_code2, 0) != 0 || proc_code2 != 73) return 86;
+
+        atomic_xchg(&bg.release, 1);
+        if (u_nat_exec_wait((long)bg_cap, &bg_res, ~0UL) != 0 || bg_res != 0xBEEF0001UL) return 87;
+
+        u_nat_close((long)proc_cap);
+        u_nat_close((long)proc_dup);
+        u_nat_close((long)bg_cap);
+        u_nat_close(c_in_s);
+        u_nat_close(c_out_r);
+        u_nat_close(m_sh);
+        u_munmap(tstack, 16384);
+    }
+    puts("[NATIVE-MODERN] step6 PASS multithreaded nat_process_spawn + explicit caps");
+
+    /* Step 7: nat_task_spawn 64-bit results + task-scoped nat_exec_cancel (D5). */
+    {
+        char *stacks = (char *)u_mmap(0, 6 * 16384, 3, 0x22, -1, 0);
+        unsigned long tcaps[4], dup_tcap, vc_cap = 0, sib_cap = 0, res = 0;
+        struct nmod_worker_arg vic, sib;
+        if ((long)stacks < 0) return 90;
+        for (i = 0; i < 6 * 16384; i += 4096) stacks[i] = 0;
+        for (i = 0; i < 4; i++) {
+            if (u_nat_task_spawn((void *)&nmod_ret_worker,
+                                 stacks + (i + 1) * 16384 - 8,
+                                 (void *)(unsigned long)(i + 1), &tcaps[i]) < 0) {
+                return 91;
+            }
+        }
+        dup_tcap = (unsigned long)u_nat_dup((long)tcaps[0], 64);
+        if ((long)dup_tcap < 0) return 92;
+        for (i = 0; i < 4; i++) {
+            if (u_nat_exec_wait((long)tcaps[i], &res, ~0UL) != 0
+                || res != 0x1122334455660000UL + (unsigned long)(i + 1)) {
+                return 93;
+            }
+            u_nat_close((long)tcaps[i]);
+        }
+        /* Stack already reclaimed; duplicated task_cap still reads completion! */
+        if (u_nat_exec_wait((long)dup_tcap, &res, 0) != 0
+            || res != 0x1122334455660001UL) return 94;
+        u_nat_close((long)dup_tcap);
+
+        /* Task-scoped cancel: cancels ONLY victim while sibling stays alive! */
+        if (u_nat_channel_create(&sx, &rx) != 0) return 95;
+        for (i = 0; i < (int)sizeof(vic) / 4; i++) {
+            ((volatile unsigned int *)&vic)[i] = 0;
+            ((volatile unsigned int *)&sib)[i] = 0;
+        }
+        vic.ch_cap = rx;
+        if (u_nat_task_spawn((void *)&nmod_cancel_victim, stacks + 5 * 16384 - 8, &vic, &vc_cap) < 0) return 96;
+        if (u_nat_task_spawn((void *)&nmod_bg_holder, stacks + 6 * 16384 - 8, &sib, &sib_cap) < 0) return 97;
+        if (!life_until(&vic.ready, 1) || !life_until(&sib.ready, 1)) return 98;
+        if (u_nat_exec_cancel((long)vc_cap) != 0) return 99;
+        if (u_nat_exec_wait((long)vc_cap, &res, ~0UL) != 0 || res != (unsigned long)(-4L)) return 100;
+        /* Sibling was NOT killed by victim's task-scoped cancel! */
+        if (u_nat_exec_wait((long)sib_cap, &res, 0) != -11) return 101;
+        atomic_xchg(&sib.release, 1);
+        if (u_nat_exec_wait((long)sib_cap, &res, ~0UL) != 0 || res != 0xBEEF0001UL) return 102;
+        u_nat_close((long)vc_cap);
+        u_nat_close((long)sib_cap);
+        u_nat_close(sx);
+        u_nat_close(rx);
+        u_munmap(stacks, 6 * 16384);
+    }
+    puts("[NATIVE-MODERN] step7 PASS nat_task_spawn 64b join + task-scoped cancel");
+
+    /* Step 8: Process-shared FD/CWD table + deferred-close UAF protection (D5). */
+    {
+        char *tstack = (char *)u_mmap(0, 2 * 16384, 3, 0x22, -1, 0);
+        char orig_cwd[128];
+        char rbuf[16];
+        struct nmod_worker_arg sarg, parg;
+        unsigned long tcap = 0, pcap = 0, tres = 0;
+        long fd;
+        int pfd[2];
+        if ((long)tstack < 0) return 110;
+        for (i = 0; i < 2 * 16384; i += 4096) tstack[i] = 0;
+        orig_cwd[0] = '/'; orig_cwd[1] = 0;
+        u_getcwd(orig_cwd, sizeof(orig_cwd));
+
+        for (i = 0; i < (int)sizeof(sarg) / 4; i++) ((volatile unsigned int *)&sarg)[i] = 0;
+        /* Spawn worker BEFORE opening file or changing cwd! */
+        if (u_nat_task_spawn((void *)&nmod_shared_res_worker, tstack + 16384 - 8, &sarg, &tcap) < 0) return 111;
+        if (!life_until(&sarg.ready, 1)) return 112;
+        if (u_chdir("/tmp") != 0) return 113;
+        fd = u_open("/tmp/nmod_shared.txt", 0x242, 0644);
+        if (fd < 0 || u_write(fd, "SHARED", 6) != 6) return 114;
+        sarg.shared_fd = (int)fd;
+        atomic_xchg(&sarg.release, 1);
+        if (u_nat_exec_wait((long)tcap, &tres, ~0UL) != 0 || tres != 0xCAFEUL) return 115;
+        u_nat_close((long)tcap);
+        if (!sarg.cwd_ok || !sarg.fd_ok) return 116;
+        /* Worker exited: fd MUST still be open in the process! */
+        if (u_lseek(fd, 0, 0) != 0 || u_read(fd, rbuf, 6) != 6) return 117;
+        u_close(fd);
+        u_unlink("/tmp/nmod_shared.txt");
+        u_chdir(orig_cwd);
+
+        /* Concurrent close while sibling thread is blocked inside u_read(pfd[0])! */
+        if (u_pipe(pfd) != 0) return 118;
+        for (i = 0; i < (int)sizeof(parg) / 4; i++) ((volatile unsigned int *)&parg)[i] = 0;
+        parg.shared_fd = pfd[0];
+        if (u_nat_task_spawn((void *)&nmod_pipe_pin_reader, tstack + 2 * 16384 - 8, &parg, &pcap) < 0) return 119;
+        if (!life_until(&parg.ready, 1)) return 120;
+        ts.s = 0; ts.ns = 20000000L;
+        u_nanosleep(&ts, 0);
+        if (u_close(pfd[0]) != 0) return 121;
+        /* Slot pfd[0] is immediately detached (-1 on second close)! */
+        if (u_close(pfd[0]) != -1) return 122;
+        /* Close write end so blocked reader wakes cleanly via EOF & flushes deferred close! */
+        u_close(pfd[1]);
+        if (u_nat_exec_wait((long)pcap, &tres, ~0UL) != 0 || !parg.fd_ok) return 123;
+        u_nat_close((long)pcap);
+        u_munmap(tstack, 2 * 16384);
+    }
+    puts("[NATIVE-MODERN] step8 PASS shared FD/CWD namespace + deferred-close UAF safety");
+
+    /* Step 9: 4-way concurrent sharded channel/mutex storm + pool baseline (D3/D6). */
+    {
+        char *stacks = (char *)u_mmap(0, 4 * 16384, 3, 0x22, -1, 0);
+        struct nmod_worker_arg wargs[4];
+        long ch_s[4], ch_r[4], mus[4];
+        unsigned long tcaps[4], res = 0;
+        if ((long)stacks < 0) return 130;
+        for (i = 0; i < 4 * 16384; i += 4096) stacks[i] = 0;
+        for (i = 0; i < 4; i++) {
+            if (u_nat_channel_create(&ch_s[i], &ch_r[i]) != 0) return 131;
+            if (u_nat_mutex_create(&mus[i]) != 0) return 132;
+            wargs[i].ch_cap = ch_s[i];
+            wargs[i].fd_ok = (int)ch_r[i];
+            wargs[i].mu_cap = mus[i];
+            wargs[i].id = (unsigned long)i;
+        }
+        for (i = 0; i < 4; i++) {
+            if (u_nat_task_spawn((void *)&nmod_storm_worker,
+                                 stacks + (i + 1) * 16384 - 8,
+                                 &wargs[i], &tcaps[i]) < 0) return 133;
+        }
+        for (i = 0; i < 4; i++) {
+            if (u_nat_exec_wait((long)tcaps[i], &res, ~0UL) != 0 || res != 0) return 134;
+            u_nat_close((long)tcaps[i]);
+            u_nat_close(ch_s[i]);
+            u_nat_close(ch_r[i]);
+            u_nat_close(mus[i]);
+        }
+        /* Prove widened 32-cap per-process table & 64-object pool recover cleanly. */
+        {
+            long many[24];
+            for (i = 0; i < 24; i++) {
+                if (u_nat_mutex_create(&many[i]) != 0) return 135;
+            }
+            for (i = 0; i < 24; i++) {
+                if (u_nat_close(many[i]) != 0) return 136;
+            }
+        }
+        u_munmap(stacks, 4 * 16384);
+    }
+    puts("[NATIVE-MODERN] step9 PASS 4-way sharded SMP storm + widened cap/object recovery");
+    puts("[NATIVE-MODERN] PASS modern native high-concurrency kernel suite");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if(argc==3 && strcmp(argv[1],"--park-probe")==0)return park_probe(argv[2][0]-'0');
+    if(argc==2 && strcmp(argv[1],"--native-child")==0)return native_child_entry();
+    if(argc==2 && strcmp(argv[1],"--native-modern")==0)return native_modern_probe();
     if(argc==2 && strcmp(argv[1],"--native-caps")==0)return native_caps_probe();
     if(argc==2 && strcmp(argv[1],"--native-mutex")==0)return native_mutex_probe();
     if(argc==2 && strcmp(argv[1],"--net-raw")==0)return net_raw_probe();

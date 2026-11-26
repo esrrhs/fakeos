@@ -15,6 +15,7 @@ global io_wait
 global cpu_halt
 global cpu_cli
 global cpu_sti
+global cpu_sti_hlt
 global cpu_pause
 global cpu_enable_sse
 
@@ -86,6 +87,12 @@ cpu_cli:
 ; void cpu_sti(void)
 cpu_sti:
     sti
+    ret
+
+; void cpu_sti_hlt(void)
+cpu_sti_hlt:
+    sti
+    hlt
     ret
 
 ; void cpu_pause(void)

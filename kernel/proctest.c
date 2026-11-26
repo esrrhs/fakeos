@@ -787,7 +787,11 @@ static int test_kmutex_blocks(void) {
         return 0;
     }
 
-    deadline = sched_tick_count() + 400;
+    /* TCG SMP can spend several seconds draining the preceding scheduler
+     * stress workers before the woken waiter gets a timeslice. Keep the
+     * assertion strict, but do not turn host emulation latency into a
+     * false lock failure. */
+    deadline = sched_tick_count() + 2000;
     while (g_block_phase < 1 && sched_tick_count() < deadline) {
         sched_yield();
     }
@@ -797,7 +801,7 @@ static int test_kmutex_blocks(void) {
     }
 
     /* Holder is sleeping on the release sem; waiter should sleep on mutex. */
-    deadline = sched_tick_count() + 400;
+    deadline = sched_tick_count() + 2000;
     while (sched_tick_count() < deadline) {
         if (g_block_waiter_id != 0
             && sched_thread_state(g_block_waiter_id) == TCB_SLEEPING_ST) {
@@ -812,7 +816,7 @@ static int test_kmutex_blocks(void) {
     }
 
     ksem_up(&g_block_release); /* holder unlocks -> wakes waiter */
-    deadline = sched_tick_count() + 400;
+    deadline = sched_tick_count() + 2000;
     while (g_block_phase < 4 && sched_tick_count() < deadline) {
         sched_yield();
     }

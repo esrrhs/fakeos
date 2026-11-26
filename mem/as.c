@@ -364,6 +364,9 @@ void as_init(struct address_space *as) {
 
     u64 root = alloc_zero_frame();
     as->pml4 = root;
+    if (root == 0) {
+        return;
+    }
 
     /* Share all kernel/HHDM slots (256..511) with the bootstrap root. */
     volatile u64 *k = table(vmm_kernel_root());
@@ -486,15 +489,25 @@ int as_handle_fault(struct address_space *as, u64 vaddr, u64 err) {
             return 0;                 /* Write to a read-only VMA */
         }
         if (vma->kind == VMA_PHYS) {
-            /* Fixed physical frame (device/driver memory): no allocation,
-             * no reclaim — pin with refs=2 so a later munmap decrements to
-             * the driver's own pin and never frees to the buddy. */
+            /* Fixed physical frame (device/driver/vDSO memory): no allocation,
+             * no reclaim — pin the owner at 1 + 1 per mapping under ref_lock
+             * so N address spaces mapping the same page never underflow and
+             * free a kernel-owned frame when exiting/unmapping. */
             u64 frame = vma->file_off + (page_va - vma->start);
             u32 pfn = (u32)(frame / PAGE_SIZE);
+            u64 flags_ref;
             if (pfn >= MAX_FRAMES_AS) {
                 return 0;
             }
-            frame_refs[pfn] = 2;
+            flags_ref = cpu_irq_save();
+            spin_lock(&ref_lock);
+            if (frame_refs[pfn] == 0) {
+                frame_refs[pfn] = 2;
+            } else {
+                ref_add_locked(&frame_refs[pfn], 1);
+            }
+            spin_unlock(&ref_lock);
+            cpu_irq_restore(flags_ref);
             pt[i] = frame | leaf_perms(vma);
             private_faults = private_faults + 1;
             invlpg_page(page_va);
@@ -1115,6 +1128,10 @@ u64 as_create(void) {
         return 0;
     }
     as_init(as);
+    if (as->pml4 == 0) {
+        kfree(as);
+        return 0;
+    }
     as_vdso_attach(as);
     return (u64)as;
 }
@@ -1359,39 +1376,53 @@ enum { SD_BATCH = 64 };
 static void unmap_present_pages(struct address_space *as, u64 va, u64 len,
                                  struct vma *vma) {
     u64 off = 0;
-    (void)va;
     while (off < len) {
-        u64 page_va = (va + off) & ~0xFFFULL;
-        volatile u64 *pt = resolve_pt(as->pml4, page_va, 0, PTE_U);
-        if (pt != 0) {
-            u64 e = pt[pt_i(page_va)];
-            if (e & PTE_P) {
-                u64 frame = entry_phys(e);
-                /* MAP_SHARED file: write dirty (or any W-mapped) pages back. */
-                if (vma != 0 && vma->kind == VMA_FILE && vma->shared != 0
-                    && (e & PTE_W) != 0
-                    && (e & PTE_D) != 0) {
-                    u64 foff = vma->file_off + (page_va - vma->start);
-                    (void)as_file_page_writeback(vma->fs_kind, vma->ino, foff,
-                                                 HHDM_BASE + frame);
-                }
-                pt[pt_i(page_va)] = 0;
-                invlpg_page(page_va);
-                {
-                    u64 flags_ref = cpu_irq_save();
-                    spin_lock(&ref_lock);
-                    {
-                        u32 old = ref_sub_ge1_locked(&frame_refs[(u32)(frame / PAGE_SIZE)]);
-                        if (old == 1 && frame != zero_frame) {
-                            pmm_free_page(frame);
-                        }
+        u64 pending[SD_BATCH];
+        u32 npend = 0;
+        u64 batch_start = (va + off) & ~0xFFFULL;
+        u64 batch_end = batch_start;
+        u32 b;
+        for (b = 0; b < SD_BATCH && off < len; b++) {
+            u64 page_va = (va + off) & ~0xFFFULL;
+            volatile u64 *pt = resolve_pt(as->pml4, page_va, 0, PTE_U);
+            if (pt != 0) {
+                u64 e = pt[pt_i(page_va)];
+                if (e & PTE_P) {
+                    u64 frame = entry_phys(e);
+                    /* MAP_SHARED file: write dirty pages back before unmap. */
+                    if (vma != 0 && vma->kind == VMA_FILE && vma->shared != 0
+                        && (e & PTE_W) != 0
+                        && (e & PTE_D) != 0) {
+                        u64 foff = vma->file_off + (page_va - vma->start);
+                        (void)as_file_page_writeback(vma->fs_kind, vma->ino, foff,
+                                                     HHDM_BASE + frame);
                     }
-                    spin_unlock(&ref_lock);
-                    cpu_irq_restore(flags_ref);
+                    pt[pt_i(page_va)] = 0;
+                    invlpg_page(page_va);
+                    pending[npend] = frame;
+                    npend = npend + 1;
+                    batch_end = page_va + PAGE_SIZE;
                 }
             }
+            off += PAGE_SIZE;
         }
-        off += PAGE_SIZE;
+        if (npend > 0) {
+            u32 k;
+            u64 flags_ref;
+            /* Shoot down remote TLBs BEFORE returning frames to buddy. */
+            as_shootdown_range((u64)as, batch_start, batch_end);
+            flags_ref = cpu_irq_save();
+            spin_lock(&ref_lock);
+            for (k = 0; k < npend; k++) {
+                u64 frame = pending[k];
+                u32 old = ref_sub_ge1_locked(&frame_refs[(u32)(frame / PAGE_SIZE)]);
+                if (old == 1 && frame != zero_frame) {
+                    pmm_free_page(frame);
+                }
+            }
+            spin_unlock(&ref_lock);
+            cpu_irq_restore(flags_ref);
+        }
     }
 }
 
@@ -1752,14 +1783,26 @@ int as_map_preload(u64 handle, u64 va, u64 memsz, u32 prot, u64 src_kva, u64 fil
     return 1;
 }
 
-/* Copy-on-write fork of an address space. Returns the child handle (0=fail). */
+/* Copy-on-write fork of an address space. Returns the child handle (0=fail).
+ * Allocate the struct directly rather than calling as_create(): as_cow_clone()
+ * calls as_init() itself, so calling as_create() first would allocate and
+ * leak an unused PML4 page on every fork. */
 u64 as_fork_h(u64 parent_handle) {
-    u64 child = as_create();
+    struct address_space *child;
+    if (parent_handle == 0) {
+        return 0;
+    }
+    child = (struct address_space *)kmalloc(
+        8 + MAX_VMA * 48 + 8 + 8 + 8 + 8 + 8);
     if (child == 0) {
         return 0;
     }
-    as_cow_clone(as_of(child), as_of(parent_handle));
-    return child;
+    as_cow_clone(child, as_of(parent_handle));
+    if (child->pml4 == 0) {
+        kfree(child);
+        return 0;
+    }
+    return (u64)child;
 }
 
 void as_destroy_h(u64 handle) {

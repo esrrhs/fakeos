@@ -13,7 +13,7 @@ typedef unsigned long u64;typedef long i64;typedef unsigned int u32;typedef int 
 enum{VRUNTIME_SLICE=1,FD_BAD=0xffffffff,EINTR_SEL=-4,EINVAL_NEG=-22,EINTR_NEG=-4,POLLIN_F=1,POLLOUT_F=4,POLLNVAL_F=32,TICKS_PER_SEC=100,NS_PER_TICK=10000000,NS_PER_SEC=1000000000,CLOCK_REALTIME_ID=0,CLOCK_MONOTONIC_ID=1,CLOCK_BOOTTIME_ID=7,PARK_INTERRUPTED_F=2};
 static u64 sched_ticks,clock_ticks;static u32 active,sched_bsp_cpu,cpu,irq,charges,switches,locks,yields,interrupt_at,bad_range;
 static u32 select_wait_token;static u32 sched_run_lock;
-void test_irq(void){irq++;}void spin_lock(u32*p){locks++;}void runlock_lock_at(u32 site){locks++;}void runlock_unlock(void){}void cfs_charge(u32 t,u32 v){charges++;}void cfs_update_min(void){}
+void test_irq(void){irq++;}void spin_lock(u32*p){locks++;}void runlock_lock_at(u32 site){locks++;}void rq_tick_lock(void){locks++;}void runlock_unlock(void){}void cfs_charge(u32 t,u32 v){charges++;}void cfs_update_min(void){}void sched_expire_timers_tick(void){}
 u32 sched_cpu_index(void){return cpu;}u32 sched_cur(void){return cpu;}u32 pick_next(u32 t){return t;}void sched_switch_to(u32 t){switches++;}
 u64 sched_current_as_h(void){return 1;}u32 test_range(u64 a,u64 p,u64 n){return !bad_range && p!=0;}
 /* tsc_hz()'s extern is at file scope in sysproc.c, so extraction loses it.
@@ -23,8 +23,9 @@ u64 tsc_hz(void){return 0;}u64 tsc_ns(void){return 0;}
 /* Only the EINTR branch of park admission is observable in these bodies, and
  * sched_should_eintr_timer() above already models it (PARK_INTERRUPTED=2).
  * Commit must still advance the clock, as a real sleep does. */
-void sched_park_prepare(u64 p){}void sched_park_abort(void){}
+void sched_park_prepare(u64 p){}void sched_park_abort(void){}void sched_timer_arm_ticks(u64 t){}
 u32 sched_park_commit(u64 p,u32 nr){ if(sched_should_eintr_timer())return 2; sched_yield(); return 0; }
+u32 sched_sleep_deadline(u64 dt,u64 dn){ if(sched_should_eintr_timer())return 2; sched_yield(); return 3; }
 void sched_yield(void){clock_ticks++;yields++;}void sched_sleep(u64 p){sched_yield();}void sched_check_signals(void){}u32 sched_should_eintr_timer(void){return yields>=interrupt_at;}
 u32 sched_fd_get(u32 fd){return FD_BAD;}u32 fd_ready_read(u32 f){return 0;}u32 fd_ready_write(u32 f){return 0;}
 void reset(void){clock_ticks=100;yields=0;interrupt_at=0xffffffff;bad_range=0;}

@@ -18,7 +18,7 @@ extern void printf(const char *fmt, ...);
 
 enum {
     NAME_OFF = 19,
-    MAX_PIDS = 32,
+    MAX_PIDS = 64,
     PATH_CAP = 64,
     SNAP_CAP = 1024
 };
@@ -198,7 +198,7 @@ static int emit_one(const char *pidname) {
 }
 
 int main(int argc, char **argv) {
-    char dents[1536];
+    char dents[3584];
     char names[MAX_PIDS][16];
     int nnames = 0;
     long fd;

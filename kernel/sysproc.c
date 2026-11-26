@@ -465,22 +465,24 @@ enum {
     FUTEX_CLOCK_REALTIME = 256,
     EAGAIN_NEG          = (u64)-11,
     EINTR_NEG           = (u64)-4,
-    EINVAL_NEG          = (u64)-22
+    EINVAL_NEG          = (u64)-22,
+    ETIMEDOUT_NEG       = (u64)-110
 };
 
-/* futex(2) basics: WAIT/WAKE (+ PRIVATE). Channel is the user VA; works for
- * same-AS threads and MAP_SHARED across fork. No PI/bitset/requeue yet. */
+/* futex(2): WAIT/WAKE (+ PRIVATE, + relative timespec timeout -> ETIMEDOUT).
+ * Channel is the user VA; works for same-AS threads and MAP_SHARED across fork. */
 extern void sched_wait_probe_point(u64 chan);
 extern void sched_park_prepare(u64 chan);
+extern void sched_timer_arm_ns(u64 abs_ns);
+extern u64 sched_monotonic_ns(void);
 extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
-enum { PARK_INTERRUPTED_F = 2 }; /* matches sched.c park commit result */
+enum { PARK_INTERRUPTED_F = 2, PARK_TIMED_OUT_F = 3 };
 
 u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
     u64 as;
     u32 cmd;
     (void)uaddr2;
     (void)val3;
-    (void)timeout; /* absolute/relative timeout not wired yet */
 
     if ((uaddr & 3ULL) != 0) {
         return EINVAL_NEG;
@@ -492,9 +494,43 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
 
     cmd = (u32)op & ~(u32)(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
     if (cmd == FUTEX_WAIT) {
-        volatile u32 *p = (volatile u32 *)uaddr;
-        u32 cur = *p;
+        u64 abs_ns = 0;
+        volatile u32 *p;
+        u32 cur;
         u32 pr;
+        if (timeout != 0) {
+            i64 tsec;
+            i64 tnsec;
+            u64 rel_ns;
+            u64 now_ns;
+            if (!mem.as_user_range_ok(as, timeout, 16)) {
+                return EINVAL_NEG;
+            }
+            tsec = (i64)(*(volatile u64 *)timeout);
+            tnsec = (i64)(*(volatile u64 *)(timeout + 8));
+            if (tsec < 0 || tnsec < 0 || tnsec >= 1000000000) {
+                return EINVAL_NEG;
+            }
+            if ((u64)tsec > (~0ULL - 1000000000ULL) / 1000000000ULL) {
+                return EINVAL_NEG;
+            }
+            rel_ns = (u64)tsec * 1000000000ULL + (u64)tnsec;
+            if (rel_ns == 0) {
+                p = (volatile u32 *)uaddr;
+                if (*p != (u32)val) {
+                    return EAGAIN_NEG;
+                }
+                return ETIMEDOUT_NEG;
+            }
+            now_ns = sched_monotonic_ns();
+            if (rel_ns > ~0ULL - 1ULL - now_ns) {
+                return EINVAL_NEG;
+            }
+            abs_ns = now_ns + rel_ns;
+            if (abs_ns == 0) abs_ns = 1;
+        }
+        p = (volatile u32 *)uaddr;
+        cur = *p;
         if (cur != (u32)val) {
             return EAGAIN_NEG;
         }
@@ -504,10 +540,19 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
          * latch or pending-signal refusal is visible — or observes the
          * published sleeper. No user memory is read under run_lock. */
         sched_park_prepare(uaddr);
+        if (abs_ns != 0) {
+            sched_timer_arm_ns(abs_ns);
+        }
         sched_wait_probe_point(uaddr);
         pr = sched_park_commit(uaddr, 0);
         if (pr == PARK_INTERRUPTED_F) {
             return EINTR_NEG;
+        }
+        if (pr == PARK_TIMED_OUT_F) {
+            if (sched_should_eintr()) {
+                return EINTR_NEG;
+            }
+            return ETIMEDOUT_NEG;
         }
         if (sched_should_eintr()) {
             return EINTR_NEG;
@@ -531,6 +576,7 @@ u64 sys_futex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3) {
 extern u64 sched_clock_ticks(void);
 extern u64 nanosleep_chan;
 extern void sched_yield(void);
+extern u32 sched_sleep_deadline(u64 abs_ticks, u64 abs_ns);
 extern void sched_check_signals(void);
 extern u32 sched_current_ppid(void);
 
@@ -700,7 +746,7 @@ u64 sys_nanosleep(u64 ureq, u64 urem) {
             }
             return EINTR_NEG;
         }
-        sched_yield();   /* BISECT: busy-yield instead of tick park */
+        (void)sched_sleep_deadline(deadline, tsc_deadline_active ? tsc_deadline_ns : 0);
     }
 }
 

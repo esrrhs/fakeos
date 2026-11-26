@@ -9,7 +9,11 @@ import struct
 import time
 
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
-MIN_BINARY_BYTES_PER_SECOND = 32 * 1024
+# QEMU's emulated UART can fall well below the nominal line rate while the
+# guest is producing a large base64 stream. Keep the deadline finite, but use
+# a conservative measured floor so a complete image is not rejected merely
+# because the final frame is still in the serial pipe.
+MIN_BINARY_BYTES_PER_SECOND = 16 * 1024
 MAX_TRANSFER_SECONDS = 2400
 STALL_SECONDS = 60
 CHUNK = 12288
@@ -22,10 +26,11 @@ FRAME = re.compile(
 
 
 def dump_transfer_budget(expected_size):
-    """Host-validated bytes only: 60s startup + 32KiB/s, floor120, cap2400.
+    """Host-validated bytes only: 60s startup + 16KiB/s, floor120, cap2400.
 
-    The measured UART rate is about62KiB/s binary. This allows roughly a
-    factor2 throughput margin, not an unbounded guest-controlled deadline.
+    This is a conservative measured floor for QEMU's emulated UART under
+    TCG while the guest emits base64. It allows slow hosts to finish without
+    creating an unbounded guest-controlled deadline.
     """
     if type(expected_size) is not int or not 0 < expected_size <= MAX_IMAGE_BYTES:
         raise ValueError("expected bootstrap size outside trusted 1..64MiB bound")

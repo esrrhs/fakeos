@@ -585,6 +585,7 @@ test: build
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_objects.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_caps.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_native_mutex.py
+	@PYTHONUNBUFFERED=1 python3 scripts/test_native_modern.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_net_raw.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_vdso.py
 	@PYTHONUNBUFFERED=1 python3 scripts/test_rlimit.py

@@ -14,6 +14,8 @@ extern void sched_tick(void);
 extern void sched_note_user_tick(void);
 extern u64 sched_tick_count(void);
 extern u32 sched_current_pid(void);
+extern u32 sched_current_task_cancelled(void);
+extern void proc_exit_task_cancelled(void);
 extern void proc_terminate(u64 code);
 extern void tty_on_uart_byte(void);
 extern void kbd_irq(void);
@@ -146,6 +148,9 @@ void isr_dispatch(struct trap_frame *f) {
         /* After switch returns to this CPU's interrupted thread, deliver
          * custom handlers using the live trap frame (not default-only). */
         if ((f->cs & 3) == 3) {
+            if (sched_current_task_cancelled()) {
+                proc_exit_task_cancelled();
+            }
             sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
                                       &f->rax);
         }
@@ -156,6 +161,9 @@ void isr_dispatch(struct trap_frame *f) {
     if (v == 34) {
         arch.lapic_send_eoi();
         if ((f->cs & 3) == 3) {
+            if (sched_current_task_cancelled()) {
+                proc_exit_task_cancelled();
+            }
             sched_check_signals_frame(&f->rip, &f->rflags, &f->rsp, &f->rdi,
                                       &f->rax);
         } else {

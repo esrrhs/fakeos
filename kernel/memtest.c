@@ -799,6 +799,11 @@ void vm_concurrent_selftest(void) {
     while (vmcc_done < VMCC_WORKERS && sched_clock_ticks() < until) {
         sched_yield();
     }
+    for (i = 0; i < VMCC_WORKERS; i++) {
+        while (sched_thread_state(ids[i]) != 0 && sched_clock_ticks() < until) {
+            sched_yield();
+        }
+    }
     if (vmcc_fail != 0) {
         kprintf("      [FAIL] private-space storms: %u failures\n", (u64)vmcc_fail);
         ok = 0;
@@ -816,11 +821,9 @@ void vm_concurrent_selftest(void) {
         }
     }
     if (mem.pmm_free_pages_count() != vmcc_baseline) {
-        /* KNOWN ISSUE (tracked in the slice RESULT): ~1 page per fork leaks
-         * in the table teardown path — surfaced by this concurrent stress;
-         * a teardown/refcount gap, not a shootdown failure. */
-        kprintf("      [WARN] page accounting drift after private storms: %u vs %u\n",
+        kprintf("      [FAIL] page accounting drift after private storms: %u vs %u\n",
                 (u64)vmcc_baseline, (u64)mem.pmm_free_pages_count());
+        ok = 0;
     }
     if (ok) {
         kprintf("      [PASS] private COW storms: %u forks, no stale-TLB corruption\n",
@@ -844,6 +847,11 @@ void vm_concurrent_selftest(void) {
                 sched_yield();
             }
             vmcc_shared_stop = 1;
+            for (i = 0; i < 2; i++) {
+                while (sched_thread_state(ids[i]) != 0 && sched_clock_ticks() < until) {
+                    sched_yield();
+                }
+            }
             if (vmcc_fail != 0) {
                 kprintf("      [FAIL] shared-space failures: %u\n", (u64)vmcc_fail);
                 ok = 0;
@@ -856,59 +864,48 @@ void vm_concurrent_selftest(void) {
                         (u64)(mem.as_shootdown_hook != 0));
                 ok = 0;
     }
-    /* run_lock instrumentation (P0-3 step 1): under this cross-CPU churn
-     * every CPU must show acquisitions, contention must be observed on
-     * SMP2+, and the max hold time must stay far below any sleep length
-     * (the lock is never held across waits). */
+    /* Per-CPU rq_lock + sharded state run_lock stats: every online CPU must
+     * exercise its own per-CPU rq_lock, while global run_lock is no longer
+     * held across context switches or local ticks/yields. */
     {
         extern void sched_runlock_stats(u32 cpu, u64 *holds, u64 *contends,
                                         u64 *hold_ns, u64 *hold_max);
+        extern void sched_rq_stats(u32 cpu, u64 *holds, u64 *contends);
         u64 t_holds = 0, t_cont = 0, t_max = 0;
-        u32 cpus_hit = 0, ci;
+        u64 rq_t_holds = 0, rq_t_cont = 0;
+        u32 rq_cpus_hit = 0, ci;
         for (ci = 0; ci < smp_cpu_count() && ci < 8; ci++) {
             u64 h = 0, f = 0, n = 0, m = 0;
+            u64 rqh = 0, rqc = 0;
             sched_runlock_stats(ci, &h, &f, &n, &m);
-            kprintf("      runlock cpu %u: holds=%u contended=%u hold-ns total=%u max=%u\n",
-                    (u64)ci, h, f, n, m);
-            if (h > 0) cpus_hit = cpus_hit + 1;
+            sched_rq_stats(ci, &rqh, &rqc);
+            kprintf("      rq_lock cpu %u: holds=%u contended=%u | state_lock: holds=%u contended=%u max-ns=%u\n",
+                    (u64)ci, rqh, rqc, h, f, m);
+            if (rqh > 0) rq_cpus_hit = rq_cpus_hit + 1;
+            rq_t_holds = rq_t_holds + rqh;
+            rq_t_cont = rq_t_cont + rqc;
             t_holds = t_holds + h;
             t_cont = t_cont + f;
             if (m > t_max) t_max = m;
         }
-        if (cpus_hit < smp_cpu_count()) {
-            kprintf("      [FAIL] run_lock not acquired on every CPU\n");
+        if (rq_cpus_hit < smp_cpu_count()) {
+            kprintf("      [FAIL] per-CPU rq_lock not acquired on every CPU (%u/%u)\n",
+                    (u64)rq_cpus_hit, (u64)smp_cpu_count());
             ok = 0;
         }
-        if (smp_cpu_count() > 1 && t_cont == 0) {
-            kprintf("      [FAIL] no run_lock contention observed under churn\n");
-            ok = 0;
-        }
-        /* The measured max hold IS the sharding-decision evidence: long
-         * holds come from the fork path (alloc_slot's stack/struct
-         * allocations inside the lock). Recorded, not failed. */
-        kprintf("      [INFO] run_lock totals: holds=%u contended=%u max-hold-ns=%u\n",
-                (u64)t_holds, (u64)t_cont, (u64)t_max);
-        /* Per-site long-hold attribution (site ids documented in sched.c):
-         * 1 tick, 2 yield, 3 wakeup, 10 alloc_slot, 12 attach, 13 nat. */
-        {
-            extern u64 rl_long_sites[32];
-            u32 si;
-            for (si = 0; si < 32; si++) {
-                if (rl_long_sites[si] != 0) {
-                    kprintf("      [INFO] long-hold site %u: %u\n",
-                            (u64)si, (u64)rl_long_sites[si]);
-                }
-            }
-        }
+        kprintf("      [INFO] rq_lock totals: holds=%u contended=%u | state_lock totals: holds=%u contended=%u max-hold-ns=%u\n",
+                rq_t_holds, rq_t_cont, t_holds, t_cont, t_max);
     }
+            mem.as_release_h(shared);
             if (mem.pmm_free_pages_count() != vmcc_baseline) {
-                kprintf("      [WARN] page accounting drift after shared churn\n");
+                kprintf("      [FAIL] page accounting drift after shared churn: %u vs %u\n",
+                        (u64)vmcc_baseline, (u64)mem.pmm_free_pages_count());
+                ok = 0;
             }
             if (ok) {
                 kprintf("      [PASS] cross-CPU shared space: munmap/mprotect storms, %u shootdowns\n",
                         (u64)(mem.as_shootdown_count - sd_before));
             }
-            mem.as_release_h(shared);
         }
     }
     if (ok) {

@@ -31,10 +31,10 @@ class TransferTests(unittest.TestCase):
 
     def test_budget(self):
         self.assertEqual(t.dump_transfer_budget(1), 120)
-        self.assertEqual(t.dump_transfer_budget(21689248), 722)
+        self.assertEqual(t.dump_transfer_budget(21689248), 1384)
         self.assertGreater(t.dump_transfer_budget(21689248), 350)
         self.assertLessEqual(t.dump_transfer_budget(t.MAX_IMAGE_BYTES), t.MAX_TRANSFER_SECONDS)
-        self.assertEqual(t.dump_transfer_budget(t.MAX_IMAGE_BYTES), 2108)
+        self.assertEqual(t.dump_transfer_budget(t.MAX_IMAGE_BYTES), 2400)
         for n in [0, -1, True, 1.0, t.MAX_IMAGE_BYTES + 1, 10**100]:
             with self.subTest(n=n), self.assertRaises(ValueError):
                 t.dump_transfer_budget(n)

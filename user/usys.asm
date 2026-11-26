@@ -159,6 +159,38 @@ USYSC1 u_clock_gettime, 228
 
 ; long u_nice(long inc) -- fakeos-specific nr 503 (Linux has no nice)
 USYSC1 u_nice, 503
+USYSC1 u_nat_channel_create, 504
+USYSC1 u_nat_send, 505
+USYSC1 u_nat_recv, 506
+USYSC1 u_nat_dup, 507
+USYSC1 u_nat_close, 508
+USYSC1 u_raw_create, 509
+USYSC1 u_raw_map, 510
+USYSC1 u_raw_tx_kick, 511
+USYSC1 u_raw_close, 512
+USYSC1 u_nat_mutex_create, 513
+USYSC1 u_nat_mutex_lock, 514
+USYSC1 u_nat_mutex_unlock, 515
+USYSC1 u_nat_mutex_consistent, 516
+USYSC1 u_nat_mutex_stat, 517
+USYSC1 u_nat_send_timed, 518
+USYSC1 u_nat_recv_timed, 519
+USYSC1 u_nat_mutex_lock_timed, 520
+USYSC1 u_nat_chan_send_msg, 521
+USYSC1 u_nat_chan_recv_msg, 522
+USYSC1 u_nat_wait_any, 523
+USYSC1 u_nat_process_spawn, 524
+USYSC1 u_nat_task_exit, 526
+USYSC1 u_nat_exec_wait, 527
+USYSC1 u_nat_exec_cancel, 528
+
+global u_nat_task_spawn
+align 16
+u_nat_task_spawn:
+    mov     r10, rcx
+    mov     eax, 525
+    syscall
+    ret
 
 
 ; long u_yield(void)

@@ -43,6 +43,8 @@ extern u64 sched_current_as_h(void);
 extern u32 sched_fd_get(u32 idx);
 extern void sched_fd_set(u32 idx, u32 fh);
 extern u32 sched_fd_alloc(void);
+extern u32 sched_fd_close_slot(u32 idx);
+extern void sched_fd_dup2_install(u32 newfd, u32 ofh);
 extern const char *sched_cwd(void);
 extern void sched_cwd_set(const char *kpath);
 
@@ -54,6 +56,7 @@ extern u64 sched_clock_ticks(void);
 extern void sched_yield(void);
 extern void sched_sleep(u64 chan);
 extern void sched_park_prepare(u64 chan);
+extern void sched_timer_arm_ticks(u64 abs_ticks);
 extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
 enum { PARK_INTERRUPTED_F = 2 }; /* matches sched.c park commit result */
 extern void sched_wakeup(u64 chan);
@@ -367,32 +370,12 @@ u64 sys_open(u64 upath, u64 flags, u64 mode) {
 }
 
 u64 sys_close(u64 fd) {
-    u32 fh = sched_fd_get((u32)fd);
-    u32 ok;
-    if (fh == FD_BAD) {
-        return (u64)(-1);
-    }
-    if (fs.ext2_fh_is(fh)) {
-        ok = fs.ext2_close(fh);
-    } else if (pipe_fh_is(fh)) {
-        ok = pipe_close(fh);
-    } else if (sock_fh_is(fh)) {
-        ok = sock_close(fh);
-    } else if (eventfd_fh_is(fh)) {
-        ok = eventfd_close(fh);
-    } else if (epoll_fh_is(fh)) {
-        ok = epoll_close(fh);
-    } else {
-        ok = fs.fs_close(fh);
-    }
-    sched_fd_set((u32)fd, FD_BAD);
-    return ok ? 0 : (u64)(-1);
+    return sched_fd_close_slot((u32)fd) ? 0 : (u64)(-1);
 }
 
 /* dup2(oldfd, newfd): make newfd refer to the same open-file as oldfd. */
 u64 sys_dup2(u64 oldfd, u64 newfd) {
     u32 ofh;
-    u32 nfh;
     if (oldfd >= 16 || newfd >= 16) {
         return (u64)(-1);
     }
@@ -402,23 +385,6 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
     }
     if (oldfd == newfd) {
         return newfd;
-    }
-    nfh = sched_fd_get((u32)newfd);
-    if (nfh != FD_BAD) {
-        if (fs.ext2_fh_is(nfh)) {
-            fs.ext2_close(nfh);
-        } else if (pipe_fh_is(nfh)) {
-            pipe_close(nfh);
-        } else if (sock_fh_is(nfh)) {
-            sock_close(nfh);
-        } else if (eventfd_fh_is(nfh)) {
-            eventfd_close(nfh);
-        } else if (epoll_fh_is(nfh)) {
-            epoll_close(nfh);
-        } else {
-            fs.fs_close(nfh);
-        }
-        sched_fd_set((u32)newfd, FD_BAD);
     }
     if (fs.ext2_fh_is(ofh)) {
         fs.ext2_file_retain(ofh);
@@ -433,7 +399,7 @@ u64 sys_dup2(u64 oldfd, u64 newfd) {
     } else {
         fs.fs_file_retain(ofh);
     }
-    sched_fd_set((u32)newfd, ofh);
+    sched_fd_dup2_install((u32)newfd, ofh);
     return newfd;
 }
 
@@ -1402,14 +1368,13 @@ u64 sys_select(u64 nfds, u64 readfds_u, u64 writefds_u, u64 exceptfds_u,
          * notification (PARK_WOKEN) instead of the wakeup being lost, and
          * commit refuses to park when cancellation is pending (nonrestartable
          * policy). */
-        if (timeout_u == 0) {
-            sched_park_prepare((u64)&select_wait_token);
-            if (sched_park_commit((u64)&select_wait_token, 1)
-                == PARK_INTERRUPTED_F) {
-                return EINTR_SEL;
-            }
-        } else {
-            sched_yield();
+        sched_park_prepare((u64)&select_wait_token);
+        if (timeout_u != 0) {
+            sched_timer_arm_ticks(deadline);
+        }
+        if (sched_park_commit((u64)&select_wait_token, 1)
+            == PARK_INTERRUPTED_F) {
+            return EINTR_SEL;
         }
     }
 
@@ -1499,14 +1464,13 @@ u64 sys_poll(u64 ufds, u64 nfds, u64 timeout_ms) {
         if (sched_should_eintr_timer()) {
             return EINTR_SEL;
         }
-        if ((i64)timeout_ms < 0) {
-            sched_park_prepare((u64)&select_wait_token);
-            if (sched_park_commit((u64)&select_wait_token, 1)
-                == PARK_INTERRUPTED_F) {
-                return EINTR_SEL;
-            }
-        } else {
-            sched_yield();
+        sched_park_prepare((u64)&select_wait_token);
+        if ((i64)timeout_ms >= 0) {
+            sched_timer_arm_ticks(deadline);
+        }
+        if (sched_park_commit((u64)&select_wait_token, 1)
+            == PARK_INTERRUPTED_F) {
+            return EINTR_SEL;
         }
     }
 }

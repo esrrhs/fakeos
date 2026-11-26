@@ -29,6 +29,9 @@ extern void sched_do_clear_child_tid(void);
 extern void sched_replace_as(u64 new_as_h);
 extern void sched_yield(void);
 extern u32 sched_fd_close_all(void);
+extern void sched_process_close_all_fds(u32 pid);
+extern void sched_fd_unpin_self(void);
+extern u32 sched_current_task_cancelled(void);
 extern u32 sched_current_ppid(void);
 extern void sched_reparent_children(u32 old_ppid, u32 new_ppid);
 extern void kthread_exit(void);
@@ -88,6 +91,17 @@ extern s64 sys_nat_mutex_lock(u64 cap, u64 block);
 extern s64 sys_nat_mutex_unlock(u64 cap);
 extern s64 sys_nat_mutex_consistent(u64 cap);
 extern s64 sys_nat_mutex_stat(u64 cap, u64 out);
+extern s64 sys_nat_send_timed(u64 cap, u64 value, u64 abs_deadline_ns);
+extern s64 sys_nat_recv_timed(u64 cap, u64 value_out, u64 abs_deadline_ns);
+extern s64 sys_nat_mutex_lock_timed(u64 cap, u64 abs_deadline_ns);
+extern s64 sys_nat_chan_send_msg(u64 cap, u64 desc_u, u64 abs_deadline_ns);
+extern s64 sys_nat_chan_recv_msg(u64 cap, u64 desc_u, u64 abs_deadline_ns);
+extern s64 sys_nat_wait_any(u64 items_u, u64 count, u64 abs_deadline_ns);
+extern s64 sys_nat_process_spawn(u64 desc_u, u64 cap_out_u);
+extern s64 sys_nat_task_spawn(u64 entry, u64 stack, u64 arg, u64 cap_out_u);
+extern s64 sys_nat_exec_wait(u64 cap, u64 result_out_u, u64 abs_deadline_ns);
+extern s64 sys_nat_exec_cancel(u64 cap);
+extern void native_exec_obj_complete(u32 kind, u64 target_id, u64 exit_val);
 extern void nat_process_exit(u32 pid);
 extern void native_mutex_owner_died_key(u64 key);
 extern u64 sched_current_owner_key(void);
@@ -261,6 +275,17 @@ enum {
     SC_NAT_MUTEX_UNLOCK = 515,
     SC_NAT_MUTEX_CONSISTENT = 516,
     SC_NAT_MUTEX_STAT = 517,
+    SC_NAT_SEND_TIMED = 518,
+    SC_NAT_RECV_TIMED = 519,
+    SC_NAT_MUTEX_LOCK_TIMED = 520,
+    SC_NAT_CHAN_SEND_MSG = 521,
+    SC_NAT_CHAN_RECV_MSG = 522,
+    SC_NAT_WAIT_ANY = 523,
+    SC_NAT_PROCESS_SPAWN = 524,
+    SC_NAT_TASK_SPAWN = 525,
+    SC_NAT_TASK_EXIT = 526,
+    SC_NAT_EXEC_WAIT = 527,
+    SC_NAT_EXEC_CANCEL = 528,
     /* Zero-copy raw device rings (AF_XDP analogue). */
     SC_RAW_CREATE = 509,
     SC_RAW_MAP = 510,
@@ -401,31 +426,37 @@ extern void sched_process_image_end(void);
 extern void sched_process_group_exit(u64 code);
 extern u64 sched_process_leave(u64 code);
 extern u32 sched_process_exit_ready(void);
+extern u32 sched_process_exit_ready_ex(u32 *native_spawned_out);
 static u64 sys_fork(struct syscall_frame *f) {
     u64 rc;
     if(!sched_process_image_begin())return (u64)-16;
     rc=fork_exclusive(f);sched_process_image_end();return rc;
 }
-/* Raw task exit and native process exit deliberately differ. */
+/* Raw task exit and native process/task exit. */
 static void proc_exit_task(u64 code) {
-    u32 pid=sched_current_pid();u32 ppid;u64 as;
-    /* Robust mutexes owned by THIS task die with it (architecture section 6:
-     * group exit walks owned mutexes only outside scheduler spinlocks). Runs
-     * for leaders and secondary threads alike; nat_process_exit below then
-     * closes the capabilities. */
+    u32 pid=sched_current_pid();
+    u32 tid=sched_current_tid();
+    u32 ppid;
+    u64 as;
+    sched_fd_unpin_self();
     native_mutex_owner_died_key(sched_current_owner_key());
-    sched_fd_close_all();
     sched_do_clear_child_tid();
+    native_exec_obj_complete(3, (u64)tid, code);
     as=sched_process_leave(code);
     if(as) {
-        nat_process_exit(pid);          /* final task exit: close native caps */
+        u32 is_nat_proc = 0;
+        sched_process_close_all_fds(pid);
+        nat_process_exit(pid);
         mem.as_release_h(as);
-        code=sched_process_exit_ready();
+        code=sched_process_exit_ready_ex(&is_nat_proc);
+        native_exec_obj_complete(4, (u64)pid, code);
         kprintf("[UPROC] pid %u exited (code %u)\n",(u64)pid,code);
         uproc_note_exit(pid,code);
-        ppid=proc_record_exit(pid,sched_current_ppid(),code);
-        if(ppid)sched_signal_send(ppid,17);
-        sched_wakeup(sched_wait4_chan(ppid));
+        if (!is_nat_proc) {
+            ppid=proc_record_exit(pid,sched_current_ppid(),code);
+            if(ppid)sched_signal_send(ppid,17);
+            sched_wakeup(sched_wait4_chan(ppid));
+        }
         if(pid!=1){
             sched_reparent_children(pid,1);proc_reparent_exits(pid,1);
             sched_wakeup(sched_wait4_chan(1));
@@ -433,6 +464,9 @@ static void proc_exit_task(u64 code) {
     }
     kthread_exit();
     for(;;){}
+}
+void proc_exit_task_cancelled(void) {
+    proc_exit_task((u64)-4);
 }
 void proc_terminate(u64 code) {
     sched_process_group_exit(code);
@@ -643,6 +677,39 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
     if (f->rax == SC_NAT_MUTEX_STAT) {
         return sys_nat_mutex_stat(f->rdi, f->rsi);
     }
+    if (f->rax == SC_NAT_SEND_TIMED) {
+        return sys_nat_send_timed(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_RECV_TIMED) {
+        return sys_nat_recv_timed(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_MUTEX_LOCK_TIMED) {
+        return sys_nat_mutex_lock_timed(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NAT_CHAN_SEND_MSG) {
+        return sys_nat_chan_send_msg(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_CHAN_RECV_MSG) {
+        return sys_nat_chan_recv_msg(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_WAIT_ANY) {
+        return sys_nat_wait_any(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_PROCESS_SPAWN) {
+        return sys_nat_process_spawn(f->rdi, f->rsi);
+    }
+    if (f->rax == SC_NAT_TASK_SPAWN) {
+        return sys_nat_task_spawn(f->rdi, f->rsi, f->rdx, f->r10);
+    }
+    if (f->rax == SC_NAT_TASK_EXIT) {
+        proc_exit_task(f->rdi);
+    }
+    if (f->rax == SC_NAT_EXEC_WAIT) {
+        return sys_nat_exec_wait(f->rdi, f->rsi, f->rdx);
+    }
+    if (f->rax == SC_NAT_EXEC_CANCEL) {
+        return sys_nat_exec_cancel(f->rdi);
+    }
     if (f->rax == SC_RAW_CREATE) {
         return sys_raw_create();
     }
@@ -764,7 +831,14 @@ static u64 syscall_dispatch_inner(struct syscall_frame *f) {
 u64 syscall_dispatch(struct syscall_frame *f) {
     u64 r;
     syscall_count++;
+    if (sched_current_task_cancelled()) {
+        proc_exit_task((u64)-4);
+    }
     r = syscall_dispatch_inner(f);
+    sched_fd_unpin_self();
+    if (sched_current_task_cancelled()) {
+        proc_exit_task((u64)-4);
+    }
     /* Deliver custom handler frames or default-terminate fatal signals. */
     sched_check_signals_frame(&f->rip, &f->rflags, &f->pad, &f->rdi, &r);
     return r;

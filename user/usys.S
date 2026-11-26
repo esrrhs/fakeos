@@ -46,6 +46,16 @@
     USYSC1 u_nat_mutex_unlock, 515
     USYSC1 u_nat_mutex_consistent, 516
     USYSC1 u_nat_mutex_stat, 517
+    USYSC1 u_nat_send_timed, 518
+    USYSC1 u_nat_recv_timed, 519
+    USYSC1 u_nat_mutex_lock_timed, 520
+    USYSC1 u_nat_chan_send_msg, 521
+    USYSC1 u_nat_chan_recv_msg, 522
+    USYSC1 u_nat_wait_any, 523
+    USYSC1 u_nat_process_spawn, 524
+    USYSC1 u_nat_task_exit, 526
+    USYSC1 u_nat_exec_wait, 527
+    USYSC1 u_nat_exec_cancel, 528
     USYSC1 u_raw_create, 509
     USYSC1 u_raw_map, 510
     USYSC1 u_raw_tx_kick, 511
@@ -239,6 +249,13 @@ atomic_cmpxchg:
     .byte 0xF0, 0x0F, 0xB1, 0x17
     ret
 
+
+    .globl u_nat_task_spawn
+u_nat_task_spawn:
+    mov %rcx, %r10
+    mov $525, %eax
+    syscall
+    ret
 
     .globl u_exit_group
 u_exit_group:

@@ -1,141 +1,366 @@
 package kernel;
 import types;
 
+typedef types.uint8_t  u8;
 typedef types.uint32_t u32;
 typedef types.uint64_t u64;
-typedef types.int32_t s32;
+typedef types.int32_t  s32;
 
-/* Kernel-private native object foundation. NOT user capabilities: callers are
- * trusted kernel code. User exposure requires process-owned capability tables
- * and cancellation registration; see docs/native-kernel-architecture.md. */
+/* ---------------------------------------------------------------------------
+ * Sharded native typed-object core (architecture sections 3, 4, 5, 6, 7).
+ *
+ * Object kinds:
+ *   NC_CHANNEL (1) — bounded FIFO message queue: copied byte payloads (0..256B)
+ *                    plus up to 4 transferred capabilities (DUP or two-phase
+ *                    all-or-nothing MOVE). Scalar u64 send/recv share the same
+ *                    8-byte envelope.
+ *   NC_MUTEX   (2) — robust nonrecursive capability mutex: stable (pid,tid)
+ *                    owner identity, bounded FIFO queue with direct handoff at
+ *                    unlock (zero newcomer barging), OWNER_DIED + consistent()
+ *                    recovery or terminal NOT_RECOVERABLE poison.
+ *   NC_TASK    (3) — typed kernel task completion/control object (JOIN/CANCEL).
+ *   NC_PROC    (4) — typed native process completion/control object.
+ *
+ * Locking hierarchy (strict DAG, never inverted):
+ *   nc_obj_locks[oi_0] -> nc_obj_locks[oi_1] (oi_0 < oi_1)
+ *       -> nc_reg_lock (pure leaf: handle/object slot table only, never wakes)
+ *       -> sched_run_lock (via sched_wakeup / sched_park_* / sched_nat_acquire)
+ *
+ * Independent channels and mutexes operate under disjoint nc_obj_locks[oi]
+ * spinlocks with zero cross-object serialization.
+ * ------------------------------------------------------------------------- */
+
 enum {
-    NC_SEND = 1, NC_RECV = 2, NC_CHANNEL = 1, NC_MUTEX = 2,
-    NC_MLOCK = 4, NC_MUNLOCK = 8, NC_MWAIT = 16,
-    NC_BAD_HANDLE = -1, NC_RIGHTS = -2, NC_FULL = -3,
-    NC_AGAIN = -4, NC_CLOSED = -5, NC_EOF = 1, NC_INVAL = -6, NC_TYPE = -7,
-    NC_INTR = -8,
-    NC_DEADLK = -9, NC_OWNER_DIED = -10, NC_NOT_RECOVERABLE = -11,
-    NC_OBJECTS = 8, NC_HANDLES = 32, NC_CAPACITY = 8,
-    /* Mutex states. M_DIED: owner died, next acquisition recovers with
-     * OWNER_DIED. M_NOTREC: recovery was abandoned; terminal poison. */
-    M_FREE = 0, M_LOCKED = 1, M_DIED = 2, M_NOTREC = 3,
-    MQ_CAP = 8
+    NC_SEND     = 1,
+    NC_RECV     = 2,
+    NC_MLOCK    = 4,
+    NC_MUNLOCK  = 8,
+    NC_MWAIT    = 16,
+    NC_TRANSFER = 32,
+    NC_JOIN     = 64,
+    NC_CANCEL   = 128,
+    NC_INSPECT  = 256,
+    NC_ALL_RIGHTS = 511,
+
+    NC_CHANNEL  = 1,
+    NC_MUTEX    = 2,
+    NC_TASK     = 3,
+    NC_PROC     = 4,
+
+    NC_EOF             = 1,
+    NC_BAD_HANDLE      = -1,
+    NC_RIGHTS          = -2,
+    NC_FULL            = -3,
+    NC_AGAIN           = -4,
+    NC_CLOSED          = -5,
+    NC_INVAL           = -6,
+    NC_TYPE            = -7,
+    NC_INTR            = -8,
+    NC_DEADLK          = -9,
+    NC_OWNER_DIED      = -10,
+    NC_NOT_RECOVERABLE = -11,
+    NC_TIMEDOUT        = -12,
+    NC_MSGSIZE         = -13,
+
+    NC_OBJECTS       = 64,
+    NC_HANDLES       = 256,
+    NC_CAPACITY      = 8,
+    NC_TOTAL_MSGS    = 512,   /* NC_OBJECTS * NC_CAPACITY */
+    NC_MSG_MAX_BYTES = 256,
+    NC_MSG_MAX_CAPS  = 4,
+
+    M_FREE   = 0,
+    M_LOCKED = 1,
+    M_DIED   = 2,
+    M_NOTREC = 3,
+    MQ_CAP   = 8,
+    NW_SLOTS = 16,
+
+    NATW_RECV   = 1,
+    NATW_SEND   = 2,
+    NATW_MUTEX  = 4,
+    NATW_DONE   = 8,
+    NATW_EOF    = 16,
+    NATW_CLOSED = 32,
+
+    PARK_INTR_RESULT    = 2,
+    PARK_TIMEOUT_RESULT = 3
 };
+
 struct native_object {
     u32 kind;
     u32 readers;
     u32 writers;
     u32 pins;
+    /* Channel state */
     u32 head;
     u32 count;
     u32 recv_wait;
     u32 send_wait;
-    u64 messages[NC_CAPACITY];
-    /* NC_MUTEX fields (parallel with messages; m_wait is the wake channel) */
+    /* Mutex state */
     u32 m_state;
     u32 m_recover;
     u64 m_owner;
     u32 m_wait;
     u32 m_waiters;
     u32 m_qhead;
-    /* Monotonic count of enqueue events. m_waiters counts queue SLOTS and
-     * stays occupied by the holder until it unlocks, so it cannot tell a
-     * test "how many contenders are actually blocked on this mutex"; this
-     * counter can, and it only ever moves forward. */
     u32 m_enqueues;
-    /* Per-waiter wait channel. The contenders must NOT share one channel:
-     * sched_wakeup() wakes EVERY sleeper on the channel, so a shared
-     * channel would wake the losers of a handoff too. They would re-enqueue
-     * at a slot computed from an already-advanced m_qhead/m_waiters and so
-     * lose their FIFO place. One channel per waiter lets the unlock wake
-     * exactly the contender it handed the mutex to.
-     *
-     * The queue stores SLOT INDICES, not owner keys: a waiter parks on
-     * m_chan[slot], and the slot is released when the waiter leaves. A
-     * slot's channel address therefore never moves, which is what makes
-     * the wakeup target exact. */
     u64 m_chan[MQ_CAP];
     u64 m_queue[MQ_CAP];
-    /* Owner key currently parked on m_chan[slot]; 0 means the slot is free.
-     * A slot is allocated on enqueue and released on dequeue, so the channel
-     * a waiter parks on never moves and a wakeup always targets exactly the
-     * intended contender. */
     u64 m_tkey[MQ_CAP];
+    /* Task / Process completion state (NC_TASK / NC_PROC) */
+    u32 exec_active;
+    u32 exec_done;
+    u64 exec_target;
+    u64 exec_result;
+    /* Multi-object wait_any registrations (stack/task wait tokens) */
+    u64 wait_any_chans[NW_SLOTS];
 };
+
 struct native_handle {
     u64 generation;
     u32 live;
     u32 object;
     u32 rights;
 };
+
+/* Shared request envelope between natcap.c and native.c (avoids >4 args). */
+struct nc_msg_req {
+    u8 *bytes;
+    u32 byte_len;
+    u32 ncaps;
+    u64 cap_handles[NC_MSG_MAX_CAPS];
+    u32 cap_rights[NC_MSG_MAX_CAPS];
+    u32 caller_pid;
+    u32 move_count;
+    u32 src_slots[NC_MSG_MAX_CAPS];
+    u32 src_gens[NC_MSG_MAX_CAPS];
+    u32 src_modes[NC_MSG_MAX_CAPS];
+    u64 moved_old_nh[NC_MSG_MAX_CAPS];
+    u64 recv_installed_caps[NC_MSG_MAX_CAPS];
+};
+
+struct nc_wait_entry {
+    u64 nh;
+    u32 events;
+    u32 revents;
+};
+
 static struct native_object nc_objects[NC_OBJECTS];
 static struct native_handle nc_handles[NC_HANDLES];
-static volatile u32 nc_lock;
+static volatile u32 nc_reg_lock;
+static volatile u32 nc_obj_locks[NC_OBJECTS];
+
+/* Flat message payload & capability storage (fakecc-safe: no 2D struct array). */
+static u8  nc_msg_bytes[NC_TOTAL_MSGS * NC_MSG_MAX_BYTES];
+static u32 nc_msg_len[NC_TOTAL_MSGS];
+static u32 nc_msg_ncaps[NC_TOTAL_MSGS];
+static u64 nc_msg_caps[NC_TOTAL_MSGS * NC_MSG_MAX_CAPS];
+static u32 nc_msg_cap_rights[NC_TOTAL_MSGS * NC_MSG_MAX_CAPS];
+
+static u32 nc_wait_rotor[8];
+
 extern void spin_lock(volatile u32 *lock);
 extern void spin_unlock(volatile u32 *lock);
 extern u64 cpu_irq_save(void);
 extern void cpu_irq_restore(u64 flags);
 extern void sched_sleep_unlock_spin(u64 chan, volatile u32 *lock);
 extern void sched_park_abort(void);
-extern void sched_park_commit(u64 chan, u32 nonrestartable);
+extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
 extern void sched_wakeup(u64 chan);
 extern void sched_park_prepare(u64 chan);
+extern void sched_park_prepare_deadline(u64 chan, u64 abs_ns);
 extern u32 sched_park_commit_unlock_spin(u64 chan, volatile u32 *lock, u32 nonrestartable);
 extern u64 sched_current_owner_key(void);
-enum { PARK_INTR_RESULT = 2 };              /* matches sched.c PARK_INTERRUPTED */
+extern u64 sched_monotonic_ns(void);
+extern u32 smp_cpuid(void);
+extern s32 nat_commit_send_caps(struct nc_msg_req *req);
+extern s32 nat_commit_recv_caps(struct nc_msg_req *req);
 
-/* All helpers require nc_lock, IRQs disabled. Never wrap a generation: an
- * exhausted handle slot is retired, not allowed to resurrect an old ID. */
-static s32 nc_lookup(u64 h) {
-    u32 i = (u32)(h & 255ULL) - 1;
+/* Validate deadline encoding (architecture section 5):
+ *   0                  = nonblocking poll
+ *   1..0x7FFFFFFFFFFFFFFF = monotonic absolute deadline in ns
+ *   0xFFFFFFFFFFFFFFFF = infinite wait
+ *   anything else      = overflow / invalid -> 0 */
+static u32 nc_deadline_valid(u64 abs_ns) {
+    if (abs_ns == ~0ULL) return 1;
+    if (abs_ns <= 0x7FFFFFFFFFFFFFFFULL) return 1;
+    return 0;
+}
+
+/* Requires nc_reg_lock. */
+static s32 nc_lookup_reg_locked(u64 h) {
+    u32 i = (u32)(h & 0xFFFFULL) - 1;
     if (i >= NC_HANDLES || !nc_handles[i].live
-        || nc_handles[i].generation != (h >> 8)) return NC_BAD_HANDLE;
+        || nc_handles[i].generation != (h >> 16)) {
+        return NC_BAD_HANDLE;
+    }
     return (s32)i;
 }
-static s32 nc_alloc_handle(u32 oi, u32 rights, u64 *out) {
+
+static u32 nc_functional_rights(u32 rights) {
+    return rights & ~(u32)NC_TRANSFER;
+}
+
+static u32 nc_rights_fit_kind(u32 kind, u32 rights) {
+    u32 fn = nc_functional_rights(rights);
+    if (fn == 0 || (rights & ~(u32)NC_ALL_RIGHTS) != 0) return 0;
+    if (kind == NC_CHANNEL) {
+        return (fn & ~(u32)(NC_SEND | NC_RECV)) == 0;
+    }
+    if (kind == NC_MUTEX) {
+        return (fn & ~(u32)(NC_MLOCK | NC_MUNLOCK | NC_MWAIT)) == 0;
+    }
+    if (kind == NC_TASK || kind == NC_PROC) {
+        return (fn & ~(u32)(NC_JOIN | NC_CANCEL | NC_INSPECT)) == 0;
+    }
+    return 0;
+}
+
+/* Requires nc_reg_lock (and nc_obj_locks[oi] if oi is already published). */
+static s32 nc_alloc_handle_locked(u32 oi, u32 rights, u64 *out) {
     u32 i;
     struct native_object *o = &nc_objects[oi];
+    if (!nc_rights_fit_kind(o->kind, rights)) return NC_RIGHTS;
     for (i = 0; i < NC_HANDLES; i++) {
         if (!nc_handles[i].live
-            && nc_handles[i].generation < 0x00FFFFFFFFFFFFFFULL) {
+            && nc_handles[i].generation < 0x0000FFFFFFFFFFFFULL) {
             struct native_handle *h = &nc_handles[i];
-            h->generation++;
+            h->generation = h->generation + 1;
             h->live = 1;
             h->object = oi;
             h->rights = rights;
-            /* Explicit pointer-member loads/stores: the current fakecc seed
-             * miscompiles indexed-struct-member postincrement into storing the
-             * array index. Actual guest refcount/exhaustion tests guard this. */
             if (rights & NC_SEND) o->writers = o->writers + 1;
             if (rights & NC_RECV) o->readers = o->readers + 1;
-            /* A mutex capability is one object reference, whatever its rights. */
             if (rights & (NC_MLOCK | NC_MUNLOCK | NC_MWAIT))
                 o->readers = o->readers + 1;
-            *out = (h->generation << 8) | (u64)(i + 1);
+            if (rights & (NC_JOIN | NC_CANCEL | NC_INSPECT))
+                o->readers = o->readers + 1;
+            *out = (h->generation << 16) | (u64)(i + 1);
             return 0;
         }
     }
     return NC_FULL;
 }
-static void nc_reclaim(struct native_object *o) {
+
+/* Requires nc_reg_lock. */
+static void nc_reclaim_reg_locked(u32 oi) {
+    struct native_object *o = &nc_objects[oi];
     if (o->readers || o->writers || o->pins) return;
-    /* Last-cap close while LOCKED does not destroy the mutex: the owner
-     * reference survives until unlock/death (architecture section 6). */
     if (o->kind == NC_MUTEX && o->m_state == M_LOCKED) return;
+    if ((o->kind == NC_TASK || o->kind == NC_PROC) && o->exec_active) return;
     o->kind = 0;
 }
-static void nc_close_locked(u32 hi) {
-    struct native_handle *h = &nc_handles[hi];
-    struct native_object *o = &nc_objects[h->object];
-    if (h->rights & NC_SEND) o->writers--;
-    if (h->rights & NC_RECV) o->readers--;
-    if (h->rights & (NC_MLOCK | NC_MUNLOCK | NC_MWAIT)) o->readers--;
-    h->live = 0;
-    /* Also wakes operations on THIS now-revoked handle, even when other
-     * endpoints still exist. Pins keep their condition addresses alive. */
-    sched_wakeup((u64)&o->recv_wait);
-    sched_wakeup((u64)&o->send_wait);
-    nc_reclaim(o);
+
+/* Wake every wait_any sleeper currently registered on object `o`.
+ * Caller holds nc_obj_locks[oi] with IRQs off. */
+static void nc_wake_wait_any_locked(struct native_object *o) {
+    u32 s;
+    for (s = 0; s < NW_SLOTS; s++) {
+        u64 ch = o->wait_any_chans[s];
+        if (ch != 0) {
+            sched_wakeup(ch);
+        }
+    }
+}
+
+/* Pin an object from a handle, verifying kind (0 = any) and required rights.
+ * Returns >=0 object index on success (with o->pins incremented), or NC_*. */
+static s32 nc_pin_handle(u64 handle, u32 want_rights, u32 want_kind) {
+    u64 flags = cpu_irq_save();
+    s32 hi;
+    s32 rc;
+    spin_lock(&nc_reg_lock);
+    hi = nc_lookup_reg_locked(handle);
+    if (hi < 0) {
+        rc = NC_BAD_HANDLE;
+    } else {
+        struct native_handle *h = &nc_handles[hi];
+        struct native_object *o = &nc_objects[h->object];
+        if ((h->rights & want_rights) != want_rights) {
+            rc = NC_RIGHTS;
+        } else if (want_kind != 0 && o->kind != want_kind) {
+            rc = NC_TYPE;
+        } else {
+            o->pins = o->pins + 1;
+            rc = (s32)h->object;
+        }
+    }
+    spin_unlock(&nc_reg_lock);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+static u32 nc_handle_still_live(u64 handle) {
+    u32 ok;
+    spin_lock(&nc_reg_lock);
+    ok = nc_lookup_reg_locked(handle) >= 0 ? 1u : 0u;
+    spin_unlock(&nc_reg_lock);
+    return ok;
+}
+
+/* Drain any queued capability handles from channel `oi` into `out[]` when
+ * the last reader is gone. Caller holds nc_obj_locks[oi]. */
+static u32 nc_drain_queued_caps_locked(u32 oi, u64 *out, u32 cap) {
+    struct native_object *o = &nc_objects[oi];
+    u32 n = 0;
+    while (o->count > 0) {
+        u32 mslot = oi * NC_CAPACITY + o->head;
+        u32 nc = nc_msg_ncaps[mslot];
+        u32 k;
+        for (k = 0; k < nc; k++) {
+            u64 ch = nc_msg_caps[mslot * NC_MSG_MAX_CAPS + k];
+            nc_msg_caps[mslot * NC_MSG_MAX_CAPS + k] = 0;
+            if (ch != 0 && n < cap) {
+                out[n] = ch;
+                n = n + 1;
+            }
+        }
+        nc_msg_ncaps[mslot] = 0;
+        nc_msg_len[mslot] = 0;
+        o->head = (o->head + 1) % NC_CAPACITY;
+        o->count = o->count - 1;
+    }
+    o->head = 0;
+    return n;
+}
+
+/* Drop one pin on `oi` (IRQs may be on or off). */
+static void nc_unpin_object(u32 oi) {
+    u64 flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    spin_lock(&nc_reg_lock);
+    nc_objects[oi].pins = nc_objects[oi].pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
+    cpu_irq_restore(flags);
+}
+
+static void nc_zero_object_common(struct native_object *o, u32 kind) {
+    u32 s;
+    o->kind = kind;
+    o->readers = 0;
+    o->writers = 0;
+    o->pins = 0;
+    o->head = 0;
+    o->count = 0;
+    o->recv_wait = 0;
+    o->send_wait = 0;
+    o->m_state = M_FREE;
+    o->m_recover = 0;
+    o->m_owner = 0;
+    o->m_wait = 0;
+    o->m_waiters = 0;
+    o->m_qhead = 0;
+    o->m_enqueues = 0;
+    o->exec_active = 0;
+    o->exec_done = 0;
+    o->exec_target = 0;
+    o->exec_result = 0;
+    for (s = 0; s < NW_SLOTS; s++) {
+        o->wait_any_chans[s] = 0;
+    }
 }
 
 s32 native_channel_create(u64 *send, u64 *recv) {
@@ -146,224 +371,494 @@ s32 native_channel_create(u64 *send, u64 *recv) {
     *send = 0;
     *recv = 0;
     flags = cpu_irq_save();
-    spin_lock(&nc_lock);
+    spin_lock(&nc_reg_lock);
     for (oi = 0; oi < NC_OBJECTS; oi++) {
         struct native_object *o = &nc_objects[oi];
         if (o->kind) continue;
-        o->kind = NC_CHANNEL;
-        o->readers = 0; o->writers = 0; o->pins = 0;
-        o->head = 0; o->count = 0;
-        rc = nc_alloc_handle(oi, NC_SEND, send);
-        if (rc == 0) {
-            rc = nc_alloc_handle(oi, NC_RECV, recv);
-            if (rc != 0) nc_close_locked((u32)nc_lookup(*send));
+        nc_zero_object_common(o, NC_CHANNEL);
+        {
+            u32 m;
+            for (m = 0; m < NC_CAPACITY; m++) {
+                u32 mslot = oi * NC_CAPACITY + m;
+                nc_msg_len[mslot] = 0;
+                nc_msg_ncaps[mslot] = 0;
+            }
         }
-        if (rc != 0) { *send = 0; *recv = 0; nc_reclaim(o); }
+        rc = nc_alloc_handle_locked(oi, NC_SEND | NC_TRANSFER, send);
+        if (rc == 0) {
+            rc = nc_alloc_handle_locked(oi, NC_RECV | NC_TRANSFER, recv);
+            if (rc != 0) {
+                s32 shi = nc_lookup_reg_locked(*send);
+                if (shi >= 0) {
+                    nc_handles[shi].live = 0;
+                    o->writers = 0;
+                }
+            }
+        }
+        if (rc != 0) {
+            *send = 0;
+            *recv = 0;
+            o->kind = 0;
+        }
         break;
     }
-    spin_unlock(&nc_lock);
+    spin_unlock(&nc_reg_lock);
     cpu_irq_restore(flags);
     return rc;
 }
 
 s32 native_handle_dup(u64 handle, u32 rights, u64 *out) {
     u64 flags;
+    s32 pinned;
+    u32 oi;
     s32 hi;
     s32 rc;
-    if (out == 0 || !rights
-        || (rights & ~(u32)(NC_SEND | NC_RECV | NC_MLOCK | NC_MUNLOCK | NC_MWAIT)))
+    if (out == 0 || nc_functional_rights(rights) == 0
+        || (rights & ~(u32)NC_ALL_RIGHTS) != 0) {
         return NC_INVAL;
-    *out = 0;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    rc = hi;
-    if (hi >= 0) {
-        if ((nc_handles[hi].rights & rights) != rights) rc = NC_RIGHTS;
-        else rc = nc_alloc_handle(nc_handles[hi].object, rights, out);
     }
-    spin_unlock(&nc_lock);
+    *out = 0;
+    pinned = nc_pin_handle(handle, 0, 0);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    spin_lock(&nc_reg_lock);
+    hi = nc_lookup_reg_locked(handle);
+    if (hi < 0) {
+        rc = NC_BAD_HANDLE;
+    } else if ((nc_handles[hi].rights & rights) != rights) {
+        rc = NC_RIGHTS;
+    } else {
+        rc = nc_alloc_handle_locked(oi, rights, out);
+    }
+    nc_objects[oi].pins = nc_objects[oi].pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
+
+/* Iterative handle close: closing the last reader of a channel may discard
+ * queued capabilities; processing them via an explicit worklist avoids
+ * unbounded recursion on the kernel stack. */
 s32 native_handle_close(u64 handle) {
-    u64 flags = cpu_irq_save();
-    s32 hi;
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi >= 0) nc_close_locked((u32)hi);
-    spin_unlock(&nc_lock);
-    cpu_irq_restore(flags);
-    return hi < 0 ? hi : 0;
+    u64 work[64];
+    u32 head = 0;
+    u32 tail = 0;
+    s32 first_rc = 0;
+    u32 first = 1;
+
+    work[tail] = handle;
+    tail = tail + 1;
+
+    while (head != tail) {
+        u64 cur = work[head];
+        s32 pinned;
+        u32 oi;
+        u64 flags;
+        s32 hi;
+        head = (head + 1) % 64;
+
+        pinned = nc_pin_handle(cur, 0, 0);
+        if (pinned < 0) {
+            if (first) first_rc = pinned;
+            first = 0;
+            continue;
+        }
+        oi = (u32)pinned;
+        flags = cpu_irq_save();
+        spin_lock(&nc_obj_locks[oi]);
+        spin_lock(&nc_reg_lock);
+        hi = nc_lookup_reg_locked(cur);
+        if (hi < 0) {
+            if (first) first_rc = NC_BAD_HANDLE;
+            nc_objects[oi].pins = nc_objects[oi].pins - 1;
+            nc_reclaim_reg_locked(oi);
+            spin_unlock(&nc_reg_lock);
+            spin_unlock(&nc_obj_locks[oi]);
+            cpu_irq_restore(flags);
+            first = 0;
+            continue;
+        }
+        {
+            struct native_handle *h = &nc_handles[hi];
+            struct native_object *o = &nc_objects[oi];
+            u32 r = h->rights;
+            if (r & NC_SEND) o->writers = o->writers - 1;
+            if (r & NC_RECV) o->readers = o->readers - 1;
+            if (r & (NC_MLOCK | NC_MUNLOCK | NC_MWAIT)) o->readers = o->readers - 1;
+            if (r & (NC_JOIN | NC_CANCEL | NC_INSPECT)) o->readers = o->readers - 1;
+            h->live = 0;
+            spin_unlock(&nc_reg_lock);
+
+            if (o->kind == NC_CHANNEL && o->readers == 0 && o->count > 0) {
+                u64 dropped[32];
+                u32 nd = nc_drain_queued_caps_locked(oi, dropped, 32);
+                u32 k;
+                for (k = 0; k < nd; k++) {
+                    u32 next_t = (tail + 1) % 64;
+                    if (next_t != head) {
+                        work[tail] = dropped[k];
+                        tail = next_t;
+                    }
+                }
+            }
+            sched_wakeup((u64)&o->recv_wait);
+            sched_wakeup((u64)&o->send_wait);
+            nc_wake_wait_any_locked(o);
+
+            spin_lock(&nc_reg_lock);
+            o->pins = o->pins - 1;
+            nc_reclaim_reg_locked(oi);
+            spin_unlock(&nc_reg_lock);
+        }
+        spin_unlock(&nc_obj_locks[oi]);
+        cpu_irq_restore(flags);
+        first = 0;
+    }
+    return first_rc;
 }
 
-/* Message values are opaque copied kernel scalars, never followed as pointers.
- * Linearization is under nc_lock. Sleep publication takes run_lock BEFORE
- * releasing nc_lock. Wake may be spurious; every predicate and ID is rechecked.
- * Closing a blocked operation's handle revokes it with BAD_HANDLE.
- *
- * DELIBERATE 4-ARGUMENT LIMIT: the current fakecc miscompiles 5-argument
- * calls — the 5th integer argument arrives with garbage register contents
- * (a boolean flag read as 0xfffffff442d31e80 in R8), which silently routed
- * kernel callers into the user park path; see
- * docs/evidence/native-caps-20261121/RESULT.md. The interruptible twin below
- * duplicates the transfer loop ON PURPOSE; only the park step differs. */
+static void nc_pack_u64(u8 *dst, u64 v) {
+    u32 b;
+    for (b = 0; b < 8; b++) {
+        dst[b] = (u8)((v >> (b * 8)) & 0xFFu);
+    }
+}
+
+static u64 nc_unpack_u64(const u8 *src) {
+    u64 v = 0;
+    u32 b;
+    for (b = 0; b < 8; b++) {
+        v = v | ((u64)src[b] << (b * 8));
+    }
+    return v;
+}
+
+/* Kernel-only uninterruptible scalar transfer (preserved for kernel callers). */
 static s32 nc_transfer(u64 handle, u64 *value, u32 send, u32 block) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
     struct native_object *o;
     if (value == 0 || block > 1) return NC_INVAL;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto done; }
-    if (!(nc_handles[hi].rights & (send ? NC_SEND : NC_RECV))) {
-        rc = NC_RIGHTS; goto done;
-    }
-    oi = nc_handles[hi].object;
+    pinned = nc_pin_handle(handle, send ? NC_SEND : NC_RECV, NC_CHANNEL);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_CHANNEL) { rc = NC_TYPE; goto done; }
-    o->pins++;
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
     for (;;) {
-        hi = nc_lookup(handle);
-        if (hi < 0) { rc = NC_BAD_HANDLE; break; }
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
         if (send) {
             if (!o->readers) { rc = NC_CLOSED; break; }
             if (o->count < NC_CAPACITY) {
-                o->messages[(o->head + o->count) % NC_CAPACITY] = *value;
-                o->count++;
+                u32 mslot = oi * NC_CAPACITY + ((o->head + o->count) % NC_CAPACITY);
+                nc_pack_u64(&nc_msg_bytes[mslot * NC_MSG_MAX_BYTES], *value);
+                nc_msg_len[mslot] = 8;
+                nc_msg_ncaps[mslot] = 0;
+                o->count = o->count + 1;
                 sched_wakeup((u64)&o->recv_wait);
-                rc = 0; break;
+                nc_wake_wait_any_locked(o);
+                rc = 0;
+                break;
             }
         } else {
             if (o->count) {
-                *value = o->messages[o->head];
+                u32 mslot = oi * NC_CAPACITY + o->head;
+                if (nc_msg_ncaps[mslot] != 0 || nc_msg_len[mslot] != 8) {
+                    rc = NC_MSGSIZE;
+                    break;
+                }
+                *value = nc_unpack_u64(&nc_msg_bytes[mslot * NC_MSG_MAX_BYTES]);
+                nc_msg_len[mslot] = 0;
                 o->head = (o->head + 1) % NC_CAPACITY;
-                o->count--;
+                o->count = o->count - 1;
                 sched_wakeup((u64)&o->send_wait);
-                rc = 0; break;
+                nc_wake_wait_any_locked(o);
+                rc = 0;
+                break;
             }
             if (!o->writers) { rc = NC_EOF; break; }
         }
         if (!block) { rc = NC_AGAIN; break; }
-        sched_sleep_unlock_spin(send ? (u64)&o->send_wait : (u64)&o->recv_wait, &nc_lock);
-        spin_lock(&nc_lock);
+        sched_sleep_unlock_spin(send ? (u64)&o->send_wait : (u64)&o->recv_wait,
+                                &nc_obj_locks[oi]);
+        spin_lock(&nc_obj_locks[oi]);
     }
-    o->pins--;
-    nc_reclaim(o);
- done:
-    spin_unlock(&nc_lock);
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
 
-/* Interruptible twin for USER capability syscalls (kernel/natcap.c): the
- * park intent is registered while nc_lock is still held, and commit
- * publishes sleep in one run_lock transaction that also refuses park on
- * pending fatal/caught cancellation (PARK_INTERRUPTED -> NC_INTR). Peer
- * enqueue/close hold nc_lock, signals hold run_lock, so every producer
- * either precedes the commit check or observes the published sleeper. */
-static s32 nc_transfer_intr(u64 handle, u64 *value, u32 send, u32 block) {
+/* Interruptible + deadline-aware scalar transfer (<=4 arguments). */
+static s32 nc_transfer_deadline(u64 handle, u64 *value, u32 send, u64 abs_deadline_ns) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
+    u32 timed_flag = 0;
     struct native_object *o;
-    if (value == 0 || block > 1) return NC_INVAL;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto done; }
-    if (!(nc_handles[hi].rights & (send ? NC_SEND : NC_RECV))) {
-        rc = NC_RIGHTS; goto done;
-    }
-    oi = nc_handles[hi].object;
+    if (value == 0 || !nc_deadline_valid(abs_deadline_ns)) return NC_INVAL;
+    pinned = nc_pin_handle(handle, send ? NC_SEND : NC_RECV, NC_CHANNEL);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_CHANNEL) { rc = NC_TYPE; goto done; }
-    o->pins++;
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
     for (;;) {
-        hi = nc_lookup(handle);
-        if (hi < 0) { rc = NC_BAD_HANDLE; break; }
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
         if (send) {
             if (!o->readers) { rc = NC_CLOSED; break; }
             if (o->count < NC_CAPACITY) {
-                o->messages[(o->head + o->count) % NC_CAPACITY] = *value;
-                o->count++;
+                u32 mslot = oi * NC_CAPACITY + ((o->head + o->count) % NC_CAPACITY);
+                nc_pack_u64(&nc_msg_bytes[mslot * NC_MSG_MAX_BYTES], *value);
+                nc_msg_len[mslot] = 8;
+                nc_msg_ncaps[mslot] = 0;
+                o->count = o->count + 1;
                 sched_wakeup((u64)&o->recv_wait);
-                rc = 0; break;
+                nc_wake_wait_any_locked(o);
+                rc = 0;
+                break;
             }
         } else {
             if (o->count) {
-                *value = o->messages[o->head];
+                u32 mslot = oi * NC_CAPACITY + o->head;
+                if (nc_msg_ncaps[mslot] != 0 || nc_msg_len[mslot] != 8) {
+                    rc = NC_MSGSIZE;
+                    break;
+                }
+                *value = nc_unpack_u64(&nc_msg_bytes[mslot * NC_MSG_MAX_BYTES]);
+                nc_msg_len[mslot] = 0;
                 o->head = (o->head + 1) % NC_CAPACITY;
-                o->count--;
+                o->count = o->count - 1;
                 sched_wakeup((u64)&o->send_wait);
-                rc = 0; break;
+                nc_wake_wait_any_locked(o);
+                rc = 0;
+                break;
             }
             if (!o->writers) { rc = NC_EOF; break; }
         }
-        if (!block) { rc = NC_AGAIN; break; }
+        if (abs_deadline_ns == 0) { rc = NC_AGAIN; break; }
+        if (timed_flag) { rc = NC_TIMEDOUT; break; }
         {
             u64 wchan = send ? (u64)&o->send_wait : (u64)&o->recv_wait;
-            sched_park_prepare(wchan);
-            if (sched_park_commit_unlock_spin(wchan, &nc_lock, 0)
-                == PARK_INTR_RESULT) {
+            u32 pr;
+            sched_park_prepare_deadline(wchan, abs_deadline_ns);
+            pr = sched_park_commit_unlock_spin(wchan, &nc_obj_locks[oi], 0);
+            spin_lock(&nc_obj_locks[oi]);
+            if (pr == PARK_INTR_RESULT) {
                 rc = NC_INTR;
                 break;
             }
+            if (pr == PARK_TIMEOUT_RESULT) {
+                /* Re-check queue once before failing: ready work wins. */
+                timed_flag = 1;
+            }
         }
-        spin_lock(&nc_lock);
     }
-    o->pins--;
-    nc_reclaim(o);
- done:
-    spin_unlock(&nc_lock);
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
+
 s32 native_channel_send(u64 handle, u64 value, u32 block) {
     return nc_transfer(handle, &value, 1, block);
 }
 s32 native_channel_recv(u64 handle, u64 *value, u32 block) {
     return nc_transfer(handle, value, 0, block);
 }
-/* User capability syscalls go through these: identical semantics plus the
- * interruptible park-admission contract (see kernel/natcap.c). */
 s32 native_channel_send_intr(u64 handle, u64 value, u32 block) {
-    return nc_transfer_intr(handle, &value, 1, block);
+    if (block > 1) return NC_INVAL;
+    return nc_transfer_deadline(handle, &value, 1, block ? ~0ULL : 0ULL);
 }
 s32 native_channel_recv_intr(u64 handle, u64 *value, u32 block) {
-    return nc_transfer_intr(handle, value, 0, block);
+    if (block > 1) return NC_INVAL;
+    return nc_transfer_deadline(handle, value, 0, block ? ~0ULL : 0ULL);
+}
+s32 native_channel_send_timed(u64 handle, u64 value, u64 abs_deadline_ns) {
+    return nc_transfer_deadline(handle, &value, 1, abs_deadline_ns);
+}
+s32 native_channel_recv_timed(u64 handle, u64 *value, u64 abs_deadline_ns) {
+    return nc_transfer_deadline(handle, value, 0, abs_deadline_ns);
 }
 
 /* ---------------------------------------------------------------------------
- * Native robust mutex (architecture section 6, gate 3).
- *
- * Typed kernel object independent of any shared-memory location. The owner is
- * a stable task identity from sched_current_owner_key(): user tasks are
- * (pid << 32 | tid) where tid comes from the never-recycling pid allocator,
- * so a dead owner can never be impersonated by slot reuse; kernel threads use
- * their TCB slot and are trusted test callers. Nonrecursive: self-lock ->
- * NC_DEADLK, nonowner unlock -> NC_RIGHTS (EPERM).
- *
- * Handoff prevents barging: unlock with queued waiters transfers ownership to
- * the FIFO head AT UNLOCK TIME (state stays M_LOCKED under the new owner), so
- * a newcomer arriving before the woken waiter resumes sees the lock held and
- * queues behind it. The wait queue is bounded (MQ_CAP); overflow -> NC_AGAIN.
- *
- * Robustness: a dying owner's exit walk marks M_DIED and wakes waiters; the
- * next acquirer gets NC_OWNER_DIED and must call consistent() before a normal
- * unlock, otherwise that unlock poisons the mutex as M_NOTREC (terminal).
- * Kill-while-handed (cancellation lands after a handoff woke us): the task
- * never returned to user code, so the protected data is untouched and the
- * lock releases CLEANLY (M_FREE), not through the recovery path.
- *
- * Locking: everything under nc_lock, IRQs off; parks follow the
- * prepare/commit contract exactly like nc_transfer_intr (nc_lock -> run_lock,
- * never inverted). Waiters pin the object; reclaim is blocked while M_LOCKED
- * with no handles left (owner reference survives close-until-death).
+ * Bounded byte payload + two-phase capability transfer (DUP and MOVE).
+ * User memory has ALREADY been validated/copied into `req` by natcap.c with
+ * IRQs ON and zero spinlocks held.
+ * ------------------------------------------------------------------------- */
+s32 native_chan_send_msg(u64 handle, struct nc_msg_req *req, u64 abs_deadline_ns) {
+    u64 flags;
+    s32 pinned;
+    u32 oi;
+    s32 rc;
+    u32 timed_flag = 0;
+    struct native_object *o;
+    if (req == 0 || req->byte_len > NC_MSG_MAX_BYTES
+        || req->ncaps > NC_MSG_MAX_CAPS || !nc_deadline_valid(abs_deadline_ns)) {
+        return NC_INVAL;
+    }
+    pinned = nc_pin_handle(handle, NC_SEND, NC_CHANNEL);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
+    o = &nc_objects[oi];
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    for (;;) {
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
+        if (!o->readers) { rc = NC_CLOSED; break; }
+        if (o->count < NC_CAPACITY) {
+            u32 mslot;
+            u32 k;
+            if (req->ncaps > 0 && req->caller_pid != 0) {
+                /* Two-phase commit: verify source slots are still live at
+                 * their expected generations and atomically retire MOVE slots
+                 * under o->obj_lock -> sched_run_lock. */
+                s32 crc = nat_commit_send_caps(req);
+                if (crc != 0) {
+                    rc = crc;
+                    break;
+                }
+            }
+            mslot = oi * NC_CAPACITY + ((o->head + o->count) % NC_CAPACITY);
+            for (k = 0; k < req->byte_len; k++) {
+                nc_msg_bytes[mslot * NC_MSG_MAX_BYTES + k] = req->bytes[k];
+            }
+            nc_msg_len[mslot] = req->byte_len;
+            nc_msg_ncaps[mslot] = req->ncaps;
+            for (k = 0; k < req->ncaps; k++) {
+                nc_msg_caps[mslot * NC_MSG_MAX_CAPS + k] = req->cap_handles[k];
+                nc_msg_cap_rights[mslot * NC_MSG_MAX_CAPS + k] = req->cap_rights[k];
+                req->cap_handles[k] = 0; /* ownership transferred to queue */
+            }
+            o->count = o->count + 1;
+            sched_wakeup((u64)&o->recv_wait);
+            nc_wake_wait_any_locked(o);
+            rc = 0;
+            break;
+        }
+        if (abs_deadline_ns == 0) { rc = NC_AGAIN; break; }
+        if (timed_flag) { rc = NC_TIMEDOUT; break; }
+        {
+            u64 wchan = (u64)&o->send_wait;
+            u32 pr;
+            sched_park_prepare_deadline(wchan, abs_deadline_ns);
+            pr = sched_park_commit_unlock_spin(wchan, &nc_obj_locks[oi], 0);
+            spin_lock(&nc_obj_locks[oi]);
+            if (pr == PARK_INTR_RESULT) { rc = NC_INTR; break; }
+            if (pr == PARK_TIMEOUT_RESULT) { timed_flag = 1; }
+        }
+    }
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+s32 native_chan_recv_msg(u64 handle, struct nc_msg_req *req, u64 abs_deadline_ns) {
+    u64 flags;
+    s32 pinned;
+    u32 oi;
+    s32 rc;
+    u32 timed_flag = 0;
+    struct native_object *o;
+    if (req == 0 || !nc_deadline_valid(abs_deadline_ns)) return NC_INVAL;
+    pinned = nc_pin_handle(handle, NC_RECV, NC_CHANNEL);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
+    o = &nc_objects[oi];
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    for (;;) {
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
+        if (o->count > 0) {
+            u32 mslot = oi * NC_CAPACITY + o->head;
+            u32 mlen = nc_msg_len[mslot];
+            u32 mcaps = nc_msg_ncaps[mslot];
+            u32 k;
+            /* Peek check: short buffers leave the message & caps intact! */
+            if (mlen > req->byte_len || mcaps > req->ncaps) {
+                rc = NC_MSGSIZE;
+                break;
+            }
+            req->ncaps = mcaps;
+            for (k = 0; k < mcaps; k++) {
+                req->cap_handles[k] = nc_msg_caps[mslot * NC_MSG_MAX_CAPS + k];
+                req->cap_rights[k] = nc_msg_cap_rights[mslot * NC_MSG_MAX_CAPS + k];
+            }
+            if (mcaps > 0 && req->caller_pid != 0) {
+                s32 irc = nat_commit_recv_caps(req);
+                if (irc != 0) {
+                    /* Receiver cap table full: leave message intact at head! */
+                    rc = irc;
+                    break;
+                }
+            }
+            req->byte_len = mlen;
+            for (k = 0; k < mlen; k++) {
+                req->bytes[k] = nc_msg_bytes[mslot * NC_MSG_MAX_BYTES + k];
+            }
+            for (k = 0; k < mcaps; k++) {
+                nc_msg_caps[mslot * NC_MSG_MAX_CAPS + k] = 0;
+                nc_msg_cap_rights[mslot * NC_MSG_MAX_CAPS + k] = 0;
+            }
+            nc_msg_len[mslot] = 0;
+            nc_msg_ncaps[mslot] = 0;
+            o->head = (o->head + 1) % NC_CAPACITY;
+            o->count = o->count - 1;
+            sched_wakeup((u64)&o->send_wait);
+            nc_wake_wait_any_locked(o);
+            rc = 0;
+            break;
+        }
+        if (!o->writers) {
+            req->byte_len = 0;
+            req->ncaps = 0;
+            rc = NC_EOF;
+            break;
+        }
+        if (abs_deadline_ns == 0) { rc = NC_AGAIN; break; }
+        if (timed_flag) { rc = NC_TIMEDOUT; break; }
+        {
+            u64 wchan = (u64)&o->recv_wait;
+            u32 pr;
+            sched_park_prepare_deadline(wchan, abs_deadline_ns);
+            pr = sched_park_commit_unlock_spin(wchan, &nc_obj_locks[oi], 0);
+            spin_lock(&nc_obj_locks[oi]);
+            if (pr == PARK_INTR_RESULT) { rc = NC_INTR; break; }
+            if (pr == PARK_TIMEOUT_RESULT) { timed_flag = 1; }
+        }
+    }
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+/* ---------------------------------------------------------------------------
+ * Native robust mutex (architecture section 6, per-object spinlock + deadline).
  * ------------------------------------------------------------------------- */
 s32 native_mutex_create(u64 *out) {
     u64 flags;
@@ -373,36 +868,25 @@ s32 native_mutex_create(u64 *out) {
     if (out == 0) return NC_INVAL;
     *out = 0;
     flags = cpu_irq_save();
-    spin_lock(&nc_lock);
+    spin_lock(&nc_reg_lock);
     for (oi = 0; oi < NC_OBJECTS; oi++) {
         struct native_object *o = &nc_objects[oi];
         if (o->kind) continue;
-        o->kind = NC_MUTEX;
-        o->readers = 0; o->writers = 0; o->pins = 0;
-        o->head = 0; o->count = 0; o->recv_wait = 0; o->send_wait = 0;
-        o->m_state = M_FREE; o->m_recover = 0; o->m_owner = 0;
-        o->m_wait = 0; o->m_waiters = 0; o->m_qhead = 0; o->m_enqueues = 0;
-        /* Each wait slot owns one channel. The address of the slot is the
-         * channel: it is unique per waiter and never moves, so a handoff
-         * wakes exactly the contender it picked. */
+        nc_zero_object_common(o, NC_MUTEX);
         for (n = 0; n < MQ_CAP; n++) {
             o->m_chan[n] = (u64)&o->m_chan[n];
             o->m_tkey[n] = 0;
         }
-        rc = nc_alloc_handle(oi, NC_MLOCK | NC_MUNLOCK | NC_MWAIT, out);
-        if (rc != 0) nc_reclaim(o);
+        rc = nc_alloc_handle_locked(
+            oi, NC_MLOCK | NC_MUNLOCK | NC_MWAIT | NC_TRANSFER, out);
+        if (rc != 0) o->kind = 0;
         break;
     }
-    spin_unlock(&nc_lock);
+    spin_unlock(&nc_reg_lock);
     cpu_irq_restore(flags);
     return rc;
 }
 
-/* Remove one waiter's queue entry, preserving FIFO order of the rest.
- * The queue holds SLOT INDICES; the slot owns the wait channel, so removing
- * an entry only has to release that slot. The remaining entries keep their
- * slots (and therefore their channels) untouched, which is what makes the
- * handoff wakeup exact. */
 static void nm_queue_remove(struct native_object *o, u64 key) {
     u32 i;
     u32 kept = 0;
@@ -412,7 +896,7 @@ static void nm_queue_remove(struct native_object *o, u64 key) {
         u32 slot = (u32)o->m_queue[from];
         u64 v = o->m_tkey[slot];
         if (v == key) {
-            o->m_tkey[slot] = 0;          /* release the slot */
+            o->m_tkey[slot] = 0;
             continue;
         }
         o->m_queue[(o->m_qhead + kept) % MQ_CAP] = (u64)slot;
@@ -421,9 +905,6 @@ static void nm_queue_remove(struct native_object *o, u64 key) {
     o->m_waiters = kept;
 }
 
-/* Wake every waiter of the mutex. Used where the mutex stops being held
- * without a handoff (poisoned, owner died, the holder was killed): all
- * contenders must reconsider, and each one owns its own channel. */
 static void nm_wake_all(struct native_object *o) {
     u32 i;
     u32 n = o->m_waiters;
@@ -433,7 +914,6 @@ static void nm_wake_all(struct native_object *o) {
     }
 }
 
-/* Allocate a free wait slot for `key`, or MQ_CAP when the table is full. */
 static u32 nm_slot_alloc(struct native_object *o, u64 key) {
     u32 i;
     for (i = 0; i < MQ_CAP; i++) {
@@ -445,28 +925,27 @@ static u32 nm_slot_alloc(struct native_object *o, u64 key) {
     return MQ_CAP;
 }
 
-s32 native_mutex_lock_intr(u64 handle, u32 block) {
+s32 native_mutex_lock_timed(u64 handle, u64 abs_deadline_ns) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
     struct native_object *o;
     u64 me;
     u32 first = 1;
-    if (block > 1) return NC_INVAL;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto nm_done; }
-    if (!(nc_handles[hi].rights & NC_MLOCK)) { rc = NC_RIGHTS; goto nm_done; }
-    oi = nc_handles[hi].object;
+    u32 need_rights;
+    if (!nc_deadline_valid(abs_deadline_ns)) return NC_INVAL;
+    need_rights = abs_deadline_ns != 0 ? (u32)(NC_MLOCK | NC_MWAIT) : (u32)NC_MLOCK;
+    pinned = nc_pin_handle(handle, need_rights, NC_MUTEX);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_MUTEX) { rc = NC_TYPE; goto nm_done; }
     me = sched_current_owner_key();
-    o->pins++;
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
     for (;;) {
-        hi = nc_lookup(handle);
-        if (hi < 0) { rc = NC_BAD_HANDLE; break; }
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
         if (o->m_state == M_NOTREC) { rc = NC_NOT_RECOVERABLE; break; }
         if (o->m_state == M_FREE) {
             o->m_owner = me;
@@ -476,7 +955,6 @@ s32 native_mutex_lock_intr(u64 handle, u32 block) {
             break;
         }
         if (o->m_state == M_DIED) {
-            /* Recovery acquisition: caller MUST consistent() or poison. */
             o->m_owner = me;
             o->m_state = M_LOCKED;
             o->m_recover = 1;
@@ -485,34 +963,34 @@ s32 native_mutex_lock_intr(u64 handle, u32 block) {
         }
         if (o->m_owner == me) {
             if (first) { rc = NC_DEADLK; break; }
-            rc = 0;                        /* woken by a handoff to us */
+            rc = 0;
             break;
         }
-        if (!block) { rc = NC_AGAIN; break; }
+        if (abs_deadline_ns == 0) { rc = NC_AGAIN; break; }
+        if (abs_deadline_ns != ~0ULL && sched_monotonic_ns() >= abs_deadline_ns) {
+            rc = NC_TIMEDOUT;
+            break;
+        }
         if (o->m_waiters >= MQ_CAP) { rc = NC_AGAIN; break; }
         {
-            /* Take a wait slot: it owns the channel this waiter parks on,
-             * and it is released when the waiter leaves the queue. The slot
-             * is what the handoff later wakes, so the wakeup targets exactly
-             * the contender that was handed the mutex. */
             u32 slot = nm_slot_alloc(o, me);
             u64 wchan;
+            u32 pr;
             if (slot >= MQ_CAP) { rc = NC_AGAIN; break; }
             wchan = o->m_chan[slot];
-            sched_park_prepare(wchan);
+            sched_park_prepare_deadline(wchan, abs_deadline_ns);
             o->m_queue[(o->m_qhead + o->m_waiters) % MQ_CAP] = (u64)slot;
             o->m_waiters = o->m_waiters + 1;
             o->m_enqueues = o->m_enqueues + 1;
-            if (sched_park_commit_unlock_spin(wchan, &nc_lock, 0)
-                == PARK_INTR_RESULT) {
-                spin_lock(&nc_lock);
+            pr = sched_park_commit_unlock_spin(wchan, &nc_obj_locks[oi], 0);
+            spin_lock(&nc_obj_locks[oi]);
+            if (pr == PARK_INTR_RESULT) {
                 if (o->m_owner == me && o->m_state == M_LOCKED) {
-                    /* Killed while a handoff landed on us: we never ran user
-                     * code owning it, so release cleanly (no recovery). */
                     o->m_owner = 0;
                     o->m_state = M_FREE;
                     o->m_recover = 0;
                     nm_wake_all(o);
+                    nc_wake_wait_any_locked(o);
                     rc = NC_INTR;
                     break;
                 }
@@ -520,60 +998,67 @@ s32 native_mutex_lock_intr(u64 handle, u32 block) {
                 rc = NC_INTR;
                 break;
             }
-            spin_lock(&nc_lock);
             first = 0;
+            /* Direct handoff wins over timeout if unlock already transferred! */
             if (o->m_owner == me && o->m_state == M_LOCKED) {
-                rc = 0;                    /* handed while we slept */
+                rc = 0;
                 break;
             }
-            nm_queue_remove(o, me);        /* spurious/signal wake: requeue */
-            continue;
+            nm_queue_remove(o, me);
+            if (pr == PARK_TIMEOUT_RESULT) {
+                rc = NC_TIMEDOUT;
+                break;
+            }
         }
     }
-    o->pins--;
-    nc_reclaim(o);
- nm_done:
-    spin_unlock(&nc_lock);
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
 
+s32 native_mutex_lock_intr(u64 handle, u32 block) {
+    if (block > 1) return NC_INVAL;
+    /* Note: kernel-side callers pass handles carrying MLOCK|MWAIT; user
+     * trylock (block==0) via natcap checks MLOCK before calling here. */
+    return native_mutex_lock_timed(handle, block ? ~0ULL : 0ULL);
+}
+
 s32 native_mutex_unlock(u64 handle) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
     struct native_object *o;
     u64 me;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto nm_done; }
-    if (!(nc_handles[hi].rights & NC_MUNLOCK)) { rc = NC_RIGHTS; goto nm_done; }
-    oi = nc_handles[hi].object;
+    pinned = nc_pin_handle(handle, NC_MUNLOCK, NC_MUTEX);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_MUTEX) { rc = NC_TYPE; goto nm_done; }
     me = sched_current_owner_key();
-    if (o->m_state != M_LOCKED || o->m_owner != me) { rc = NC_RIGHTS; goto nm_done; }
-    if (o->m_recover) {
-        /* Abandoned recovery poisons the mutex (terminal, wakes waiters). */
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    if (!nc_handle_still_live(handle)) {
+        rc = NC_BAD_HANDLE;
+    } else if (o->m_state != M_LOCKED || o->m_owner != me) {
+        rc = NC_RIGHTS;
+    } else if (o->m_recover) {
         o->m_state = M_NOTREC;
         o->m_owner = 0;
         o->m_recover = 0;
         nm_wake_all(o);
+        nc_wake_wait_any_locked(o);
         rc = 0;
     } else if (o->m_waiters) {
-        /* Direct FIFO handoff at unlock time: no newcomer barging. */
         u32 slot = (u32)o->m_queue[o->m_qhead];
         u64 next = o->m_tkey[slot];
         o->m_qhead = (o->m_qhead + 1) % MQ_CAP;
         o->m_waiters = o->m_waiters - 1;
-        o->m_owner = next;                 /* state stays M_LOCKED */
-        /* The handed-to contender does not need its slot any more: it owns
-         * the mutex and will not park again until it unlocks. Release the
-         * slot so it can be handed to the next waiter later, and wake it on
-         * the channel it parked on. The losers of the handoff stay parked on
-         * their own channels and keep their FIFO order. */
+        o->m_owner = next;
         o->m_tkey[slot] = 0;
         sched_wakeup(o->m_chan[slot]);
         rc = 0;
@@ -581,106 +1066,496 @@ s32 native_mutex_unlock(u64 handle) {
         o->m_owner = 0;
         o->m_state = M_FREE;
         o->m_recover = 0;
+        nc_wake_wait_any_locked(o);
         rc = 0;
     }
-    nc_reclaim(o);
- nm_done:
-    spin_unlock(&nc_lock);
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
 
 s32 native_mutex_consistent(u64 handle) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
     struct native_object *o;
     u64 me;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto nm_done; }
-    if (!(nc_handles[hi].rights & NC_MUNLOCK)) { rc = NC_RIGHTS; goto nm_done; }
-    oi = nc_handles[hi].object;
+    pinned = nc_pin_handle(handle, NC_MUNLOCK, NC_MUTEX);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_MUTEX) { rc = NC_TYPE; goto nm_done; }
     me = sched_current_owner_key();
-    if (o->m_state == M_NOTREC) { rc = NC_NOT_RECOVERABLE; goto nm_done; }
-    if (o->m_state == M_LOCKED && o->m_owner == me && o->m_recover) {
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    if (!nc_handle_still_live(handle)) {
+        rc = NC_BAD_HANDLE;
+    } else if (o->m_state == M_NOTREC) {
+        rc = NC_NOT_RECOVERABLE;
+    } else if (o->m_state == M_LOCKED && o->m_owner == me && o->m_recover) {
         o->m_recover = 0;
         rc = 0;
     } else {
-        rc = NC_INVAL;                     /* not the recovering owner */
+        rc = NC_INVAL;
     }
- nm_done:
-    spin_unlock(&nc_lock);
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
 
-/* Observability for deterministic tests: out[0]=state out[1]=waiters
- * out[2]=owner pid part. Requires the WAIT right. */
 s32 native_mutex_stat(u64 handle, u32 *out) {
     u64 flags;
-    s32 hi;
-    s32 rc;
+    s32 pinned;
     u32 oi;
+    s32 rc;
     struct native_object *o;
     if (out == 0) return NC_INVAL;
-    flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    hi = nc_lookup(handle);
-    if (hi < 0) { rc = hi; goto nm_done; }
-    if (!(nc_handles[hi].rights & NC_MWAIT)) { rc = NC_RIGHTS; goto nm_done; }
-    oi = nc_handles[hi].object;
+    pinned = nc_pin_handle(handle, NC_MWAIT, NC_MUTEX);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
     o = &nc_objects[oi];
-    if (o->kind != NC_MUTEX) { rc = NC_TYPE; goto nm_done; }
-    out[0] = o->m_state;
-    out[1] = o->m_waiters;
-    out[2] = (u32)(o->m_owner >> 32);
-    out[3] = o->m_enqueues;     /* total enqueue events; monotonic */
-    rc = 0;
- nm_done:
-    spin_unlock(&nc_lock);
+
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    if (!nc_handle_still_live(handle)) {
+        rc = NC_BAD_HANDLE;
+    } else {
+        out[0] = o->m_state;
+        out[1] = o->m_waiters;
+        out[2] = (u32)(o->m_owner >> 32);
+        out[3] = o->m_enqueues;
+        rc = 0;
+    }
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
     cpu_irq_restore(flags);
     return rc;
 }
 
-/* Robustness walk: the task identified by key died owning mutexes. Called
- * from task-exit paths OUTSIDE scheduler spinlocks (kthread_exit,
- * proc_exit_task). Marks each owned mutex M_DIED and wakes its waiters; the
- * next acquisition recovers with NC_OWNER_DIED. */
 void native_mutex_owner_died_key(u64 key) {
     u64 flags;
-    u32 i;
+    u32 oi;
     flags = cpu_irq_save();
-    spin_lock(&nc_lock);
-    for (i = 0; i < NC_OBJECTS; i++) {
-        struct native_object *o = &nc_objects[i];
+    for (oi = 0; oi < NC_OBJECTS; oi++) {
+        struct native_object *o = &nc_objects[oi];
+        if (o->kind != NC_MUTEX) continue;
+        spin_lock(&nc_obj_locks[oi]);
         if (o->kind == NC_MUTEX && o->m_state == M_LOCKED && o->m_owner == key) {
             o->m_state = M_DIED;
             o->m_owner = 0;
             nm_wake_all(o);
-            nc_reclaim(o);
+            nc_wake_wait_any_locked(o);
+            spin_lock(&nc_reg_lock);
+            nc_reclaim_reg_locked(oi);
+            spin_unlock(&nc_reg_lock);
         }
+        spin_unlock(&nc_obj_locks[oi]);
     }
-    spin_unlock(&nc_lock);
     cpu_irq_restore(flags);
 }
 
-/* Boot regression: private objects, no sockets, pipes, VFS or NIC required. */
+/* ---------------------------------------------------------------------------
+ * Typed Task / Process completion objects (NC_TASK / NC_PROC, arch section 3).
+ * Completion metadata lives here independently of TCB / kernel-stack reclaim.
+ * ------------------------------------------------------------------------- */
+s32 native_exec_obj_create(u32 kind, u64 target_id, u64 *out_nh) {
+    u64 flags;
+    u32 oi;
+    s32 rc = NC_FULL;
+    if (out_nh == 0 || (kind != NC_TASK && kind != NC_PROC)) return NC_INVAL;
+    *out_nh = 0;
+    flags = cpu_irq_save();
+    spin_lock(&nc_reg_lock);
+    for (oi = 0; oi < NC_OBJECTS; oi++) {
+        struct native_object *o = &nc_objects[oi];
+        if (o->kind) continue;
+        nc_zero_object_common(o, kind);
+        o->exec_active = 1;
+        o->exec_done = 0;
+        o->exec_target = target_id;
+        o->exec_result = 0;
+        rc = nc_alloc_handle_locked(
+            oi, NC_JOIN | NC_CANCEL | NC_INSPECT | NC_TRANSFER, out_nh);
+        if (rc != 0) {
+            o->exec_active = 0;
+            o->kind = 0;
+        }
+        break;
+    }
+    spin_unlock(&nc_reg_lock);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+void native_exec_obj_complete(u32 kind, u64 target_id, u64 exit_val) {
+    u64 flags;
+    u32 oi;
+    if (target_id == 0) return;
+    flags = cpu_irq_save();
+    for (oi = 0; oi < NC_OBJECTS; oi++) {
+        struct native_object *o = &nc_objects[oi];
+        if (o->kind != kind) continue;
+        spin_lock(&nc_obj_locks[oi]);
+        if (o->kind == kind && o->exec_active && o->exec_target == target_id) {
+            o->exec_result = exit_val;
+            o->exec_done = 1;
+            o->exec_active = 0;
+            sched_wakeup((u64)&o->recv_wait);
+            nc_wake_wait_any_locked(o);
+            spin_lock(&nc_reg_lock);
+            nc_reclaim_reg_locked(oi);
+            spin_unlock(&nc_reg_lock);
+        }
+        spin_unlock(&nc_obj_locks[oi]);
+    }
+    cpu_irq_restore(flags);
+}
+
+s32 native_exec_obj_wait(u64 handle, u64 *result_out, u64 abs_deadline_ns) {
+    u64 flags;
+    s32 pinned;
+    u32 oi;
+    s32 rc;
+    u32 timed_flag = 0;
+    struct native_object *o;
+    if (result_out == 0 || !nc_deadline_valid(abs_deadline_ns)) return NC_INVAL;
+    pinned = nc_pin_handle(handle, NC_JOIN, 0);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
+    o = &nc_objects[oi];
+    if (o->kind != NC_TASK && o->kind != NC_PROC) {
+        nc_unpin_object(oi);
+        return NC_TYPE;
+    }
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    for (;;) {
+        if (!nc_handle_still_live(handle)) { rc = NC_BAD_HANDLE; break; }
+        if (o->exec_done) {
+            *result_out = o->exec_result;
+            rc = 0;
+            break;
+        }
+        if (abs_deadline_ns == 0) { rc = NC_AGAIN; break; }
+        if (timed_flag) { rc = NC_TIMEDOUT; break; }
+        {
+            u64 wchan = (u64)&o->recv_wait;
+            u32 pr;
+            sched_park_prepare_deadline(wchan, abs_deadline_ns);
+            pr = sched_park_commit_unlock_spin(wchan, &nc_obj_locks[oi], 0);
+            spin_lock(&nc_obj_locks[oi]);
+            if (pr == PARK_INTR_RESULT) { rc = NC_INTR; break; }
+            if (pr == PARK_TIMEOUT_RESULT) { timed_flag = 1; }
+        }
+    }
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+/* Returns 0 when still active (*target_out filled), NC_EOF (1) when already
+ * completed, or negative NC_* error. */
+s32 native_exec_obj_target(u64 handle, u32 want_kind, u32 want_rights, u64 *target_out) {
+    u64 flags;
+    s32 pinned;
+    u32 oi;
+    s32 rc;
+    struct native_object *o;
+    if (target_out == 0) return NC_INVAL;
+    pinned = nc_pin_handle(handle, want_rights, want_kind);
+    if (pinned < 0) return pinned;
+    oi = (u32)pinned;
+    o = &nc_objects[oi];
+    flags = cpu_irq_save();
+    spin_lock(&nc_obj_locks[oi]);
+    if (!nc_handle_still_live(handle)) {
+        rc = NC_BAD_HANDLE;
+    } else if (o->exec_done) {
+        *target_out = o->exec_target;
+        rc = NC_EOF;
+    } else {
+        *target_out = o->exec_target;
+        rc = 0;
+    }
+    spin_lock(&nc_reg_lock);
+    o->pins = o->pins - 1;
+    nc_reclaim_reg_locked(oi);
+    spin_unlock(&nc_reg_lock);
+    spin_unlock(&nc_obj_locks[oi]);
+    cpu_irq_restore(flags);
+    return rc;
+}
+
+/* ---------------------------------------------------------------------------
+ * Native multi-object wait_any (architecture section 5, gate 3):
+ *   - Locks unique objects in strictly ascending oi order (deadlock-free)
+ *   - Rotating scan cursor prevents low-index starvation
+ *   - One shared wait token registered across all watched objects
+ *   - Monotonic absolute deadline + interruptible park-admission
+ *   - Removes all registrations before returning
+ * ------------------------------------------------------------------------- */
+static u32 nc_eval_wait_item(struct native_object *o, u32 events) {
+    u32 rev = 0;
+    if (o->kind == NC_CHANNEL) {
+        if (events & NATW_RECV) {
+            if (o->count > 0) rev = rev | NATW_RECV;
+            else if (o->writers == 0) rev = rev | NATW_RECV | NATW_EOF;
+        }
+        if (events & NATW_SEND) {
+            if (o->readers == 0) rev = rev | NATW_SEND | NATW_CLOSED;
+            else if (o->count < NC_CAPACITY) rev = rev | NATW_SEND;
+        }
+    } else if (o->kind == NC_MUTEX) {
+        if (events & NATW_MUTEX) {
+            if (o->m_state == M_FREE || o->m_state == M_DIED
+                || o->m_state == M_NOTREC) {
+                rev = rev | NATW_MUTEX;
+            }
+        }
+    } else if (o->kind == NC_TASK || o->kind == NC_PROC) {
+        if ((events & NATW_DONE) != 0 && o->exec_done) {
+            rev = rev | NATW_DONE;
+        }
+    }
+    return rev;
+}
+
+static u32 nc_wait_reg_add(struct native_object *o, u64 wchan) {
+    u32 s;
+    for (s = 0; s < NW_SLOTS; s++) {
+        if (o->wait_any_chans[s] == wchan) return 1;
+    }
+    for (s = 0; s < NW_SLOTS; s++) {
+        if (o->wait_any_chans[s] == 0) {
+            o->wait_any_chans[s] = wchan;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void nc_wait_reg_del(struct native_object *o, u64 wchan) {
+    u32 s;
+    for (s = 0; s < NW_SLOTS; s++) {
+        if (o->wait_any_chans[s] == wchan) {
+            o->wait_any_chans[s] = 0;
+        }
+    }
+}
+
+s32 native_wait_any(struct nc_wait_entry *entries, u32 count,
+                    u64 abs_deadline_ns, u32 *win_out) {
+    u32 item_oi[16];
+    u32 sorted_oi[16];
+    u32 n_unique = 0;
+    u64 local_token = 0;
+    u64 wchan = (u64)&local_token;
+    u32 i;
+    u32 u;
+    u32 cpu;
+    u32 start;
+    u32 timed_flag = 0;
+    s32 rc = 0;
+
+    if (entries == 0 || win_out == 0 || count == 0 || count > 16
+        || !nc_deadline_valid(abs_deadline_ns)) {
+        return NC_INVAL;
+    }
+
+    /* Pin all referenced objects and validate event/right combinations. */
+    for (i = 0; i < count; i++) {
+        u32 ev = entries[i].events;
+        u32 want_r = 0;
+        s32 pinned;
+        entries[i].revents = 0;
+        if (ev == 0 || (ev & ~(u32)(NATW_RECV | NATW_SEND | NATW_MUTEX | NATW_DONE)) != 0) {
+            while (i > 0) { i = i - 1; nc_unpin_object(item_oi[i]); }
+            return NC_INVAL;
+        }
+        if (ev & NATW_RECV) want_r = want_r | NC_RECV;
+        if (ev & NATW_SEND) want_r = want_r | NC_SEND;
+        if (ev & NATW_MUTEX) want_r = want_r | NC_MWAIT;
+        if (ev & NATW_DONE) want_r = want_r | NC_JOIN;
+        pinned = nc_pin_handle(entries[i].nh, want_r, 0);
+        if (pinned < 0) {
+            while (i > 0) { i = i - 1; nc_unpin_object(item_oi[i]); }
+            return pinned;
+        }
+        item_oi[i] = (u32)pinned;
+        {
+            u32 knd = nc_objects[item_oi[i]].kind;
+            u32 bad_kind = 0;
+            if ((ev & (NATW_RECV | NATW_SEND)) != 0 && knd != NC_CHANNEL) bad_kind = 1;
+            if ((ev & NATW_MUTEX) != 0 && knd != NC_MUTEX) bad_kind = 1;
+            if ((ev & NATW_DONE) != 0 && knd != NC_TASK && knd != NC_PROC) bad_kind = 1;
+            if (bad_kind) {
+                nc_unpin_object(item_oi[i]);
+                while (i > 0) { i = i - 1; nc_unpin_object(item_oi[i]); }
+                return NC_TYPE;
+            }
+        }
+        /* Insert into sorted unique object list. */
+        {
+            u32 dup = 0;
+            u32 pos = 0;
+            for (u = 0; u < n_unique; u++) {
+                if (sorted_oi[u] == item_oi[i]) { dup = 1; break; }
+                if (sorted_oi[u] < item_oi[i]) pos = u + 1;
+            }
+            if (!dup) {
+                u32 m = n_unique;
+                while (m > pos) {
+                    sorted_oi[m] = sorted_oi[m - 1];
+                    m = m - 1;
+                }
+                sorted_oi[pos] = item_oi[i];
+                n_unique = n_unique + 1;
+            }
+        }
+    }
+
+    cpu = smp_cpuid();
+    if (cpu >= 8) cpu = 0;
+    start = nc_wait_rotor[cpu] % count;
+    nc_wait_rotor[cpu] = nc_wait_rotor[cpu] + 1;
+
+    for (;;) {
+        u64 flags = cpu_irq_save();
+        u32 found = 0;
+        u32 reg_ok = 1;
+        u32 pr;
+
+        /* Lock all distinct objects in ascending index order. */
+        for (u = 0; u < n_unique; u++) {
+            spin_lock(&nc_obj_locks[sorted_oi[u]]);
+        }
+        for (i = 0; i < count; i++) {
+            u32 idx = (start + i) % count;
+            u32 rev;
+            if (!nc_handle_still_live(entries[idx].nh)) {
+                rc = NC_BAD_HANDLE;
+                found = 1;
+                break;
+            }
+            rev = nc_eval_wait_item(&nc_objects[item_oi[idx]], entries[idx].events);
+            if (rev != 0) {
+                entries[idx].revents = rev;
+                *win_out = idx;
+                rc = 0;
+                found = 1;
+                break;
+            }
+        }
+        if (found) {
+            for (u = n_unique; u > 0; u--) {
+                spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+            }
+            cpu_irq_restore(flags);
+            break;
+        }
+        if (abs_deadline_ns == 0) {
+            for (u = n_unique; u > 0; u--) {
+                spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+            }
+            cpu_irq_restore(flags);
+            rc = NC_AGAIN;
+            break;
+        }
+        if (timed_flag) {
+            for (u = n_unique; u > 0; u--) {
+                spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+            }
+            cpu_irq_restore(flags);
+            rc = NC_TIMEDOUT;
+            break;
+        }
+
+        /* Arm shared wait token across all objects while all obj_locks are held. */
+        for (u = 0; u < n_unique; u++) {
+            if (!nc_wait_reg_add(&nc_objects[sorted_oi[u]], wchan)) {
+                reg_ok = 0;
+                break;
+            }
+        }
+        if (!reg_ok) {
+            for (u = 0; u < n_unique; u++) {
+                nc_wait_reg_del(&nc_objects[sorted_oi[u]], wchan);
+            }
+            for (u = n_unique; u > 0; u--) {
+                spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+            }
+            cpu_irq_restore(flags);
+            rc = NC_FULL;
+            break;
+        }
+        sched_park_prepare_deadline(wchan, abs_deadline_ns);
+        for (u = n_unique; u > 0; u--) {
+            spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+        }
+        cpu_irq_restore(flags);
+
+        pr = sched_park_commit(wchan, 0);
+
+        /* Deregister from all objects before inspecting results or returning. */
+        flags = cpu_irq_save();
+        for (u = 0; u < n_unique; u++) {
+            spin_lock(&nc_obj_locks[sorted_oi[u]]);
+        }
+        for (u = 0; u < n_unique; u++) {
+            nc_wait_reg_del(&nc_objects[sorted_oi[u]], wchan);
+        }
+        for (u = n_unique; u > 0; u--) {
+            spin_unlock(&nc_obj_locks[sorted_oi[u - 1]]);
+        }
+        cpu_irq_restore(flags);
+
+        if (pr == PARK_INTR_RESULT) {
+            rc = NC_INTR;
+            break;
+        }
+        if (pr == PARK_TIMEOUT_RESULT) {
+            timed_flag = 1;
+        }
+    }
+
+    for (i = 0; i < count; i++) {
+        nc_unpin_object(item_oi[i]);
+    }
+    return rc;
+}
+
+/* ---------------------------------------------------------------------------
+ * Boot regression suite: kernel-only objects, sharded locks, deadlines,
+ * rich byte+cap messages, and multi-object wait_any.
+ * ------------------------------------------------------------------------- */
 extern void kprintf(const char *fmt, ...);
 extern u32 kthread_create(u64 entry, u64 arg);
 extern void kthread_exit(void);
 extern void sched_yield(void);
 extern u64 sched_clock_ticks(void);
 extern u32 sched_thread_state(u32 id);
-extern u32 smp_cpuid(void);
 extern u32 smp_cpu_count(void);
 extern u32 sched_cfs_rb_check(void);
+
 static volatile u32 nc_test_lock;
 static u64 nc_test_handles[4];
+static u64 nc_selftest_handles[NC_HANDLES];
 static u32 nc_test_seen[512];
 static u32 nc_test_done;
 static u32 nc_test_errors;
@@ -691,14 +1566,12 @@ static u32 nc_test_ready;
 static u32 nc_test_go;
 static u32 nc_test_send_hits[8];
 static u32 nc_test_recv_hits[8];
-/* All four workers must exist and remain runnable before payload release.
- * This is a scheduling barrier, not a timing delay or CPU-affinity override.
- * The same bounded yielding protocol works on one CPU. */
+
 static u32 nc_start_barrier(void) {
     u64 until = sched_clock_ticks() + 800;
     u64 flags = cpu_irq_save();
     spin_lock(&nc_test_lock);
-    nc_test_ready++;
+    nc_test_ready = nc_test_ready + 1;
     if (nc_test_ready == 4) nc_test_go = 1;
     spin_unlock(&nc_test_lock);
     cpu_irq_restore(flags);
@@ -719,7 +1592,7 @@ static void nc_sent(void) {
     u32 cpu = smp_cpuid();
     spin_lock(&nc_test_lock);
     nc_test_mask |= 1u << cpu;
-    if (cpu < 8) nc_test_send_hits[cpu]++;
+    if (cpu < 8) nc_test_send_hits[cpu] = nc_test_send_hits[cpu] + 1;
     spin_unlock(&nc_test_lock);
     cpu_irq_restore(flags);
 }
@@ -729,12 +1602,12 @@ static void nc_record(u64 value, u32 done, u32 error) {
     spin_lock(&nc_test_lock);
     if (value) {
         nc_test_mask |= 1u << cpu;
-        if (cpu < 8) nc_test_recv_hits[cpu]++;
-        if (value > 512 || nc_test_seen[value - 1]) nc_test_errors++;
-        else { nc_test_seen[value - 1] = 1; nc_test_count++; }
+        if (cpu < 8) nc_test_recv_hits[cpu] = nc_test_recv_hits[cpu] + 1;
+        if (value > 512 || nc_test_seen[value - 1]) nc_test_errors = nc_test_errors + 1;
+        else { nc_test_seen[value - 1] = 1; nc_test_count = nc_test_count + 1; }
     }
-    nc_test_done += done;
-    nc_test_errors += error;
+    nc_test_done = nc_test_done + done;
+    nc_test_errors = nc_test_errors + error;
     spin_unlock(&nc_test_lock);
     cpu_irq_restore(flags);
 }
@@ -790,10 +1663,10 @@ static u32 nc_empty(void) {
     u64 flags = cpu_irq_save();
     u32 i;
     u32 empty = 1;
-    spin_lock(&nc_lock);
+    spin_lock(&nc_reg_lock);
     for (i = 0; i < NC_OBJECTS; i++) if (nc_objects[i].kind) empty = 0;
     for (i = 0; i < NC_HANDLES; i++) if (nc_handles[i].live) empty = 0;
-    spin_unlock(&nc_lock);
+    spin_unlock(&nc_reg_lock);
     cpu_irq_restore(flags);
     return empty;
 }
@@ -801,30 +1674,15 @@ static u32 nc_expect(u32 condition, u32 tag) {
     if (!condition) kprintf("[NATIVE] expectation %u failed\n", (u64)tag);
     return condition;
 }
-/* --- Native mutex selftest workers (gate 3, deterministic stage machine) ---
- * Stage waits use sched_sleep on per-worker channels, NEVER spin-yield:
- * kmain runs as the BSP idle TCB and pick_next prefers real work over idle,
- * so a spin-yield waiter would starve the controller (the MPMC barrier hit
- * the same constraint). Sleepers empty the runqueue, letting kmain advance
- * the stages. */
+
 static u64 nm_handle;
 static volatile u32 nm_stage;
 static volatile u32 nm_rc[3];
 static volatile u32 nm_order[3];
 static volatile u32 nm_order_n;
-static u32 nm_stat[3];
+static u32 nm_stat[4];
 static u64 nm_wchan[3];
 
-/* Total enqueue events observed on the mutex under test. Read through
- * native_mutex_stat() (out[3]), which returns the object's own monotonic
- * counter. The queue LENGTH cannot serve this purpose: m_waiters counts
- * queue SLOTS, and a slot stays occupied by the holder until it unlocks
- * (the direct handoff pops the head at unlock time), so m_waiters is not
- * "number of blocked contenders" — after W0 wins, the queue still holds
- * its slot, and using m_waiters as the "contender N is queued" signal
- * fires one step early and lets a later contender enqueue first. */
-
-/* Read the mutex's monotonic enqueue counter. */
 static u32 nm_enqueue_count(void) {
     u32 st[4];
     if (native_mutex_stat(nm_handle, st) != 0) {
@@ -833,25 +1691,13 @@ static u32 nm_enqueue_count(void) {
     return st[3];
 }
 
-/* Wait until the mutex has seen `n` enqueue events in total. This is the
- * exact "n contenders are actually blocked on the mutex" fact: the counter
- * moves only inside the enqueue path, so it cannot fire early the way a
- * pre-block announcement can (an announced contender may still be between
- * the announcement and the enqueue, letting a later contender overtake
- * it). */
 static void nm_wait_enqueues(u32 n, u32 timeout_ticks) {
     u64 until = sched_clock_ticks() + timeout_ticks;
     while (nm_enqueue_count() < n && sched_clock_ticks() < until) {
         sched_yield();
     }
 }
-/* Sleep until nm_stage == want under the park-admission contract: the stage
- * read and the park registration are ONE nc_test_lock transaction, and the
- * controller publishes the stage BEFORE waking the channel, so every
- * interleaving resolves — the check sees the stage, the wakeup latches
- * park_notify on the registered PREPARING waiter (commit -> PARK_WOKEN), or
- * the wakeup finds the published sleeper. sched_sleep alone has no such
- * admission and loses wakeups across CPUs (observed on SMP2). */
+
 static void nm_wait_stage(u32 id, u32 want) {
     for (;;) {
         u64 f;
@@ -867,17 +1713,13 @@ static void nm_wait_stage(u32 id, u32 want) {
         cpu_irq_restore(f);
         if (!prepared) return;
         if (nm_stage == want) {
-            sched_park_abort();            /* never leave a dangling park */
+            sched_park_abort();
             return;
         }
-        sched_park_commit((u64)&nm_wchan[id], 0);
+        (void)sched_park_commit((u64)&nm_wchan[id], 0);
     }
 }
 
-/* FIFO contender. Main gates each lock with a stage so queue order is
- * deterministic: W0 (stage 1), W1 (3), W2 (4). W0 holds the handed-off lock
- * until main releases stage 6, so the handoff chain W0->W1->W2 completes
- * strictly after main's no-barge trylocks. */
 static void nm_contender(u64 arg) {
     u32 id = (u32)arg;
     u32 lock_stage = id == 0 ? 1u : (id == 1 ? 3u : 4u);
@@ -903,10 +1745,6 @@ static void nm_contender(u64 arg) {
     kthread_exit();
 }
 
-/* mode 1: lock, publish, exit WITHOUT unlocking (owner death).
- * mode 2: block-lock, expect OWNER_DIED, consistent, unlock (recovery).
- * mode 3: block-lock, expect OWNER_DIED, unlock WITHOUT consistent
- *         (abandoned recovery -> poison), then relock to confirm NOTREC. */
 static void nm_lifecycle(u64 arg) {
     u32 mode = (u32)arg;
     s32 rc;
@@ -929,8 +1767,6 @@ static void nm_lifecycle(u64 arg) {
     kthread_exit();
 }
 
-/* Locks, publishes, closes the ONLY capability while LOCKED, then dies: the
- * owner reference must survive the close and drain at the death walk. */
 static void nm_close_owner(u64 arg) {
     (void)arg;
     nm_rc[0] = (u32)native_mutex_lock_intr(nm_handle, 1);
@@ -941,7 +1777,6 @@ static void nm_close_owner(u64 arg) {
 
 void native_object_selftest(void) {
     u64 tx, rx, dup, value, old;
-    u64 handles[NC_HANDLES];
     u32 n, i, wid, created;
     u32 ready;
     u64 flags;
@@ -971,9 +1806,11 @@ void native_object_selftest(void) {
     ok &= nc_expect((native_handle_close(tx) == 0), 16);
     /* Exhaust objects independently of handles, then reuse every slot. */
     for (i = 0; i < NC_OBJECTS; i++)
-        ok &= nc_expect((native_channel_create(&handles[2 * i], &handles[2 * i + 1]) == 0), 17);
+        ok &= nc_expect((native_channel_create(&nc_selftest_handles[2 * i],
+                                               &nc_selftest_handles[2 * i + 1]) == 0), 17);
     ok &= nc_expect((native_channel_create(&dup, &value) == NC_FULL), 18);
-    for (i = 0; i < 2 * NC_OBJECTS; i++) ok &= nc_expect((native_handle_close(handles[i]) == 0), 19);
+    for (i = 0; i < 2 * NC_OBJECTS; i++)
+        ok &= nc_expect((native_handle_close(nc_selftest_handles[i]) == 0), 19);
     ok &= nc_expect((native_handle_close(0) == NC_BAD_HANDLE), 20);
     ok &= nc_expect((native_channel_create(&tx, &tx) == NC_INVAL), 21);
     ok &= nc_expect((native_channel_recv(old, 0, 0) == NC_INVAL), 22);
@@ -981,25 +1818,23 @@ void native_object_selftest(void) {
      * its first handle, and the object must not leak. Leave exactly one free. */
     if (native_channel_create(&tx, &rx) != 0) goto fail;
     n = 0;
-    while (n < NC_HANDLES - 3 && native_handle_dup(tx, NC_SEND, &handles[n]) == 0) n++;
+    while (n < NC_HANDLES - 3 && native_handle_dup(tx, NC_SEND, &nc_selftest_handles[n]) == 0) n++;
     ok &= nc_expect((n == NC_HANDLES - 3), 23);
     ok &= nc_expect((native_channel_create(&dup, &value) == NC_FULL), 24);
-    for (i = 0; i < n; i++) ok &= nc_expect((native_handle_close(handles[i]) == 0), 25);
+    for (i = 0; i < n; i++) ok &= nc_expect((native_handle_close(nc_selftest_handles[i]) == 0), 25);
     ok &= nc_expect((native_handle_close(tx) == 0), 26);
     ok &= nc_expect((native_handle_close(rx) == 0), 27);
     ok &= nc_expect((nc_empty()), 28);
     if (!ok) goto fail;
     kprintf("      [PASS] native handles: rights/stale/FIFO/full/EOF/peer-close/rollback/no-leak\n");
 
-    /* Deterministically revoke an already sleeping receive; the last-close
-     * path must wake it and keep the object pinned until it has returned. */
     if (native_channel_create(&tx, &rx) != 0) goto fail;
     nc_test_done = 0; nc_test_revoked = 0;
     wid = kthread_create((u64)&nc_revoked_worker, rx);
     if (wid == 0xFFFFFFFFu) goto fail;
     until = sched_clock_ticks() + 800;
     while (sched_thread_state(wid) != 3 && sched_clock_ticks() < until) sched_yield();
-    ok &= nc_expect((sched_thread_state(wid) == 3), 29); /* TCB_SLEEPING */
+    ok &= nc_expect((sched_thread_state(wid) == 3), 29);
     ok &= nc_expect((native_handle_close(rx) == 0), 30);
     ok &= nc_expect((native_handle_close(tx) == 0), 31);
     ok &= nc_expect((nc_wait_done(1)), 32);
@@ -1018,10 +1853,6 @@ void native_object_selftest(void) {
     for (i = 0; i < 512; i++) nc_test_seen[i] = 0;
     nc_test_ready = 0; nc_test_go = 0;
     for (i = 0; i < 8; i++) { nc_test_send_hits[i] = 0; nc_test_recv_hits[i] = 0; }
-    /* kmain currently runs as the BSP idle TCB. It cannot act as a barrier
-     * controller while runnable workers exist: pick_next correctly prefers
-     * real work over idle. Publish the complete batch before local preemption;
-     * the LAST WORKER (not idle kmain) releases the barrier. */
     flags = cpu_irq_save();
     created = 0;
     for (i = 0; i < 4; i++) {
@@ -1098,9 +1929,6 @@ void native_object_selftest(void) {
     }
     cpu_irq_restore(flags);
     ok &= nc_expect((created == 3), 83);
-    /* Stage arming ORDER: publish the stage, then wake the gated worker.
-     * Workers re-check under Mesa semantics, so a worker that has not slept
-     * yet loses nothing. */
     nm_stage = 1;
     sched_wakeup((u64)&nm_wchan[0]);
     nm_wait_enqueues(1, 800);
@@ -1113,7 +1941,7 @@ void native_object_selftest(void) {
     sched_wakeup((u64)&nm_wchan[2]);
     nm_wait_enqueues(3, 800);
     ok &= nc_expect((nm_enqueue_count() >= 3), 86);
-    ok &= nc_expect((native_mutex_unlock(tx) == 0), 87);       /* handoff -> W0 */
+    ok &= nc_expect((native_mutex_unlock(tx) == 0), 87);
     ok &= nc_expect((native_mutex_lock_intr(tx, 0) == NC_AGAIN), 88);
     ok &= nc_expect((native_mutex_lock_intr(tx, 0) == NC_AGAIN), 89);
     nm_stage = 6;
@@ -1197,6 +2025,69 @@ void native_object_selftest(void) {
     ok &= nc_expect((nc_empty()), 115);
     if (!ok) goto fail;
     kprintf("      [PASS] native mutex: close-while-locked survives, drains at death\n");
+
+    /* ---- Deadlines, rich byte/cap messages, and wait_any select ---- */
+    {
+        u64 s1, r1, s2, r2, cs, cr;
+        u8 sbuf[32];
+        u8 rbuf[32];
+        struct nc_msg_req mreq;
+        struct nc_wait_entry went[3];
+        u32 win = 99;
+        u64 now_ns;
+        ok &= nc_expect((native_channel_create(&s1, &r1) == 0), 120);
+        ok &= nc_expect((native_channel_create(&s2, &r2) == 0), 121);
+        ok &= nc_expect((native_channel_create(&cs, &cr) == 0), 122);
+        /* Overflow deadline rejected; finite deadline times out cleanly. */
+        ok &= nc_expect((native_channel_recv_timed(r1, &value, 0x8000000000000000ULL) == NC_INVAL), 123);
+        now_ns = sched_monotonic_ns();
+        ok &= nc_expect((native_channel_recv_timed(r1, &value, now_ns + 20000000ULL) == NC_TIMEDOUT), 124);
+        /* Bounded byte message + attached handle, plus discard on close. */
+        for (i = 0; i < 20; i++) sbuf[i] = (u8)(0x30 + i);
+        mreq.bytes = sbuf; mreq.byte_len = 20; mreq.ncaps = 1;
+        mreq.cap_handles[0] = cs; mreq.cap_rights[0] = NC_SEND;
+        mreq.caller_pid = 0;
+        ok &= nc_expect((native_chan_send_msg(s2, &mreq, 0) == 0), 125);
+        /* Multi-object wait_any: r1 empty, r2 ready -> index 1 wins, then fairness rotation. */
+        went[0].nh = r1; went[0].events = NATW_RECV; went[0].revents = 0;
+        went[1].nh = r2; went[1].events = NATW_RECV; went[1].revents = 0;
+        ok &= nc_expect((native_wait_any(went, 2, ~0ULL, &win) == 0 && win == 1
+                         && went[1].revents == NATW_RECV), 126);
+        /* Both ready -> rotating cursor visits both 0 and 1 across two calls. */
+        ok &= nc_expect((native_channel_send(s1, 0xCAFEULL, 0) == 0), 127);
+        {
+            u32 w_a = 99, w_b = 99;
+            went[0].nh = r1; went[0].events = NATW_RECV;
+            went[1].nh = r2; went[1].events = NATW_RECV;
+            ok &= nc_expect((native_wait_any(went, 2, 0, &w_a) == 0), 128);
+            went[0].nh = r1; went[0].events = NATW_RECV;
+            went[1].nh = r2; went[1].events = NATW_RECV;
+            ok &= nc_expect((native_wait_any(went, 2, 0, &w_b) == 0), 129);
+            ok &= nc_expect((w_a != w_b), 130);
+        }
+        ok &= nc_expect((native_channel_recv(r1, &value, 0) == 0 && value == 0xCAFEULL), 131);
+        /* Short buffer peek does NOT consume the message. */
+        mreq.bytes = rbuf; mreq.byte_len = 10; mreq.ncaps = 1; mreq.caller_pid = 0;
+        ok &= nc_expect((native_chan_recv_msg(r2, &mreq, 0) == NC_MSGSIZE), 132);
+        mreq.bytes = rbuf; mreq.byte_len = 32; mreq.ncaps = 4; mreq.caller_pid = 0;
+        ok &= nc_expect((native_chan_recv_msg(r2, &mreq, 0) == 0
+                         && mreq.byte_len == 20 && mreq.ncaps == 1), 133);
+        for (i = 0; i < 20; i++) ok &= nc_expect((rbuf[i] == (u8)(0x30 + i)), 134);
+        /* Closing r2 while a capability is queued discards that capability cleanly. */
+        mreq.bytes = sbuf; mreq.byte_len = 4; mreq.ncaps = 1;
+        mreq.cap_handles[0] = mreq.cap_handles[0]; /* re-queue received cs */
+        mreq.cap_rights[0] = NC_SEND; mreq.caller_pid = 0;
+        ok &= nc_expect((native_chan_send_msg(s2, &mreq, 0) == 0), 135);
+        ok &= nc_expect((native_handle_close(r2) == 0), 136);
+        /* With cs discarded by r2's close, cr sees EOF immediately! */
+        ok &= nc_expect((native_channel_recv(cr, &value, 0) == NC_EOF), 137);
+        ok &= nc_expect((native_handle_close(cr) == 0), 138);
+        ok &= nc_expect((native_handle_close(s2) == 0), 139);
+        ok &= nc_expect((native_handle_close(s1) == 0), 140);
+        ok &= nc_expect((native_handle_close(r1) == 0), 141);
+        if (!ok) goto fail;
+        kprintf("      [PASS] native sharded locks, deadlines, byte+cap messages, wait_any fairness\n");
+    }
 
     ok &= nc_expect((nc_empty()), 116);
     if (!ok) goto fail;

@@ -32,10 +32,13 @@ extern void memset(void *dst, int c, unsigned long n);
 extern void strcpy(char *dst, const char *src);
 extern unsigned long strlen(const char *s);
 
-enum { O_RDONLY = 0, READ_CAP = 131072,
+enum { O_RDONLY = 0, READ_CAP = 524288,
        CC_MAX_FLAGS = 2, CC_FLAG_LEN = 40 };
 
-static unsigned long read_file(const char *path, char *buf);
+static char got_buf[READ_CAP];
+static char ref_buf[READ_CAP];
+
+static unsigned long read_file(const char *path, char *buf, unsigned long cap);
 
 /* Extra flags the staged in-OS fakecc understands. The build publishes
  * /etc/fakecc.flags (one space-separated line): multi-target builds list
@@ -45,7 +48,7 @@ static unsigned long n_cc_flags;
 
 static void load_cc_flags(void) {
     char buf[128];
-    unsigned long len = read_file("/etc/fakecc.flags", buf);
+    unsigned long len = read_file("/etc/fakecc.flags", buf, 128);
     unsigned long i = 0;
     n_cc_flags = 0;
     while (i < len && n_cc_flags < CC_MAX_FLAGS) {
@@ -134,16 +137,15 @@ static long run_child(const char *path, char **argv) {
     return status;
 }
 
-/* Read a whole file into a static buffer. Returns the byte count; 0 means
- * missing/empty. Largest C kernel object (~66 KiB ext2.o) fits under READ_CAP. */
-static unsigned long read_file(const char *path, char *buf) {
+/* Read a whole file into `buf` (up to `cap` bytes). Returns byte count. */
+static unsigned long read_file(const char *path, char *buf, unsigned long cap) {
     long fd = u_open(path, O_RDONLY, 0);
     if (fd < 0) {
         return 0;
     }
     unsigned long len = 0;
-    for (;;) {
-        long r = u_read(fd, buf + len, READ_CAP - len);
+    while (len < cap) {
+        long r = u_read(fd, buf + len, cap - len);
         if (r <= 0) {
             break;
         }
@@ -230,8 +232,6 @@ int main(void) {
     unsigned long nmod = sizeof(modules) / sizeof(modules[0]);
     unsigned long ok = 0;
     unsigned long diff = 0;
-    char got_buf[READ_CAP];
-    char ref_buf[READ_CAP];
     for (unsigned long i = 0; i < nmod; i++) {
         const char *pkg = modules[i].pkg;
         const char *nm = modules[i].name;
@@ -291,8 +291,8 @@ int main(void) {
             return 1;
         }
 
-        unsigned long got_n = read_file(tmpo, got_buf);
-        unsigned long ref_n = read_file(refp, ref_buf);
+        unsigned long got_n = read_file(tmpo, got_buf, READ_CAP);
+        unsigned long ref_n = read_file(refp, ref_buf, READ_CAP);
         if (got_n == 0 || ref_n == 0) {
             printf("[kbuild] FAIL %s/%s missing object (got %u ref %u)\n",
                     (long)pkg, (long)nm, got_n, ref_n);

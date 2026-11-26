@@ -21,16 +21,13 @@ Baseline implementation before the slices below, and the gaps motivating them:
 
 | Current source / mechanism | Keep / change |
 | --- | --- |
-| `kernel/sched.c: struct tcb`: `pid`, `tid`, `as_h`, signals, credentials, `fd[16]`, cwd, environment all embedded | Separate process resources from the execution context; do not duplicate a new native handle table in each TCB. |
-| `sched_clone_thread`: shared `pid`/AS but copied and retained fd entries, copied cwd/credentials | Existing threads do not have genuinely process-shared descriptor namespace semantics. Do not use this as a model for native handles. |
-| `MAX_THREADS=32`, order-2 16-KiB contiguous kernel stacks | Fixed bounded prototype, not goroutine-scale; avoid claiming otherwise. TCB metadata includes two 32-element u64 signal arrays as well as saved state. |
-| `cfs_root[cpu]`, `rq_steal`, load-aware enqueue, idle-CPU IPI wakeups | Real SMP foundations exist; evolve them instead of replacing working context switch and interrupt entry. |
-| `sched_run_lock` protects all runqueues and handoff | Per-CPU queues are **not independent concurrent queue locks**. Global serialization is an explicit initial limitation. |
-| `schedule_tail` / context-switch handoff, RETIRED vs DEAD slots | Retain deferred stack reclamation: no other CPU may reap a stack still executing on its old CPU. |
-| `sched_sleep_unlock_spin` | Usable atomic condition-lock -> run-lock -> sleep handoff; preferred foundation for native wait objects. |
-| `sched_sleep`, `sys_futex` in `kernel/sysproc.c` | Current futex checks the value then separately sleeps; disabling local IRQs cannot close a cross-CPU lost wakeup. It keys by VA, ignores timeouts and cannot identify unrelated ASs or shared mappings at different VAs correctly. Leave compatibility present but do not copy its design. |
-| `kmutex_lock/unlock`, `ksem_*`, `wait_queue_sleep_unlock_spin` | Existing kernel-private blocking primitives, not capability-protected user mutexes. `kmutex_unlock` does not validate its recorded owner. |
-| `mem/as.c`: address spaces, COW, `as_retain_h` / `as_release_h` | Keep isolation and reference counting, add explicit process ownership and VM lifecycle/locking audit. Frame-refcount mutations are now serialised by `ref_lock` (fakecc drops `lock cmpxchg`, so no CAS primitive), and VM mutations shoot down remote TLBs via the vector-35 per-CPU mailbox path (see docs/evidence/vm-shootdown-20261121/). Do not use recyclable AS pointer as process capability identity. |
+| `kernel/sched.c`: `struct process_owner` vs `struct tcb` | **Implemented (2026-11-26)**: `fd[16]` (with `FD_RESERVED` slot reservation, per-task `pinned_fh`, and `deferred_close[16]` UAF protection), `cwd[512]`, `cmdline[128]`, `environ[256]`, `umask`, and `uid/euid/gid/egid/groups[8]` now live in `struct process_owner`, shared across all tasks of a process by identity (~1 KiB removed from every `struct tcb`). |
+| `sched_clone_thread` & `nat_task_spawn` | **Implemented (2026-11-26)**: threads genuinely share the process-owned descriptor, capability, CWD, and credential tables with zero copy/retain loops; secondary task exit leaves process descriptors open until final process exit. |
+| `MAX_THREADS=64` (`PROC_PID_SLOTS=64`, `MAX_OPEN_FILES=128`), order-2 16-KiB kernel stacks | Widened 64-slot task/owner/exit/`/proc` pools (BISECT cap removed); virtual guard-paged stacks remain future scaling work. |
+| `cfs_root[cpu]`, `rq_steal`, load-aware enqueue, idle-CPU IPI wakeups, atomic `cpu_sti_hlt` | **Sharded (2026-11-26)**: per-CPU `rq_locks[cpu]` + per-CPU `cfs_min_vr_cpu[cpu]` (with vruntime normalization on steal); `sched_tick` and `sched_yield` run purely under `rq_locks[cpu]` with zero global `sched_run_lock` hold, cutting SMP4 global state-lock acquisitions 170x (1.58M -> 9,290) and contention 192x (1,153 -> 6). BSP idle yields execute atomic `sti; hlt` instead of `cli/sti` spin. |
+| `schedule_tail` / `sched_finish_switch` | Stack handoff completes under per-CPU `rq_locks[cpu]`; exiting stack `pmm_free_pages` runs lock-free after `rq_locks[cpu]` release, followed by brief `sched_run_lock` `resident` decrement (`sched_run_lock -> rq_locks[low..high]` order preserved). |
+| `sched_park_prepare_deadline` / `sched_park_commit` / `sched_expire_timers_tick` | **Implemented (2026-11-26)**: per-task monotonic deadline timers (`deadline_ns` / `deadline_ticks` + private `timer_chan`), waking only expired sleepers with zero shared-channel wake floods; wired into `nanosleep`, `futex(FUTEX_WAIT)` (`ETIMEDOUT`), `select`/`poll`/`epoll_wait`, and native objects. |
+| `mem/as.c`: address spaces, COW, `as_fork_h`, `VMA_PHYS`, `unmap_present_pages` | **Fixed (2026-11-26)**: fixed the 1-page-per-fork PML4 leak (`as_fork_h` no longer double-initializes via `as_create` + `as_cow_clone`), fixed multi-AS `VMA_PHYS` refcount underflow UAF, and wired 64-page batched `as_shootdown_range` before `pmm_free_page` in `unmap_present_pages`. VMCC proves exact 0-page drift. |
 | `kernel/uproc.c: sys_execve`, `kernel/syscall.c: proc_terminate`, `kernel/proc.c`: exit records/wait4 | Leader exit currently publishes process exit/reparents even with peers alive; secondary exits skip process notification. Refcounting AS is not a process lifecycle. Exec/group-exit and shared ownership must be specified together before exposing process-scoped native handles. |
 
 ## 2. Execution choice: 1:1 first, optional M:N above it
@@ -206,37 +203,51 @@ mutexes only outside scheduler spinlocks. Priority inheritance is a later,
 separate decision; initial API documents no PI, tests bounded basic scheduling
 without pretending that prevents real-time priority inversion.
 
-## 7. Implemented first slice and deliberately closed boundary
+## 7. Implemented native kernel core and boundaries (updated 2026-11-26)
 
-`kernel/native.c` now supplies a separate native channel/object core: no VFS,
-pipe, socket, path or fd routing. Fixed pools: 8 channel objects, 32 handles,
-8 u64 messages/channel. Handle records carry rights and 56-bit non-wrapping
-generations. Duplicates are independent records; creation rolls back partial
-allocation. A blocked operation pins storage; close revokes the original handle,
-wakes both directions and reclaims only after endpoints and pins drain.
-The object-lock -> scheduler-lock handoff uses `sched_sleep_unlock_spin`.
+`kernel/native.c` and `kernel/natcap.c` now implement the sharded, typed native
+object and capability subsystem across syscalls 504-508 and 513-528 (see
+[`docs/evidence/native-modern-kernel-20261126/RESULT.md`](evidence/native-modern-kernel-20261126/RESULT.md)):
 
-These IDs are **kernel-private trusted references, not secure process-relative
-capabilities**. Since this first slice, the process-relative capability
-namespace (gate 2, kernel/natcap.c, syscalls 504-508) and the native robust
-mutex (gate 3, section 6; syscalls 513-517) have been implemented ON TOP of
-this core — see docs/evidence/native-caps-20261121/RESULT.md and
-docs/evidence/native-mutex-20261122/RESULT.md. Still unimplemented: deadlines,
-select, endpoint transfer, per-process cleanup beyond the exit walk,
-goroutine-scale tasks. The single pool spinlock is bounded but serializes
-independent channels; split registry/pin and per-object locks only after the
-model is tested.
-Run `python3 scripts/test_native_objects.py` (also included by `make test`);
-serial evidence is retained per SMP count in `build/native-object-tests/`.
-The test runs one QEMU at a time with `-nic none` and a fresh disposable disk.
+* **Scaled & lock-sharded object core (`kernel/native.c`)**: 64 typed objects
+  (`NC_CHANNEL`, `NC_MUTEX`, `NC_TASK`, `NC_PROC`), 256 kernel handles with
+  48-bit non-wrapping generations, and 32 process-relative capability slots per
+  process (`NAT_CAPS=32`). Locking is split into a pure leaf registry lock
+  (`nc_reg_lock`) plus per-object spinlocks (`nc_obj_locks[64]`), ordered
+  `nc_obj_locks[low..high] -> {nc_reg_lock, sched_run_lock}` so independent
+  channels and mutexes run concurrently across CPUs without cross-object
+  serialization.
+* **Monotonic absolute deadlines (`518-520`, `futex`, `nanosleep`)**: `0` =
+  nonblocking poll (`EAGAIN`), `~0ULL` = infinite, `1..0x7FFFFFFFFFFFFFFFULL` =
+  monotonic `tsc_ns` deadline (`ETIMEDOUT = -110`), higher values rejected with
+  `EINVAL` (overflow validation). Per-task deadlines in `sched.c` wake only
+  expired sleepers with zero shared-channel wake floods; ready work / direct
+  mutex handoffs win over racing timeouts.
+* **Bounded copied byte messages + two-phase capability transfer (`521-522`)**:
+  channels carry `0..256` copied bytes (validated and copied outside IRQ-off
+  spinlocks; short receiver buffers return `EMSGSIZE = -90` without consuming
+  the head message) plus `0..4` capabilities (`NATC_TRANSFER = 32`) supporting
+  both attenuated `DUP` and two-phase all-or-nothing `MOVE` (queue-full,
+  timeout, `EINTR`, or receiver `ENFILE` leaves sender capabilities intact;
+  final receiver close iteratively discards queued capabilities).
+* **Multi-object `nat_wait_any` (`523`)**: waits across up to 16 channel
+  (`NATW_RECV`, `NATW_SEND`), mutex (`NATW_MUTEX`), and task/process completion
+  (`NATW_DONE`) capabilities using one shared wait token, ascending object-ID
+  lock order, per-CPU rotating scan start (preventing index-0 starvation),
+  monotonic deadlines, and interruptible park-admission with full deregistration.
+* **Zero-legacy execution primitives (`524-528`)**: `nat_process_spawn` builds
+  a fresh ELF address space directly (Ramfs or Ext2, works from multithreaded
+  parents where `fork()` returns `EBUSY`), installs only explicit bootstrap
+  capabilities at deterministic slots `(1<<16)|1..k` (and optional console fds),
+  and returns an `NC_PROC` capability (`JOIN|CANCEL|INSPECT|TRANSFER`) with
+  zero POSIX `wait4` zombie residue. `nat_task_spawn` / `nat_task_exit` /
+  `nat_exec_wait` / `nat_exec_cancel` decouple 64-bit task join results from
+  immediate 16 KiB kernel-stack reclamation and provide task-scoped
+  cancellation without killing sibling tasks.
 
-Kernel callers must close owned handles before normal exit: no implicit kernel
-thread-death cleanup is provided for CHANNEL handles. The robust-mutex exit
-walk (owner death -> OWNER_DIED) IS wired for user tasks (proc_exit_task) and
-kernel threads (kthread_exit), outside scheduler spinlocks. The user-side
-asymmetry is deliberate and implemented: the process-relative capability table
-is closed by the final task exit (kernel/natcap.c), which kernel threads do not
-have — they own no table.
+Run `python3 scripts/test_native_objects.py`, `scripts/test_native_caps.py`,
+`scripts/test_native_mutex.py`, and `scripts/test_native_modern.py` (all gated
+in `make test` across SMP 1, 2, and 4).
 
 ## 8. Migration and acceptance gates
 

@@ -1,7 +1,7 @@
 ;/* fakeos - Low-level x86-64 CPU and Port I/O (Gas AT&T for fakecc) */
     .text
     .globl outb, inb, outw, inw, outl, inl
-    .globl io_wait, cpu_halt, cpu_cli, cpu_sti, cpu_pause, cpu_enable_sse
+    .globl io_wait, cpu_halt, cpu_cli, cpu_sti, cpu_sti_hlt, cpu_pause, cpu_enable_sse
 
 outb:
     mov %di, %dx
@@ -52,6 +52,11 @@ cpu_cli:
 
 cpu_sti:
     sti
+    ret
+
+cpu_sti_hlt:
+    sti
+    hlt
     ret
 
 cpu_pause:

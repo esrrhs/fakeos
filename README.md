@@ -98,6 +98,7 @@ flowchart TD
 - [x] **Local APIC 定时器初始化**：启用 IA32_APIC_BASE，建立 LAPIC MMIO 高半核映射，以 PIT 通道 2 校准 APIC Timer 分频，提供稳定的 100 Hz 周期时钟节拍（Tick）。
 
 ### 阶段二：现代内存管理子系统（Milestone 2 · PMM/VMM/Slab 已就绪）
+- [x] **原生高并发内核架构全链路落地（Per-CPU RQ 锁分片 + 高精度 Deadline 定时器 + 分片 Native 对象/字节与能力传递 + `wait_any` + 零历史包袱 `nat_process_spawn`/`nat_task_spawn` + 进程共享资源表 + 0 页泄漏修复）**：(1) **VM 零泄漏与容量基线**：修复 `as_fork_h` 双重 `as_init` 导致的每轮 fork 1 页 PML4 物理帧泄漏、多进程 `VMA_PHYS`（vDSO/DMA）引用下溢 UAF，并在 `unmap_present_pages` 补齐 64 页分批 TLB shootdown 后再释放物理页（VMCC 严格断言 0 页漂移）；移除 `BISECT` 限制恢复 `MAX_THREADS=64`（同步扩容 `/proc` `PROC_PID_SLOTS=64` 与 `MAX_OPEN_FILES=128`）及 BSP 空闲原子 `sti; hlt`。(2) **每任务高精度单调 Deadline 定时器**：`sched.c` 引入私有 `timer_chan` + `deadline_ns`/`deadline_ticks` 到期精准唤醒（消除共享通道惊群与 `nanosleep` busy-yield 空转），统一打通 `nanosleep`、`futex(FUTEX_WAIT)` 超时（`ETIMEDOUT`）、`select`/`poll`/`epoll_wait` 及原生对象绝对单调截止期（`518-520`）。(3) **Native 核心扩容、每对象细粒度锁、定界字节消息与二阶段能力传递**：扩容至 `NC_OBJECTS=64, NC_HANDLES=256, NAT_CAPS=32`，拆分为纯叶子注册锁 `nc_reg_lock` + 每对象锁 `nc_obj_locks[64]`；新增 `nat_chan_send_msg/recv_msg`（`521-522`）支持锁外拷贝的 `0..256B` 负载（短缓冲 `EMSGSIZE` 窥探不丢包）与最多 4 个能力的权限衰减 `DUP` 及二阶段全有全无 `MOVE`。(4) **原生多对象多路复用 `nat_wait_any`（`523`）**：按对象 ID 升序加锁、单共享等待令牌跨 channel/mutex/task/proc 原子重检挂载、每核轮转扫描防低位饥饿。(5) **零历史包袱执行原语（`524-528`）与进程级共享资源表**：`nat_process_spawn` 支持在多线程父进程中免 `fork` COW 直接从 Ramfs/Ext2 ELF 构建隔离进程并注入显式初始能力（零环境句柄泄漏、零 `wait4` 僵尸残留）；`nat_task_spawn/exit/exec_wait/exec_cancel` 将 64 位任务返回值与 16KiB 内核栈即时回收解耦并支持单任务精准取消；`fd[16]`（带 `FD_RESERVED` 与 `pinned_fh`/`deferred_close` 防并发 `close` UAF）、`cwd`、环境变量与凭证收归 `process_owner` 真正跨线程共享（每个 TCB 缩减逾 1KiB）。(6) **Per-CPU Runqueue 锁分片**：拆分 `rq_locks[cpu]` 与全局状态锁，`sched_tick`/`sched_yield`/上下文切换完全脱离全局锁，SMP4 实测全局锁获取降 170 倍（158 万→9,290）、竞争降 192 倍（1,153→6）。9 步用户探针 SMP1/2/4 全绿入 `make test`（`docs/evidence/native-modern-kernel-20261126/`）。
 - [x] **原生健壮互斥锁（P1 · 架构 §6 / gate 3）**：native 核心新增 NC_MUTEX 类型对象（与 channel 同池同锁同 pin 生命周期），owner 身份=永不回收的 pid 分配器 tid（架构要求：非 PID/非可回收 TCB 槽位）；不可重入（自锁 EDEADLK/非 owner 解锁 EPERM）、有界 FIFO 等待队列 **unlock 时直接交接队列头（新来者无法 barging）**、阻塞路径走 park-admission（致命取消 EINTR）；**robustness**：任务退出在调度器自旋锁外遍历其持有的互斥锁→OWNER_DIED→下一个获取者必须 consistent() 否则 unlock 毒化为 ENOTRECOVERABLE（终态）；**锁着关掉最后一个 cap 不销毁**（owner 引用存活至 unlock/死亡）；fork 继承零改动（rights 原样复制）。内核自测 5 段 + 用户探针 8 步（含跨进程 FIFO 交接以发布 owner pid 证明、kill-while-blocked 队列展开、跨进程 owner 死亡恢复/毒化链、close-while-locked 排空 + 对象池基线恢复），SMP1/2 全绿入 make test（`docs/evidence/native-mutex-20261122/`）。
 - [x] **任务池扩容 32→64 槽（P0-10 第一步）**：MAX_THREADS/MAX_EXIT 64——threads/owner 表/idle 标记全随常量缩放（内核栈本就 per-task 动态分配），lifetime 簇 64 克隆确定性耗尽+回收验证；fork 准入限额随池缩放（`sched_fork_proc_limit` = 64-8）；64 槽 lifetime 风暴 `bounded task exhaustion created=61 rollback+reuse OK`（SMP1/2，`docs/evidence/pool-widen-20261122/`）。
 - [x] **fork 准入限额（P0-9）**：`sched_live_process_count`（owner 表 live 计数）+ fork 路径 24 进程显式限额——耗尽返回确定性 EAGAIN（旧实现依赖哪个资源先耗尽的隐式失败），ENOMEM/EAGAIN 错误码区分；探针验证确定性限额 + 逐个回收 + 槽位恢复（SMP1/2，`scripts/test_rlimit.py` 入 make test）；P0-4 内核抢占经核对**已存在**（tick 抢占内核任务有专测）从计划划掉；P0-3 步骤 3 完整分片经决策记录**依赖 P0-10 进程模型分片**（pick 需与全局状态转换互斥）排在 P0-10 之后（`docs/evidence/rlimit-20261121/`）。
@@ -542,7 +543,7 @@ make clean    # 清理所有构建中间文件与产物（含 m5stage 与 build/
 
 ### 完整自举的输出存储
 
-`kbuild` 现在重编并逐字节核对全部 **40** 个内核模块（包括末尾的
+`kbuild` 现在重编并逐字节核对全部 **43** 个内核模块（包括末尾的
 `kmain`），将内核链接到 **`/mnt/fakeos-new`**。完整用户空间使输出已超过
 21 MiB，因此需要挂载有足够空闲空间的 Ext2 卷；16 MiB 上限的 Ramfs
 不适合作为这个构建产物的存储。既有 Ramfs 上限和分配器没有为此扩大。
@@ -553,14 +554,9 @@ make clean    # 清理所有构建中间文件与产物（含 m5stage 与 build/
 覆盖开发者已有的 `build/disk.img`。测试仍实际在 OS 内编译、链接，再通过
 `dumpbin /mnt/fakeos-new` 导出完整镜像并二次启动；不省略模块或验收步骤。
 
-### 原生多核任务与通信：设计和当前边界
+### 原生多核任务与通信：设计和当前实现
 
-[内核架构决策记录](docs/native-kernel-architecture.md) 将进程定义为隔离及资源域、
-任务定义为调度实体；先采用可抢占的内核 1:1 任务，保留未来用户态 M:N 运行时空间。
-目标 IPC 是带类型及权限的原生对象/能力句柄，不将 pipe/socket 换名。
-
-首个实现 `kernel/native.c` 目前**仅供内核使用**：代际句柄、独立读写权限、
-有界 channel、原子阻塞唤醒、关闭撤销及引用回收。尚没有跨进程用户态能力表、
-原生健壮 mutex、超时或 select，不能将内核内部 ID 直接暴露成用户句柄。
-`python3 scripts/test_native_objects.py` 在无 NIC 的 SMP 1/2/4 来宾中依次测试，
-也已加入 `make test`；它不将内核线程测试冒充跨进程通信验收。
+[内核架构决策记录](docs/native-kernel-architecture.md) 将进程定义为隔离及资源域（拥有地址空间、32 槽原生能力表、共享文件描述符表与工作目录/凭证）、
+任务定义为 1:1 可抢占多核调度实体（每核独立 `rq_locks[cpu]` CFS + 层级 `task_group` 红黑树），保留未来用户态 M:N 运行时空间。
+原生 IPC 与执行原语基于 `kernel/native.c` 与 `kernel/natcap.c`（syscalls 504-508、513-528）：支持每对象细粒度自旋锁、单调时钟纳秒级绝对截止期（`ETIMEDOUT`）、`0..256B` 定界拷贝消息、跨进程二阶段原子能力传递（`DUP` 权限衰减与全有全无 `MOVE`）、原生健壮互斥锁、多对象公平多路复用 `nat_wait_any`，以及零 `fork+exec` 历史包袱的 `nat_process_spawn` / `nat_task_spawn` / `nat_exec_wait` / `nat_exec_cancel`。
+`scripts/test_native_objects.py`、`scripts/test_native_caps.py`、`scripts/test_native_mutex.py` 与 `scripts/test_native_modern.py` 在 SMP 1/2/4 来宾中依次完成内核与跨进程用户态端到端验收，并全部纳入 `make test` 门禁。

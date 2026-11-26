@@ -19,6 +19,11 @@ extern u32 kthread_create(u64 entry, u64 arg);
 extern u32 kthread_create_user(u64 entry_rip, u64 user_rsp, u64 as_h, u32 pid);
 extern u32 sched_alloc_pid(void);
 extern void sched_yield(void);
+extern void sched_park_prepare(u64 chan);
+extern void sched_park_abort(void);
+extern void sched_timer_arm_ticks(u64 abs_ticks);
+extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
+extern void sched_wakeup(u64 chan);
 extern void kthread_exit(void);
 extern u64 sched_clock_ticks(void);
 extern void sched_set_cmdline_argv(u32 argc, const char *argbuf);
@@ -70,6 +75,7 @@ void uproc_note_exit(u32 pid, u64 code) {
     } else {
         uproc_test_exits++;
     }
+    sched_wakeup((u64)&uproc_pid1_done);
 }
 
 /* ---------------------------------------------------------------------------
@@ -433,7 +439,14 @@ static void uproc_monitor(u64 arg) {
 
     while (uproc_test_exits < UPROC_TEST_CHILDREN
            && sched_clock_ticks() < start_ticks + MONITOR_PHASE1_TICKS) {
-        sched_yield();
+        sched_park_prepare((u64)&uproc_pid1_done);
+        if (uproc_test_exits >= UPROC_TEST_CHILDREN
+            || sched_clock_ticks() >= start_ticks + MONITOR_PHASE1_TICKS) {
+            sched_park_abort();
+            break;
+        }
+        sched_timer_arm_ticks(start_ticks + MONITOR_PHASE1_TICKS);
+        (void)sched_park_commit((u64)&uproc_pid1_done, 0);
     }
 
     kprintf("\n[UPROC] Monitor: %u COW test children exited\n",
@@ -462,7 +475,14 @@ static void uproc_monitor(u64 arg) {
      * running on its own thread. */
     while (!uproc_pid1_done
            && sched_clock_ticks() < start_ticks + MONITOR_PHASE2_TICKS) {
-        sched_yield();
+        sched_park_prepare((u64)&uproc_pid1_done);
+        if (uproc_pid1_done
+            || sched_clock_ticks() >= start_ticks + MONITOR_PHASE2_TICKS) {
+            sched_park_abort();
+            break;
+        }
+        sched_timer_arm_ticks(start_ticks + MONITOR_PHASE2_TICKS);
+        (void)sched_park_commit((u64)&uproc_pid1_done, 0);
     }
     if (uproc_pid1_done) {
         kprintf("[UPROC] pid 1 (init -> /bin/sh) exited cleanly\n");
@@ -534,6 +554,167 @@ void uproc_selftest(void) {
     while (!uproc_done) {
         sched_yield();
     }
+}
+
+/* Parse user path + argv + envp and build a fresh runnable ELF address space
+ * without touching the caller's address space (supports both Ramfs & Ext2).
+ * All inputs/outputs pass via one struct pointer (<=4 args fakecc rule). */
+struct uproc_spawn_img {
+    u64 path_u;
+    u64 argv_u;
+    u64 envp_u;
+    u64 out_entry;
+    u64 out_sp;
+    u64 out_as_h;
+    char cmdline[128];
+    u32 cmdline_len;
+    char environ[256];
+    u32 environ_len;
+};
+
+u32 uproc_prepare_spawn_image(struct uproc_spawn_img *img) {
+    char path[EXEC_PATH_MAX];
+    char argbuf[EXEC_MAX_ARGC * EXEC_ARG_SLOT];
+    char envbuf[EXEC_MAX_ENVC * EXEC_ARG_SLOT];
+    u32 argc = 0;
+    u32 envc = 0;
+    u64 as;
+    u32 i;
+    u32 ok = 0;
+
+    if (img == 0) return 0;
+    as = sched_current_as_h();
+    if (as == 0 || !copy_user_path_follow(path, img->path_u, 1)) {
+        return 0;
+    }
+
+    if (img->argv_u == 0) {
+        char *dst = argbuf;
+        u32 k = 0;
+        while (path[k] != 0 && k < EXEC_ARG_SLOT - 1) {
+            dst[k] = path[k];
+            k = k + 1;
+        }
+        dst[k] = 0;
+        argc = 1;
+    } else {
+        for (i = 0; i <= EXEC_MAX_ARGC; i++) {
+            u64 slot_uva = img->argv_u + (u64)i * 8;
+            u64 p = 0;
+            char *dst;
+            if (slot_uva < img->argv_u || !read_user_u64(as, slot_uva, &p)) {
+                return 0;
+            }
+            if (p == 0) break;
+            if (i == EXEC_MAX_ARGC) return 0;
+            dst = argbuf + (u64)argc * EXEC_ARG_SLOT;
+            if (!copy_user_cstring(dst, p, EXEC_ARG_SLOT - 1)) return 0;
+            argc = argc + 1;
+        }
+    }
+
+    if (img->envp_u != 0) {
+        for (i = 0; i <= EXEC_MAX_ENVC; i++) {
+            u64 slot_uva = img->envp_u + (u64)i * 8;
+            u64 p = 0;
+            char *dst;
+            if (slot_uva < img->envp_u || !read_user_u64(as, slot_uva, &p)) {
+                return 0;
+            }
+            if (p == 0) break;
+            if (i == EXEC_MAX_ENVC) return 0;
+            dst = envbuf + (u64)envc * EXEC_ARG_SLOT;
+            if (!copy_user_cstring(dst, p, EXEC_ARG_SLOT - 1)) return 0;
+            envc = envc + 1;
+        }
+    }
+
+    if (fs.ext2_is_mnt_path(path)) {
+        u32 ino = 0;
+        u32 mode = 0;
+        u64 fsz = 0;
+        u32 nlink = 0;
+        u32 fh;
+        void *kbuf;
+        if (!fs.ext2_mounted()
+            || !fs.ext2_stat_path(path, &ino, &mode, &fsz, &nlink)) {
+            return 0;
+        }
+        if ((mode & 0xF000) != 0x8000 || fsz == 0 || fsz > 4194304ULL) {
+            return 0;
+        }
+        fh = fs.ext2_open_mode(path, 0, 0);
+        if (fh == 0) return 0;
+        kbuf = mem.kmalloc(fsz);
+        if (kbuf == 0) {
+            fs.ext2_close(fh);
+            return 0;
+        }
+        if (fs.ext2_read(fh, (char *)kbuf, fsz) == fsz) {
+            ok = proc_build_image((u64)kbuf, fsz, argc, argbuf, envc, envbuf,
+                                  &img->out_entry, &img->out_sp, &img->out_as_h);
+        }
+        mem.kfree(kbuf);
+        fs.ext2_close(fh);
+    } else {
+        u32 ino = fs.fs_lookup(path);
+        u64 kva;
+        u64 fsz;
+        if (fs.fs_ino_kind(ino) != EXEC_INO_FILE) return 0;
+        kva = fs.fs_ino_data(ino);
+        fsz = fs.fs_ino_size(ino);
+        if (kva == 0 || fsz == 0) return 0;
+        ok = proc_build_image(kva, fsz, argc, argbuf, envc, envbuf,
+                              &img->out_entry, &img->out_sp, &img->out_as_h);
+    }
+    if (!ok) return 0;
+
+    /* Format cmdline & environ snapshots for the new process_owner. */
+    {
+        u32 at = 0;
+        for (i = 0; i < argc && at < 127; i++) {
+            const char *s = argbuf + (u64)i * EXEC_ARG_SLOT;
+            u32 k = 0;
+            while (s[k] != 0 && at < 127) {
+                img->cmdline[at] = s[k];
+                at = at + 1;
+                k = k + 1;
+            }
+            if (i + 1 < argc && at < 127) {
+                img->cmdline[at] = 0;
+                at = at + 1;
+            }
+        }
+        img->cmdline[at] = 0;
+        img->cmdline_len = at;
+    }
+    if (envc == 0) {
+        static const char defenv[] = {
+            'F','A','K','E','C','C','_','P','K','G','=','/','s','r','c', 0,
+            'F','A','K','E','C','C','_','R','T','C','A','C','H','E','=','0'
+        };
+        for (i = 0; i < 32; i++) img->environ[i] = defenv[i];
+        img->environ[32] = 0;
+        img->environ_len = 32;
+    } else {
+        u32 at = 0;
+        for (i = 0; i < envc && at < 255; i++) {
+            const char *s = envbuf + (u64)i * EXEC_ARG_SLOT;
+            u32 k = 0;
+            while (s[k] != 0 && at < 255) {
+                img->environ[at] = s[k];
+                at = at + 1;
+                k = k + 1;
+            }
+            if (i + 1 < envc && at < 255) {
+                img->environ[at] = 0;
+                at = at + 1;
+            }
+        }
+        img->environ[at] = 0;
+        img->environ_len = at;
+    }
+    return 1;
 }
 
 /* Internal boot regression child builder. Arm before publication; all argv is

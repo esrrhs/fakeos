@@ -87,6 +87,7 @@ extern u64 cpu_irq_save(void);
 extern void cpu_irq_restore(u64 flags);
 extern void sched_wakeup(u64 chan);
 extern void sched_park_prepare(u64 chan);
+extern void sched_timer_arm_ticks(u64 abs_ticks);
 extern u32 sched_park_commit_unlock_spin(u64 chan, volatile u32 *lock, u32 nonrestartable);
 extern u32 sched_park_commit(u64 chan, u32 nonrestartable);
 extern void sched_park_abort(void);
@@ -514,6 +515,9 @@ u64 sys_epoll_wait(u64 epfd, u64 events_u, u64 maxevents, u64 timeout_ms) {
          * BEFORE sleeping; a readiness producer's select_kick() either finds
          * the published sleeper or latches park_notify (PARK_WOKEN). */
         sched_park_prepare((u64)&ep->wait_token);
+        if ((i64)timeout_ms >= 0) {
+            sched_timer_arm_ticks(deadline);
+        }
         if (sched_park_commit((u64)&ep->wait_token, 1) == EV_PARK_INTR) {
             return (u64)EV_INTR;
         }

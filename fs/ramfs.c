@@ -66,16 +66,16 @@ enum {
      * a dir + status/maps/cmdline/environ, bound to a live pid on lookup. */
     PROC_PID_BASE    = 64,
     PROC_PID_STRIDE  = 5,
-    PROC_PID_SLOTS   = 32,
+    PROC_PID_SLOTS   = 64,
     ZERO_INO    = 61,              /* fixed /dev/zero inode */
     NULL_INO    = 62,              /* fixed /dev/null inode */
     CONSOLE_INO = 63,
-    MAX_INODES  = 512,            /* daily-driver /bin + init leftovers neared 256 */
+    MAX_INODES  = 680,            /* 512 + 32*5 extra /proc/<pid> slots */
     MAX_DENTS   = 256,            /* /bin ~115 + /tmp selftest debris + M5 outputs */
     NAME_LEN    = 32,               /* 31 usable chars + NUL */
     NAME_MAX    = 31,
 
-    MAX_OPEN_FILES = 64,
+    MAX_OPEN_FILES = 128,
     CONSOLE_FH     = 1,            /* permanent slot, fd 0/1/2 point at it */
     FH_BAD         = 0,
 
