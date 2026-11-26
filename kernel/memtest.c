@@ -446,6 +446,8 @@ static volatile u32 slabcc_ring_head;
 enum { SLABCC_RING = 256 };
 static void *slabcc_ring[SLABCC_RING];
 static u64 slabcc_allocs[4];
+static struct slabcc_worker_arg slabcc_args[4];
+extern void sched_yield(void);
 
 static void slabcc_worker(u64 arg) {
     struct slabcc_worker_arg *a = (struct slabcc_worker_arg *)arg;
@@ -453,6 +455,9 @@ static void slabcc_worker(u64 arg) {
     u32 iters = a->iters;
     u32 i;
     u64 mine = 0;
+    while (!slabcc_start) {
+        sched_yield();
+    }
     for (i = 0; i < iters; i++) {
         /* Burst of one class: 40 allocations forces the per-CPU cache to
          * empty and refill mid-burst (cache depth 32). */
@@ -508,7 +513,6 @@ static int test_slab_concurrent(void) {
     extern u64 sched_clock_ticks(void);
     extern u32 sched_thread_state(u32 id);
     extern u32 smp_cpu_count(void);
-    struct slabcc_worker_arg args[WORKERS];
     u32 ids[WORKERS];
     u32 i;
     u64 until;
@@ -525,9 +529,9 @@ static int test_slab_concurrent(void) {
     for (i = 0; i < 8; i++) { fa[i] = 0; ff[i] = 0; rf[i] = 0; fl[i] = 0; }
 
     for (i = 0; i < WORKERS; i++) {
-        args[i].id = i;
-        args[i].iters = ITERS;
-        ids[i] = kthread_create((u64)&slabcc_worker, (u64)&args[i]);
+        slabcc_args[i].id = i;
+        slabcc_args[i].iters = ITERS;
+        ids[i] = kthread_create((u64)&slabcc_worker, (u64)&slabcc_args[i]);
         if (ids[i] == 0xFFFFFFFFu) {
             kprintf("      [FAIL] worker %u spawn failed\n", (u64)i);
             return 0;
